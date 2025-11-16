@@ -27,7 +27,7 @@ from src.utils import RedisClient, SyncRedisClient, setup_logging
 from src.tools import register_tools
 
 # Version information - bump this when releasing new versions
-VERSION = "0.2.0-beta"
+VERSION = "0.3.0-beta"
 
 # Global service instances
 services = {}

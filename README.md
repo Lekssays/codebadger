@@ -75,11 +75,6 @@ Add the following:
 - `generate_cpg`: Generate a CPG for a codebase (from local path or GitHub URL)
 - `get_cpg_status`: Get status and existence of a CPG by `codebase_hash`
 - `run_cpgql_query`: Execute CPGQL queries (synchronous)
-- `list_methods`: Discover methods/functions (by codebase)
-- `get_method_source`: Retrieve method source code
-- `list_calls`: Find function call relationships
-- `get_call_graph`: Build call graphs
-- `list_parameters`: Get parameter information
 
 ### Code Browsing Tools
 - `get_codebase_summary`: Get codebase overview
