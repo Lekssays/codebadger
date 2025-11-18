@@ -1080,7 +1080,7 @@ def register_code_browsing_tools(mcp, services: dict):
         codebase_hash: str,
         query: str,
         timeout: Optional[int] = None,
-        limit: Optional[int] = 150,
+        validate: bool = False,
     ) -> Dict[str, Any]:
         """
         Execute a raw CPGQL query against the codebase.
@@ -1092,17 +1092,23 @@ def register_code_browsing_tools(mcp, services: dict):
             codebase_hash: The session ID from create_cpg_session
             query: The CPGQL query string to execute
             timeout: Optional timeout in seconds (default: 30)
-            limit: Optional maximum number of results to return (default: 150)
+            validate: If true, validate query syntax before executing (default: false)
 
         Returns:
             {
                 "success": true,
                 "stdout": "raw stdout output",
                 "stderr": "raw stderr output if any",
-                "execution_time": 1.23
+                "execution_time": 1.23,
+                "validation": {...},  # included if validate=true
+                "suggestion": "helpful hint if error occurs"
             }
         """
         try:
+            from ..utils.cpgql_validator import CPGQLValidator, QueryTransformer
+            import time
+            from ..services.joern_client import JoernServerClient
+            
             validate_codebase_hash(codebase_hash)
 
             if not query or not query.strip():
@@ -1116,10 +1122,22 @@ def register_code_browsing_tools(mcp, services: dict):
             if not codebase_info or not codebase_info.cpg_path:
                 raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
 
+            # Validate query if requested
+            validation_result = None
+            if validate:
+                validation_result = CPGQLValidator.validate_query(query.strip())
+                if not validation_result['valid'] and validation_result['errors']:
+                    return {
+                        "success": False,
+                        "validation": validation_result,
+                        "error": {
+                            "code": "VALIDATION_ERROR",
+                            "message": "Query validation failed",
+                            "details": validation_result['errors'],
+                        },
+                    }
+
             # Execute the query directly via Joern client to get raw stdout/stderr
-            import time
-            from ..services.joern_client import JoernServerClient
-            
             start_time = time.time()
             
             port = query_executor.joern_server_manager.get_server_port(codebase_hash)
@@ -1136,12 +1154,30 @@ def register_code_browsing_tools(mcp, services: dict):
             
             execution_time = time.time() - start_time
             
-            return {
+            response = {
                 "success": result.get("success", False),
                 "stdout": result.get("stdout", ""),
                 "stderr": result.get("stderr", ""),
                 "execution_time": execution_time,
             }
+            
+            # If validation was requested, include it in response
+            if validate and validation_result:
+                response["validation"] = validation_result
+            
+            # If query failed, try to provide helpful suggestions
+            if not response["success"] and response["stderr"]:
+                stderr = response["stderr"]
+                error_suggestion = CPGQLValidator.get_error_suggestion(stderr)
+                if error_suggestion:
+                    response["suggestion"] = error_suggestion
+                    response["help"] = {
+                        "description": error_suggestion.get("description"),
+                        "solution": error_suggestion.get("solution"),
+                        "examples": error_suggestion.get("examples", [])[:3],  # First 3 examples
+                    }
+            
+            return response
 
         except ValidationError as e:
             logger.error(f"Error executing CPGQL query: {e}")
@@ -1391,6 +1427,114 @@ def register_code_browsing_tools(mcp, services: dict):
             }
         except Exception as e:
             logger.error(f"Unexpected error: {e}", exc_info=True)
+            return {
+                "success": False,
+                "error": {"code": "INTERNAL_ERROR", "message": str(e)},
+            }
+
+    @mcp.tool()
+    def get_cpgql_syntax_help() -> Dict[str, Any]:
+        """
+        Get comprehensive CPGQL syntax help and examples.
+
+        Provides syntax documentation, common patterns, node types, and error solutions
+        for CPGQL query writing.
+
+        Returns:
+            {
+                "success": true,
+                "syntax_helpers": {
+                    "string_matching": [...],
+                    "common_patterns": {...},
+                    "node_types": [...]
+                },
+                "error_guide": {...},
+                "quick_reference": {...}
+            }
+        """
+        try:
+            from ..utils.cpgql_validator import CPGQLValidator
+            
+            helpers = CPGQLValidator.get_syntax_helpers()
+            
+            return {
+                "success": True,
+                "syntax_helpers": helpers,
+                "error_guide": {
+                    "common_errors": [
+                        {
+                            "error": "matches is not a member of Iterator[String]",
+                            "cause": "Trying to call .matches() directly on a stream",
+                            "solution": "Use .filter() with lambda: .filter(_.property.matches(\"regex\"))",
+                            "examples": [
+                                "cpg.method.filter(_.name.matches(\"process.*\")).l",
+                                "cpg.call.filter(_.code.matches(\".*malloc.*\")).l",
+                            ]
+                        },
+                        {
+                            "error": "value contains is not a member",
+                            "cause": "Substring matching syntax error",
+                            "solution": "Use inside filter lambda: .filter(_.property.contains(\"text\"))",
+                            "examples": [
+                                "cpg.literal.filter(_.code.contains(\"password\")).l",
+                                "cpg.call.filter(_.code.contains(\"system\")).l",
+                            ]
+                        },
+                        {
+                            "error": "not found: value _",
+                            "cause": "Lambda syntax error or invalid property access",
+                            "solution": "Ensure lambda uses underscore: _ (not $, @, or other symbols)",
+                            "examples": [
+                                "cpg.method.filter(_.name.nonEmpty).l",
+                                "cpg.call.where(_.method.name != \"\").l",
+                            ]
+                        },
+                        {
+                            "error": "Unmatched closing parenthesis",
+                            "cause": "Syntax error - mismatched parentheses",
+                            "solution": "Count opening and closing parentheses - they must match",
+                            "examples": [
+                                "cpg.method.filter(_.name.matches(\"test.*\")).l",
+                            ]
+                        },
+                    ],
+                    "tips": [
+                        "Always use .l or .toJsonPretty at the end to get results",
+                        "Use .filter(_) or .where(_) with underscore lambda for conditions",
+                        "String literals in filter need quotes: filter(_.name == \"value\")",
+                        "Regex patterns must be in quotes and escaped: \".*pattern.*\"",
+                        "For better performance, filter before calling .l",
+                    ]
+                },
+                "quick_reference": {
+                    "string_methods": {
+                        "exact_match": '.name("exactString")',
+                        "regex_match": '.filter(_.name.matches("regex.*"))',
+                        "substring_match": '.filter(_.code.contains("substring"))',
+                        "case_insensitive": '.filter(_.name.toLowerCase.matches("pattern.*"))',
+                        "not_empty": '.filter(_.name.nonEmpty)',
+                        "equals": '.filter(_.name == "value")',
+                        "not_equals": '.filter(_.name != "value")',
+                    },
+                    "common_node_properties": {
+                        "method": ["name", "filename", "signature", "lineNumber", "isExternal"],
+                        "call": ["name", "code", "filename", "lineNumber"],
+                        "literal": ["code", "typeFullName", "filename", "lineNumber"],
+                        "parameter": ["name", "typeFullName", "index"],
+                        "file": ["name", "hash"],
+                    },
+                    "result_formatting": {
+                        "json_pretty": '.toJsonPretty  # Pretty-printed JSON',
+                        "json_compact": '.toJson  # Compact JSON',
+                        "list": '.l  # Scala list (automatically formatted)',
+                        "count": '.size  # Get count as number',
+                        "single_item": '.head  # Get first result',
+                        "optional": '.headOption  # Get optional first result',
+                    }
+                }
+            }
+        except Exception as e:
+            logger.error(f"Error getting CPGQL syntax help: {e}", exc_info=True)
             return {
                 "success": False,
                 "error": {"code": "INTERNAL_ERROR", "message": str(e)},

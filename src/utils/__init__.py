@@ -15,6 +15,7 @@ from .validators import (
     validate_source_type,
     validate_timeout,
 )
+from .cpgql_validator import CPGQLValidator, QueryTransformer
 
 __all__ = [
     "RedisClient",
@@ -30,4 +31,6 @@ __all__ = [
     "validate_timeout",
     "setup_logging",
     "get_logger",
+    "CPGQLValidator",
+    "QueryTransformer",
 ]
