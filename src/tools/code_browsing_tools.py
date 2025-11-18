@@ -1097,8 +1097,8 @@ def register_code_browsing_tools(mcp, services: dict):
         Returns:
             {
                 "success": true,
-                "data": [...],  # Query results as list of dictionaries
-                "row_count": 42,
+                "stdout": "raw stdout output",
+                "stderr": "raw stderr output if any",
                 "execution_time": 1.23
             }
         """
@@ -1116,26 +1116,31 @@ def register_code_browsing_tools(mcp, services: dict):
             if not codebase_info or not codebase_info.cpg_path:
                 raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
 
-            # Execute the query using the query executor service
-            result = query_executor.execute_query(
-                codebase_hash=codebase_hash,
-                cpg_path=codebase_info.cpg_path,
-                query=query.strip(),
-                timeout=timeout or 30,
-                limit=limit,
-            )
-
-            if not result.success:
+            # Execute the query directly via Joern client to get raw stdout/stderr
+            import time
+            from ..services.joern_client import JoernServerClient
+            
+            start_time = time.time()
+            
+            port = query_executor.joern_server_manager.get_server_port(codebase_hash)
+            if not port:
                 return {
                     "success": False,
-                    "error": {"code": "QUERY_ERROR", "message": result.error},
+                    "error": {"code": "SERVER_ERROR", "message": f"No Joern server running for codebase {codebase_hash}"},
                 }
-
+            
+            joern_client = JoernServerClient(host="localhost", port=port)
+            
+            # Execute query with the provided query string as-is
+            result = joern_client.execute_query(query.strip(), timeout=timeout or 30)
+            
+            execution_time = time.time() - start_time
+            
             return {
-                "success": True,
-                "data": result.data,
-                "row_count": result.row_count,
-                "execution_time": result.execution_time,
+                "success": result.get("success", False),
+                "stdout": result.get("stdout", ""),
+                "stderr": result.get("stderr", ""),
+                "execution_time": execution_time,
             }
 
         except ValidationError as e:
