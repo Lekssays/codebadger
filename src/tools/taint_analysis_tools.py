@@ -129,7 +129,7 @@ def register_taint_analysis_tools(mcp, services: dict):
 
             return {"success": True, "sources": sources, "total": len(sources)}
 
-        except (ValidationError, ValidationError, ValidationError) as e:
+        except ValidationError as e:
             logger.error(f"Error finding taint sources: {e}")
             return {
                 "success": False,
@@ -251,7 +251,7 @@ def register_taint_analysis_tools(mcp, services: dict):
 
             return {"success": True, "sinks": sinks, "total": len(sinks)}
 
-        except (ValidationError, ValidationError, ValidationError) as e:
+        except ValidationError as e:
             logger.error(f"Error finding taint sinks: {e}")
             return {
                 "success": False,
@@ -594,7 +594,7 @@ def register_taint_analysis_tools(mcp, services: dict):
                     "message": f"Found {len(flows)} flows from source to dangerous sinks" if flows else "No flows found from source to dangerous sinks",
                 }
 
-        except (ValidationError, ValidationError, ValidationError) as e:
+        except ValidationError as e:
             logger.error(f"Error finding taint flows: {e}")
             return {
                 "success": False,
@@ -714,7 +714,7 @@ def register_taint_analysis_tools(mcp, services: dict):
                 "message": message,
             }
 
-        except (ValidationError, ValidationError, ValidationError) as e:
+        except ValidationError as e:
             logger.error(f"Error checking method reachability: {e}")
             return {
                 "success": False,
@@ -1174,7 +1174,7 @@ def register_taint_analysis_tools(mcp, services: dict):
                 "note": "Only finds EXACT expression matches, not semantic dataflow",
             }
 
-        except (ValidationError, ValidationError, ValidationError) as e:
+        except ValidationError as e:
             logger.error(f"Error finding argument flows: {e}")
             return {
                 "success": False,
@@ -1526,7 +1526,7 @@ def register_taint_analysis_tools(mcp, services: dict):
                     },
                 }
 
-        except (ValidationError, ValidationError, ValidationError) as e:
+        except ValidationError as e:
             logger.error(f"Error getting data dependencies: {e}")
             return {
                 "success": False,

@@ -125,7 +125,7 @@ def register_code_browsing_tools(mcp, services: dict):
 
             return {"success": True, "methods": methods, "total": len(methods)}
 
-        except (ValidationError, ValidationError, ValidationError) as e:
+        except ValidationError as e:
             logger.error(f"Error listing methods: {e}")
             return {
                 "success": False,
@@ -286,7 +286,7 @@ def register_code_browsing_tools(mcp, services: dict):
 
             return {"success": True, "methods": methods, "total": len(methods)}
 
-        except (ValidationError, ValidationError, ValidationError) as e:
+        except ValidationError as e:
             logger.error(f"Error getting method source: {e}")
             return {
                 "success": False,
@@ -390,7 +390,7 @@ def register_code_browsing_tools(mcp, services: dict):
 
             return {"success": True, "calls": calls, "total": len(calls)}
 
-        except (ValidationError, ValidationError, ValidationError) as e:
+        except ValidationError as e:
             logger.error(f"Error listing calls: {e}")
             return {
                 "success": False,
@@ -653,7 +653,7 @@ def register_code_browsing_tools(mcp, services: dict):
                     "error": {"code": "NO_RESULT", "message": "Query returned no results"},
                 }
 
-        except (ValidationError, ValidationError, ValidationError) as e:
+        except ValidationError as e:
             logger.error(f"Error getting call graph: {e}")
             return {
                 "success": False,
@@ -744,7 +744,7 @@ def register_code_browsing_tools(mcp, services: dict):
 
             return {"success": True, "methods": methods, "total": len(methods)}
 
-        except (ValidationError, ValidationError, ValidationError) as e:
+        except ValidationError as e:
             logger.error(f"Error listing parameters: {e}")
             return {
                 "success": False,
@@ -846,7 +846,7 @@ def register_code_browsing_tools(mcp, services: dict):
 
             return {"success": True, "literals": literals, "total": len(literals)}
 
-        except (ValidationError, ValidationError, ValidationError) as e:
+        except ValidationError as e:
             logger.error(f"Error finding literals: {e}")
             return {
                 "success": False,
@@ -952,7 +952,7 @@ def register_code_browsing_tools(mcp, services: dict):
 
             return {"success": True, "summary": summary}
 
-        except (ValidationError, ValidationError, ValidationError) as e:
+        except ValidationError as e:
             logger.error(f"Error getting codebase summary: {e}")
             return {
                 "success": False,
@@ -1063,7 +1063,7 @@ def register_code_browsing_tools(mcp, services: dict):
                 "code": code,
             }
 
-        except (ValidationError, ValidationError, ValidationError) as e:
+        except ValidationError as e:
             logger.error(f"Error getting code snippet: {e}")
             return {
                 "success": False,
@@ -1138,7 +1138,7 @@ def register_code_browsing_tools(mcp, services: dict):
                 "execution_time": result.execution_time,
             }
 
-        except (ValidationError, ValidationError, ValidationError) as e:
+        except ValidationError as e:
             logger.error(f"Error executing CPGQL query: {e}")
             return {
                 "success": False,
@@ -1214,11 +1214,120 @@ def register_code_browsing_tools(mcp, services: dict):
             if not codebase_info or not codebase_info.cpg_path:
                 raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
 
-            # Build the Joern query to find buffer access and bounds checks
-            # Use a simpler single-expression approach that Joern REPL can execute
-            query_template = r"""cpg.call.name("<operator>.indirectIndexAccess").where(_.file.name(".*FILENAME_PLACEHOLDER")).lineNumber(LINE_NUM_PLACEHOLDER).headOption.map { bufferAccess => val accessLine = bufferAccess.lineNumber.getOrElse(0); val args = bufferAccess.argument.l; val bufferName = if (args.nonEmpty) args.head.code else "unknown"; val indexExpr = if (args.size > 1) args.last.code else "unknown"; val indexVar = indexExpr.replaceAll("[^a-zA-Z0-9_].*", ""); val method = bufferAccess.method; val comparisons = method.call.name("<operator>.(lessThan|greaterThan|lessEqualsThan|greaterEqualsThan)").filter(cmp => cmp.argument.code.l.exists(_.contains(indexVar))).l; val boundsChecks = comparisons.map { cmp => val cmpLine = cmp.lineNumber.getOrElse(0); val position = if (cmpLine < accessLine) "BEFORE_ACCESS" else if (cmpLine > accessLine) "AFTER_ACCESS" else "SAME_LINE"; val cmpArgs = cmp.argument.l; val leftArg = if (cmpArgs.nonEmpty) cmpArgs.head.code else "?"; val rightArg = if (cmpArgs.size > 1) cmpArgs.last.code else "?"; val operator = cmp.name match { case "<operator>.lessThan" => "<"; case "<operator>.greaterThan" => ">"; case "<operator>.lessEqualsThan" => "<="; case "<operator>.greaterEqualsThan" => ">="; case _ => "?" }; Map("line" -> cmpLine, "code" -> cmp.code, "checked_variable" -> leftArg, "bound" -> rightArg, "operator" -> operator, "position" -> position) }; val checkBefore = comparisons.exists(cmp => cmp.lineNumber.getOrElse(0) < accessLine); val checkAfter = comparisons.exists(cmp => cmp.lineNumber.getOrElse(0) > accessLine); Map("success" -> true, "buffer_access" -> Map("line" -> accessLine, "code" -> bufferAccess.code, "buffer" -> bufferName, "index" -> indexExpr), "bounds_checks" -> boundsChecks, "check_before_access" -> checkBefore, "check_after_access" -> checkAfter) }.getOrElse(Map("success" -> false, "error" -> Map("code" -> "NOT_FOUND", "message" -> "No buffer access found at FILENAME_PLACEHOLDER:LINE_NUM_PLACEHOLDER"))).toJsonPretty"""
-            
-            query = query_template.replace("FILENAME_PLACEHOLDER", filename).replace("LINE_NUM_PLACEHOLDER", str(line_num))
+            # Build multi-line Scala query for bounds check analysis
+            query = f'''
+{{
+  def escapeJson(s: String): String = {{
+    s.replace("\\\\", "\\\\\\\\").replace("\\"", "\\\\\\"").replace("\\n", "\\\\n").replace("\\r", "\\\\r").replace("\\t", "\\\\t")
+  }}
+  
+  def extractIndexVariable(indexExpr: String): String = {{
+    indexExpr.replaceAll("[^a-zA-Z0-9_].*", "").trim
+  }}
+  
+  def getOperatorSymbol(operatorName: String): String = {{
+    operatorName match {{
+      case "<operator>.lessThan" => "<"
+      case "<operator>.greaterThan" => ">"
+      case "<operator>.lessEqualsThan" => "<="
+      case "<operator>.greaterEqualsThan" => ">="
+      case "<operator>.notEquals" => "!="
+      case "<operator>.equals" => "=="
+      case _ => "?"
+    }}
+  }}
+  
+  val filename = "{filename}"
+  val lineNum = {line_num}
+  
+  val bufferAccessOpt = cpg.call
+    .name("<operator>.indirectIndexAccess")
+    .filter(c => {{
+      val f = c.file.name.headOption.getOrElse("")
+      f.endsWith("/" + filename) || f == filename
+    }})
+    .filter(c => c.lineNumber.getOrElse(-1) == lineNum)
+    .headOption
+  
+  val resultMap = bufferAccessOpt match {{
+    case Some(bufferAccess) =>
+      val accessLine = bufferAccess.lineNumber.getOrElse(0)
+      val args = bufferAccess.argument.l
+      
+      val bufferName = if (args.nonEmpty) escapeJson(args.head.code) else "unknown"
+      val indexExpr = if (args.size > 1) escapeJson(args.last.code) else "unknown"
+      val indexVar = extractIndexVariable(args.lastOption.map(_.code).getOrElse(""))
+      
+      val method = bufferAccess.method
+      
+      val comparisons = method.call
+        .filter(c => {{
+          val name = c.name
+          name.contains("<operator>") && 
+          (name.contains("essThan") || name.contains("ualsThan") || name.contains("quals") || name.contains("otEquals"))
+        }})
+        .filter(cmp => {{
+          val cmpCode = cmp.code
+          cmpCode.contains(indexVar) || cmpCode.contains(indexExpr.replaceAll("\\\\\\\\\"", "\""))
+        }})
+        .l
+      
+      val boundsChecksList = comparisons
+        .map(cmp => {{
+          val cmpLine = cmp.lineNumber.getOrElse(0)
+          val position = if (cmpLine < accessLine) {{
+            "BEFORE_ACCESS"
+          }} else if (cmpLine > accessLine) {{
+            "AFTER_ACCESS"
+          }} else {{
+            "SAME_LINE"
+          }}
+          
+          val cmpArgs = cmp.argument.l
+          val leftArg = if (cmpArgs.nonEmpty) cmpArgs.head.code else "?"
+          val rightArg = if (cmpArgs.size > 1) cmpArgs.last.code else "?"
+          val operator = getOperatorSymbol(cmp.name)
+          
+          Map(
+            "line" -> cmpLine,
+            "code" -> escapeJson(cmp.code),
+            "checked_variable" -> escapeJson(leftArg),
+            "bound" -> escapeJson(rightArg),
+            "operator" -> operator,
+            "position" -> position
+          )
+        }})
+        .take(50)
+      
+      val checkBefore = comparisons.exists(c => c.lineNumber.getOrElse(0) < accessLine)
+      val checkAfter = comparisons.exists(c => c.lineNumber.getOrElse(0) > accessLine)
+      
+      Map(
+        "success" -> true,
+        "buffer_access" -> Map(
+          "line" -> accessLine,
+          "code" -> escapeJson(bufferAccess.code),
+          "buffer" -> bufferName,
+          "index" -> indexExpr
+        ),
+        "bounds_checks" -> boundsChecksList,
+        "check_before_access" -> checkBefore,
+        "check_after_access" -> checkAfter,
+        "index_variable" -> indexVar
+      )
+    
+    case None =>
+      Map(
+        "success" -> false,
+        "error" -> Map(
+          "code" -> "NOT_FOUND",
+          "message" -> s"No buffer access found at $filename:$lineNum"
+        )
+      )
+  }}
+  
+  List(resultMap)
+}}.toJsonPretty'''
 
             result = query_executor.execute_query(
                 codebase_hash=codebase_hash,
@@ -1269,7 +1378,7 @@ def register_code_browsing_tools(mcp, services: dict):
                     },
                 }
 
-        except (ValidationError, ValidationError, ValidationError) as e:
+        except ValidationError as e:
             logger.error(f"Error finding bounds checks: {e}")
             return {
                 "success": False,
