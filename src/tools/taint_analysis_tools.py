@@ -1258,9 +1258,205 @@ def register_taint_analysis_tools(mcp, services: dict):
             if not codebase_info or not codebase_info.cpg_path:
                 raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
 
-            # Build inline Scala query (like find_bounds_checks)
-            # Wrap in braces to avoid REPL line-by-line interpretation issues
-            query_template = r'{ def escapeJson(s: String): String = { s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t") }; val targetLine = LINE_NUM_PLACEHOLDER; val varName = "VARIABLE_PLACEHOLDER"; val direction = "DIRECTION_PLACEHOLDER"; val targetMethodOpt = cpg.method.filter(m => { val filename = m.file.name.headOption.getOrElse(""); (filename.endsWith("/FILENAME_PLACEHOLDER") || filename == "FILENAME_PLACEHOLDER") }).filter(m => { val start = m.lineNumber.getOrElse(-1); val end = m.lineNumberEnd.getOrElse(-1); start <= targetLine && end >= targetLine }).headOption; targetMethodOpt match { case Some(method) => { val dependencies = scala.collection.mutable.ListBuffer[String](); if (direction == "backward") { val inits = method.local.name(varName).map { local => "{\"line\":" + local.lineNumber.getOrElse(-1) + ",\"code\":\"" + escapeJson(local.typeFullName + " " + local.code) + "\",\"type\":\"initialization\",\"filename\":\"" + escapeJson(local.file.name.headOption.getOrElse("unknown")) + "\"}" }.l; dependencies ++= inits; val assignments = method.assignment.l.filter(assign => { val line = assign.lineNumber.getOrElse(-1); if (line >= targetLine) false else { val targetCode = assign.target.code; targetCode == varName || targetCode.startsWith(varName + "[") || targetCode.startsWith(varName + ".") } }).map { assign => "{\"line\":" + assign.lineNumber.getOrElse(-1) + ",\"code\":\"" + escapeJson(assign.code) + "\",\"type\":\"assignment\",\"filename\":\"" + escapeJson(assign.file.name.headOption.getOrElse("unknown")) + "\"}" }; dependencies ++= assignments; val modifications = method.call.name("<operator>.(postIncrement|preIncrement|postDecrement|preDecrement|assignmentPlus|assignmentMinus)").l.filter { call => { val line = call.lineNumber.getOrElse(-1); if (line >= targetLine) false else { val args = call.argument.code.l; args.exists(arg => arg == varName || arg.startsWith(varName + "[") || arg.startsWith(varName + ".")) } } }.map { call => "{\"line\":" + call.lineNumber.getOrElse(-1) + ",\"code\":\"" + escapeJson(call.code) + "\",\"type\":\"modification\",\"filename\":\"" + escapeJson(call.file.name.headOption.getOrElse("unknown")) + "\"}" }; dependencies ++= modifications; val callModifications = method.call.l.filter { call => { val line = call.lineNumber.getOrElse(-1); if (line >= targetLine) false else { val args = call.argument.code.l; args.exists(arg => arg == "&" + varName || arg == varName) } } }.map { call => "{\"line\":" + call.lineNumber.getOrElse(-1) + ",\"code\":\"" + escapeJson(call.code) + "\",\"type\":\"function_call\",\"filename\":\"" + escapeJson(call.file.name.headOption.getOrElse("unknown")) + "\"}" }; dependencies ++= callModifications } else if (direction == "forward") { val usages = method.call.l.filter { call => { val line = call.lineNumber.getOrElse(-1); if (line <= targetLine) false else { val args = call.argument.code.l; args.exists(arg => arg.contains(varName)) } } }.take(20).map { call => "{\"line\":" + call.lineNumber.getOrElse(-1) + ",\"code\":\"" + escapeJson(call.code) + "\",\"type\":\"usage\",\"filename\":\"" + escapeJson(call.file.name.headOption.getOrElse("unknown")) + "\"}" }; dependencies ++= usages; val assignmentsFrom = method.assignment.l.filter { assign => { val line = assign.lineNumber.getOrElse(-1); if (line <= targetLine) false else { val sourceCode = assign.source.code; sourceCode.contains(varName) } } }.map { assign => "{\"line\":" + assign.lineNumber.getOrElse(-1) + ",\"code\":\"" + escapeJson(assign.code) + "\",\"type\":\"propagation\",\"filename\":\"" + escapeJson(assign.file.name.headOption.getOrElse("unknown")) + "\"}" }; dependencies ++= assignmentsFrom }; val sortedDeps = dependencies.sortBy(dep => { val linePattern = "\"line\":(\\d+)".r; linePattern.findFirstMatchIn(dep).map(_.group(1).toInt).getOrElse(-1) }); val depsJson = sortedDeps.mkString(","); "{\"success\":true,\"target\":{\"file\":\"" + escapeJson(method.filename) + "\",\"line\":" + targetLine + ",\"variable\":\"" + varName + "\",\"method\":\"" + escapeJson(method.name) + "\"},\"direction\":\"" + direction + "\",\"dependencies\":[" + depsJson + "],\"total\":" + sortedDeps.size + "}" } case None => { "{\"success\":false,\"error\":{\"code\":\"NOT_FOUND\",\"message\":\"No method found containing line LINE_NUM_PLACEHOLDER in file FILENAME_PLACEHOLDER\"}}" } } }'
+            # Build improved CPGQL query with proper JSON output
+            # This query correctly handles variable data flow analysis
+            query_template = r'''{
+  def escapeJson(s: String): String = {
+    s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+  }
+
+  val targetLine = LINE_NUM_PLACEHOLDER
+  val varName = "VARIABLE_PLACEHOLDER"
+  val filename = "FILENAME_PLACEHOLDER"
+  val direction = "DIRECTION_PLACEHOLDER"
+  val maxResults = 50
+
+  val targetMethodOpt = cpg.method
+    .filter(m => {
+      val f = m.file.name.headOption.getOrElse("")
+      f.endsWith(filename) || f.contains(filename)
+    })
+    .filter(m => {
+      val start = m.lineNumber.getOrElse(-1)
+      val end = m.lineNumberEnd.getOrElse(-1)
+      start <= targetLine && end >= targetLine
+    })
+    .headOption
+
+  val result = targetMethodOpt match {
+    case Some(method) => {
+      val methodName = method.name
+      val methodFile = method.file.name.headOption.getOrElse("unknown")
+      val dependencies = scala.collection.mutable.ListBuffer[Map[String, Any]]()
+
+      if (direction == "backward") {
+        val inits = method.local.name(varName).l
+        inits.foreach { local =>
+          dependencies += Map(
+            "line" -> local.lineNumber.getOrElse(-1),
+            "code" -> escapeJson(s"${local.typeFullName} ${local.code}"),
+            "type" -> "initialization",
+            "filename" -> escapeJson(methodFile)
+          )
+        }
+
+        val assignments = method.assignment.l
+          .filter(a => {
+            val line = a.lineNumber.getOrElse(-1)
+            line < targetLine
+          })
+          .filter(a => {
+            val targetCode = a.target.code
+            targetCode == varName || targetCode.startsWith(varName + "[") || targetCode.startsWith(varName + ".")
+          })
+          .take(maxResults)
+
+        assignments.foreach { assign =>
+          dependencies += Map(
+            "line" -> assign.lineNumber.getOrElse(-1),
+            "code" -> escapeJson(assign.code),
+            "type" -> "assignment",
+            "filename" -> escapeJson(methodFile)
+          )
+        }
+
+        val modifications = method.call
+          .name("<operator>.(postIncrement|preIncrement|postDecrement|preDecrement|assignmentPlus|assignmentMinus|assignmentMultiplication|assignmentDivision)")
+          .l
+          .filter(c => {
+            val line = c.lineNumber.getOrElse(-1)
+            line < targetLine
+          })
+          .filter(c => {
+            val args = c.argument.code.l
+            args.exists(arg => arg == varName || arg.startsWith(varName + "[") || arg.startsWith(varName + "."))
+          })
+          .take(maxResults)
+
+        modifications.foreach { call =>
+          dependencies += Map(
+            "line" -> call.lineNumber.getOrElse(-1),
+            "code" -> escapeJson(call.code),
+            "type" -> "modification",
+            "filename" -> escapeJson(methodFile)
+          )
+        }
+
+        val funcCalls = method.call.l
+          .filter(c => {
+            val line = c.lineNumber.getOrElse(-1)
+            line < targetLine
+          })
+          .filter(c => {
+            val args = c.argument.code.l
+            args.exists(arg => arg.contains("&" + varName) || arg.contains(varName))
+          })
+          .take(maxResults)
+
+        funcCalls.foreach { call =>
+          dependencies += Map(
+            "line" -> call.lineNumber.getOrElse(-1),
+            "code" -> escapeJson(call.code),
+            "type" -> "function_call",
+            "filename" -> escapeJson(methodFile)
+          )
+        }
+      } else if (direction == "forward") {
+        val usages = method.call.l
+          .filter(c => {
+            val line = c.lineNumber.getOrElse(-1)
+            line > targetLine
+          })
+          .filter(c => {
+            val args = c.argument.code.l
+            args.exists(arg => arg.contains(varName))
+          })
+          .take(maxResults)
+
+        usages.foreach { call =>
+          dependencies += Map(
+            "line" -> call.lineNumber.getOrElse(-1),
+            "code" -> escapeJson(call.code),
+            "type" -> "usage",
+            "filename" -> escapeJson(methodFile)
+          )
+        }
+
+        val propagations = method.assignment.l
+          .filter(a => {
+            val line = a.lineNumber.getOrElse(-1)
+            line > targetLine
+          })
+          .filter(a => {
+            val sourceCode = a.source.code
+            sourceCode.contains(varName)
+          })
+          .take(maxResults)
+
+        propagations.foreach { assign =>
+          dependencies += Map(
+            "line" -> assign.lineNumber.getOrElse(-1),
+            "code" -> escapeJson(assign.code),
+            "type" -> "propagation",
+            "filename" -> escapeJson(methodFile)
+          )
+        }
+
+        val mods = method.call
+          .name("<operator>.(postIncrement|preIncrement|postDecrement|preDecrement|assignmentPlus|assignmentMinus)")
+          .l
+          .filter(c => {
+            val line = c.lineNumber.getOrElse(-1)
+            line > targetLine
+          })
+          .filter(c => {
+            val args = c.argument.code.l
+            args.exists(arg => arg == varName)
+          })
+          .take(maxResults)
+
+        mods.foreach { call =>
+          dependencies += Map(
+            "line" -> call.lineNumber.getOrElse(-1),
+            "code" -> escapeJson(call.code),
+            "type" -> "modification",
+            "filename" -> escapeJson(methodFile)
+          )
+        }
+      }
+
+      val sortedDeps = dependencies.sortBy(d => d.getOrElse("line", -1).asInstanceOf[Int])
+
+      List(
+        Map(
+          "success" -> true,
+          "target" -> Map(
+            "file" -> methodFile,
+            "line" -> targetLine,
+            "variable" -> varName,
+            "method" -> methodName
+          ),
+          "direction" -> direction,
+          "dependencies" -> sortedDeps.toList,
+          "total" -> sortedDeps.size
+        )
+      )
+    }
+    case None => {
+      List(
+        Map(
+          "success" -> false,
+          "error" -> Map(
+            "code" -> "METHOD_NOT_FOUND",
+            "message" -> s"No method found containing line $targetLine in file containing '$filename'"
+          )
+        )
+      )
+    }
+  }
+
+  result.toJsonPretty
+}'''
 
             query = (
                 query_template.replace("FILENAME_PLACEHOLDER", filename)
