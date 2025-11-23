@@ -31,6 +31,9 @@ pip install -r requirements.txt
 ```
 
 ### 2. Start the Docker Services (Joern)
+
+```bash
+docker compose up -d
 ```
 
 This starts:
@@ -45,10 +48,8 @@ docker compose ps
 ### 3. Start the MCP Server
 
 ```bash
-```bash
 # Start the server
 python main.py &
-```
 ```
 
 The MCP server will be available at `http://localhost:4242`.
@@ -96,12 +97,15 @@ Edit the MCP configuration file for VS Code (GitHub Copilot):
 {
   "inputs": [],
   "servers": {
+    "codebadger": {
       "url": "http://localhost:4242/mcp",
       "type": "http"
     }
   }
 }
 ```
+
+<!-- Removed malformed duplicate GitHub Copilot JSON example -->
 ---
 
 ### Claude Code Integration
@@ -144,7 +148,6 @@ Add the following:
 - `find_literals`: Search for hardcoded values
 - `get_code_snippet`: Retrieve code snippets
 
-    "codebadger": {
 - `find_taint_sources`: Locate external input points
 - `find_taint_sinks`: Locate dangerous sinks
 - `find_taint_flows`: Find dataflow paths
@@ -155,10 +158,29 @@ Add the following:
 
 ## Contributing & Tests
 
+Thanks for contributing! Here's a quick guide to get started with running tests and contributing code.
+
+### Prerequisites
 
 - Python 3.10+ (3.13 is used in CI)
+- Docker and Docker Compose (for integration tests)
+
+### Local Development Setup
+
+1. Create a virtual environment and install dependencies
+
+```bash
+python -m venv venv
+pip install -r requirements.txt
 ```
 
+2. Start Docker services (for integration tests)
+
+```bash
+docker-compose up -d
+```
+
+3. Run unit tests
 
 ```bash
 pytest tests/ -q
@@ -166,6 +188,8 @@ pytest tests/ -q
 
 4. Run integration tests (requires Docker Compose running)
 
+```bash
+# Start MCP server in background
 python main.py &
 
 # Run integration tests
@@ -174,6 +198,8 @@ pytest tests/integration -q
 # Stop MCP server
 pkill -f "python main.py"
 ```
+
+<!-- Removed duplicate run/cleanup instructions -->
 
 5. Run all tests
 
