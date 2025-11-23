@@ -1,5 +1,5 @@
 """
-Taint Analysis MCP Tools for CodeBadger Toolkit Server
+Taint Analysis MCP Tools for CodeBadger Server
 Security-focused tools for analyzing data flows and vulnerabilities
 """
 

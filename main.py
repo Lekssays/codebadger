@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-CodeBadger Toolkit Server - Main entry point using FastMCP
+CodeBadger Server - Main entry point using FastMCP
 
-This is the main entry point for the CodeBadger Toolkit Server that provides static code analysis
+This is the main entry point for the CodeBadger Server that provides static code analysis
 capabilities through the Model Context Protocol (MCP) using Joern's Code Property Graph.
 """
 
@@ -43,7 +43,7 @@ async def lifespan(mcp: FastMCP):
     # Load configuration
     config = load_config("config.yaml")
     setup_logging(config.server.log_level)
-    logger.info("Starting CodeBadger Toolkit Server")
+    logger.info("Starting CodeBadger Server")
     
     # Ensure required directories exist
     import os
@@ -98,16 +98,16 @@ async def lifespan(mcp: FastMCP):
         register_tools(mcp, services)
         
         logger.info("All services initialized")
-        logger.info("CodeBadger Toolkit Server is ready")
-        
+        logger.info("CodeBadger Server is ready")
+
         yield
-        
+
         # Shutdown
-        logger.info("Shutting down CodeBadger Toolkit Server")
-        
+        logger.info("Shutting down CodeBadger Server")
+
         # Close connections
-        
-        logger.info("CodeBadger Toolkit Server shutdown complete")
+
+        logger.info("CodeBadger Server shutdown complete")
         
     except Exception as e:
         logger.error(f"Error during server lifecycle: {e}", exc_info=True)
@@ -116,7 +116,7 @@ async def lifespan(mcp: FastMCP):
 
 # Initialize FastMCP server
 mcp = FastMCP(
-    "CodeBadger Toolkit Server",
+    "CodeBadger Server",
     lifespan=lifespan
 )
 
@@ -130,7 +130,7 @@ async def health_check(request):
     """Health check endpoint for monitoring server status"""
     return JSONResponse({
         "status": "healthy",
-        "service": "codebadger-toolkit",
+        "service": "codebadger",
         "version": VERSION
     })
 
@@ -140,8 +140,8 @@ async def health_check(request):
 async def root(request):
     """Root endpoint providing basic server information"""
     return JSONResponse({
-        "service": "codebadger-toolkit",
-        "description": "CodeBadger Toolkit for static code analysis using Code Property Graph technology",
+        "service": "codebadger",
+        "description": "CodeBadger for static code analysis using Code Property Graph technology",
         "version": VERSION,
         "endpoints": {
             "health": "/health",
@@ -157,7 +157,7 @@ if __name__ == "__main__":
     host = config_data.server.host
     port = config_data.server.port
     
-    logger.info(f"Starting CodeBadger Toolkit Server with HTTP transport on {host}:{port}")
+    logger.info(f"Starting CodeBadger Server with HTTP transport on {host}:{port}")
     
     # Use HTTP transport (Streamable HTTP) for production deployment
     # This enables network accessibility, multiple concurrent clients,

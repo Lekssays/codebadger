@@ -1,5 +1,5 @@
 """
-Code Browsing MCP Tools for CodeBadger Toolkit Server
+Code Browsing MCP Tools for CodeBadger Server
 Tools for exploring and navigating codebase structure
 """
 

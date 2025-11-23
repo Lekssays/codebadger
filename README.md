@@ -1,4 +1,4 @@
-# 🦡 codebadger-toolkit
+# 🦡 codebadger
 
 A containerized Model Context Protocol (MCP) server providing static code analysis using Joern's Code Property Graph (CPG) technology with support for Java, C/C++, JavaScript, Python, Go, Kotlin, C#, Ghidra, Jimple, PHP, Ruby, and Swift.
 
@@ -25,16 +25,12 @@ python --version
 ```bash
 # Create a virtual environment (optional but recommended)
 python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Install dependencies
 pip install -r requirements.txt
 ```
 
 ### 2. Start the Docker Services (Joern)
-
-```bash
-docker compose up -d
 ```
 
 This starts:
@@ -64,7 +60,6 @@ The MCP server will be available at `http://localhost:4242`.
 
 # Stop Docker services
 docker-compose down
-
 # Optional: Clean up everything
 bash cleanup.sh
 ```
@@ -101,19 +96,17 @@ Edit the MCP configuration file for VS Code (GitHub Copilot):
 {
   "inputs": [],
   "servers": {
-    "codebadger-toolkit": {
       "url": "http://localhost:4242/mcp",
       "type": "http"
     }
   }
 }
 ```
-
 ---
 
 ### Claude Code Integration
 
-To integrate `codebadger-toolkit` into **Claude Desktop**, edit:
+To integrate `codebadger` into **Claude Desktop**, edit:
 
 **Path:**
 
@@ -126,7 +119,7 @@ Add the following:
 ```json
 {
   "mcpServers": {
-    "codebadger-toolkit": {
+    "codebadger": {
       "url": "http://localhost:4242/mcp",
       "type": "http"
     }
@@ -135,7 +128,6 @@ Add the following:
 ```
 
 ## Available Tools
-
 ### Core Tools (hash-based)
 - `generate_cpg`: Generate a CPG for a codebase (from local path or GitHub URL)
 - `get_cpg_status`: Get status and existence of a CPG by `codebase_hash`
@@ -152,7 +144,7 @@ Add the following:
 - `find_literals`: Search for hardcoded values
 - `get_code_snippet`: Retrieve code snippets
 
-### Security Analysis Tools
+    "codebadger": {
 - `find_taint_sources`: Locate external input points
 - `find_taint_sinks`: Locate dangerous sinks
 - `find_taint_flows`: Find dataflow paths
@@ -163,29 +155,10 @@ Add the following:
 
 ## Contributing & Tests
 
-Thanks for contributing! Here's a quick guide to get started with running tests and contributing code.
-
-### Prerequisites
 
 - Python 3.10+ (3.13 is used in CI)
-- Docker and Docker Compose (for integration tests)
-
-### Local Development Setup
-
-1. Create a virtual environment and install dependencies
-
-```bash
-python -m venv venv
-pip install -r requirements.txt
 ```
 
-2. Start Docker services (for integration tests)
-
-```bash
-docker-compose up -d
-```
-
-3. Run unit tests
 
 ```bash
 pytest tests/ -q
@@ -193,8 +166,6 @@ pytest tests/ -q
 
 4. Run integration tests (requires Docker Compose running)
 
-```bash
-# Start MCP server in background
 python main.py &
 
 # Run integration tests

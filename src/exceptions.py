@@ -1,10 +1,10 @@
 """
-Custom exceptions for CodeBadger Toolkit Server
+Custom exceptions for CodeBadger Server
 """
 
 
 class JoernMCPException(Exception):
-    """Base exception for CodeBadger Toolkit"""
+    """Base exception for CodeBadger"""
 
     pass
 

@@ -1,5 +1,5 @@
 """
-Data models for CodeBadger Toolkit Server
+Data models for CodeBadger Server
 """
 
 from dataclasses import dataclass, field
@@ -145,7 +145,7 @@ class QueryConfig:
 class StorageConfig:
     """Storage configuration"""
 
-    workspace_root: str = "/tmp/codebadger-toolkit"
+    workspace_root: str = "/tmp/codebadger"
     cleanup_on_shutdown: bool = True
 
 

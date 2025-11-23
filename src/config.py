@@ -1,4 +1,4 @@
-"""Configuration management for the CodeBadger Toolkit Server."""
+"""Configuration management for the CodeBadger Server."""
 
 import os
 from typing import Optional
@@ -135,7 +135,7 @@ def load_config(config_path: Optional[str] = None) -> Config:
                 cache_ttl=int(os.getenv("QUERY_CACHE_TTL", "300")),
             ),
             storage=StorageConfig(
-                workspace_root=os.getenv("WORKSPACE_ROOT", "/tmp/codebadger-toolkit"),
+                workspace_root=os.getenv("WORKSPACE_ROOT", "/tmp/codebadger"),
                 cleanup_on_shutdown=os.getenv("CLEANUP_ON_SHUTDOWN", "true").lower()
                 == "true",
             ),

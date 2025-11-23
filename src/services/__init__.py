@@ -1,5 +1,5 @@
 """
-Services package for CodeBadger Toolkit
+Services package for CodeBadger
 """
 
 from .codebase_tracker import CodebaseTracker

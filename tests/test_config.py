@@ -83,7 +83,7 @@ class TestLoadConfig:
             assert config.query.timeout == 30
             assert config.query.cache_enabled is True
             assert config.query.cache_ttl == 300
-            assert config.storage.workspace_root == "/tmp/codebadger-toolkit"
+            assert config.storage.workspace_root == "/tmp/codebadger"
             assert config.storage.cleanup_on_shutdown is True
 
     def test_load_config_file_not_found(self):

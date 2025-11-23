@@ -1,7 +1,7 @@
 """
-Integration Tests for CodeBadger Toolkit Server
+Integration Tests for CodeBadger Server
 
-These tests verify the complete workflow of the CodeBadger Toolkit MCP server
+These tests verify the complete workflow of the CodeBadger MCP server
 using the core.c test codebase.
 """
 
@@ -23,7 +23,7 @@ except ImportError:
 
 
 class TestCodeBadgerIntegration:
-    """Integration tests for CodeBadger Toolkit MCP server"""
+    """Integration tests for CodeBadger MCP server"""
 
     @pytest.fixture(scope="class")
     def event_loop(self):

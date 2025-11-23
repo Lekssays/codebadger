@@ -1,1 +1,1 @@
-# Test package for CodeBadger Toolkit
+# Test package for CodeBadger

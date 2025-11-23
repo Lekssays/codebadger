@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Sample Client for CodeBadger Toolkit Server
+Sample Client for CodeBadger Server
 
-This client demonstrates basic usage of the CodeBadger Toolkit MCP server:
+This client demonstrates basic usage of the CodeBadger MCP server:
 1. Generate a CPG for a local codebase
 2. List methods in the codebase
 3. Run a simple CPGQL query
@@ -72,7 +72,7 @@ async def main():
     codebase_path = "/app/playground/codebases/core"
 
     logger.info("="*60)
-    logger.info("CODEBADGER TOOLKIT SAMPLE CLIENT")
+    logger.info("CODEBADGER SAMPLE CLIENT")
     logger.info("="*60)
     logger.info(f"Server URL: {server_url}")
     logger.info(f"Codebase: {codebase_path}")

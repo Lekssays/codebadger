@@ -165,8 +165,8 @@ class CPGGenerator:
     def _host_to_container_path(self, host_path: str) -> str:
         """Convert host path to container path
         
-        The container mounts ./playground as /playground
-        So /home/aleks/workspace/codebadger-toolkit/playground/cpgs/hash/cpg.bin 
+    The container mounts ./playground as /playground
+    So /home/aleks/workspace/codebadger/playground/cpgs/hash/cpg.bin 
         becomes /playground/cpgs/hash/cpg.bin
         """
         # Find the playground directory in the path

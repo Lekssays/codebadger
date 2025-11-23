@@ -1,5 +1,5 @@
 #!/bin/bash
-# Minimal cleanup script for CodeBadger Toolkit
+# Minimal cleanup script for CodeBadger
 # Cleans codebases (except core) and CPGs
 
 set -e
@@ -8,7 +8,7 @@ PLAYGROUND_PATH="./playground"
 CODEBASES_PATH="$PLAYGROUND_PATH/codebases"
 CPGS_PATH="$PLAYGROUND_PATH/cpgs"
 
-echo "🧹 CodeBadger Toolkit Cleanup"
+echo "🧹 CodeBadger Cleanup"
 echo "=============================="
 
 # Clean codebases (except core)

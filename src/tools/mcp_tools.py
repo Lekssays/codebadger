@@ -1,5 +1,5 @@
 """
-MCP Tool Definitions for CodeBadger Toolkit Server
+MCP Tool Definitions for CodeBadger Server
 
 Main entry point that registers all tools from separate modules
 """

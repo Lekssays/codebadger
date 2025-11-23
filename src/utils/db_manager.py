@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 logger = logging.getLogger(__name__)
 
 class DBManager:
-    """SQLite database manager for CodeBadger Toolkit"""
+    """SQLite database manager for CodeBadger"""
 
     def __init__(self, db_path: str = "codebadger.db"):
         self.db_path = db_path

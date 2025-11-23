@@ -1,4 +1,4 @@
-"""Utility functions for the CodeBadger Toolkit Server."""
+"""Utility functions for the CodeBadger Server."""
 
 from pathlib import Path
 from typing import List

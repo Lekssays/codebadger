@@ -1,5 +1,5 @@
 """
-Core MCP Tools for CodeBadger Toolkit Server - Simplified hash-based version
+Core MCP Tools for CodeBadger Server - Simplified hash-based version
 
 Provides core CPG management functionality
 """
