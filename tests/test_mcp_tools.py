@@ -69,6 +69,7 @@ def mock_services():
     # Mock code browsing service
     code_browsing_service = MagicMock()
     code_browsing_service.list_methods.return_value = {"success": True, "methods": []}
+    code_browsing_service.list_files.return_value = {"success": True, "files": [], "total": 0}
     code_browsing_service.run_query.return_value = {"success": True, "data": [], "row_count": 0}
 
     # Mock joern server manager
@@ -255,19 +256,18 @@ class TestMCPTools:
         func = mcp.registered.get("run_cpgql_query")
         assert func is not None
 
-        with patch("src.services.joern_client.JoernServerClient") as mock_client_class:
-            mock_client = MagicMock()
-            mock_client.execute_query.return_value = {
-                "success": True,
-                "stdout": '["result"]',
-                "stderr": ""
-            }
-            mock_client_class.return_value = mock_client
+        # Patch the query_executor to return a structured QueryResult
+        from src.models import QueryResult
+        mock_services["query_executor"].execute_query.return_value = QueryResult(
+            success=True,
+            data=["result"],
+            row_count=1,
+        )
 
-            result = func(codebase_hash="553642871dd4251d", query="cpg.method")
+        result = func(codebase_hash="553642871dd4251d", query="cpg.method")
 
-            assert result["success"] is True
-            assert result["stdout"] == '["result"]'
+        assert result["success"] is True
+        assert result["data"] == ["result"]
 
     def test_run_cpgql_query_invalid(self, mock_services):
         """Test running invalid CPGQL query"""
@@ -279,19 +279,18 @@ class TestMCPTools:
         func = mcp.registered.get("run_cpgql_query")
         assert func is not None
 
-        with patch("src.services.joern_client.JoernServerClient") as mock_client_class:
-            mock_client = MagicMock()
-            mock_client.execute_query.return_value = {
-                "success": False,
-                "stdout": "",
-                "stderr": "Invalid query syntax"
-            }
-            mock_client_class.return_value = mock_client
+        from src.models import QueryResult
+        mock_services["query_executor"].execute_query.return_value = QueryResult(
+            success=False,
+            error="Invalid query syntax",
+            data=[],
+            row_count=0,
+        )
 
-            result = func(codebase_hash="553642871dd4251d", query="invalid query")
+        result = func(codebase_hash="553642871dd4251d", query="invalid query")
 
-            assert result["success"] is False
-            assert result["stderr"] == "Invalid query syntax"
+        assert result["success"] is False
+        assert result["error"] == "Invalid query syntax"
 
     def test_get_codebase_summary_success(self, mock_services):
         """Test getting codebase summary successfully"""
@@ -337,3 +336,102 @@ class TestMCPTools:
         assert result["summary"]["language"] == "c"
         assert result["summary"]["total_files"] == 5
         assert result["summary"]["total_methods"] == 10
+
+    def test_list_files_local_tree_default(self, mock_services, tmp_path):
+        """Test listing files as a tree for a local codebase, default per-dir limit 20"""
+        from src.tools.code_browsing_tools import register_code_browsing_tools
+        from src.models import CodebaseInfo
+
+        # Build a playground-like source tree under a temp dir
+        source_dir = tmp_path / "test_codebase"
+        source_dir.mkdir()
+
+        # create a subdir with 25 files to check per-dir limit (20)
+        subdir = source_dir / "many_files"
+        subdir.mkdir()
+        for i in range(25):
+            f = subdir / f"file_{i}.txt"
+            f.write_text(f"content {i}")
+
+        # Create nested directories
+        nested_dir = subdir / "nested"
+        nested_dir.mkdir()
+        for i in range(3):
+            f = nested_dir / f"nfile_{i}.txt"
+            f.write_text(f"nested {i}")
+
+        # Configure codebase tracker to return local source dir
+        mock_services["codebase_tracker"].get_codebase.return_value = CodebaseInfo(
+            codebase_hash="553642871dd4251d",
+            source_type="local",
+            source_path=str(source_dir),
+            language="python",
+            cpg_path=None,
+        )
+
+        # Use a real CodeBrowsingService instance instead of MagicMock to test file system behavior
+        from src.services.code_browsing_service import CodeBrowsingService
+        real_cb_service = CodeBrowsingService(codebase_tracker=mock_services["codebase_tracker"], query_executor=mock_services["query_executor"])
+        mock_services["code_browsing_service"] = real_cb_service
+
+        mcp = FakeMCP()
+        register_code_browsing_tools(mcp, mock_services)
+
+        func = mcp.registered.get("list_files")
+        assert func is not None
+
+        result = func(codebase_hash="553642871dd4251d")
+        assert result["success"] is True
+        assert "files" in result
+        # root should include at least the many_files dir; check its children per-dir limit
+        root_children = result["files"]
+        found = False
+        for node in root_children:
+            if node["name"] == "many_files":
+                found = True
+                assert node["type"] == "dir"
+                # children of many_files should be limited to 20
+                assert len(node["children"]) == 20
+        assert found
+
+    def test_list_files_local_path_limit(self, mock_services, tmp_path):
+        """Test listing files for a specific local_path with per-dir limit 50"""
+        from src.tools.code_browsing_tools import register_code_browsing_tools
+        from src.models import CodebaseInfo
+
+        # Build a source dir
+        source_dir = tmp_path / "test_codebase2"
+        source_dir.mkdir()
+
+        # Create a directory with 60 files
+        big_dir = source_dir / "big_dir"
+        big_dir.mkdir()
+        for i in range(60):
+            f = big_dir / f"file_{i}.txt"
+            f.write_text(f"content {i}")
+
+        mock_services["codebase_tracker"].get_codebase.return_value = CodebaseInfo(
+            codebase_hash="553642871dd4251e",
+            source_type="local",
+            source_path=str(source_dir),
+            language="python",
+            cpg_path=None,
+        )
+
+        from src.services.code_browsing_service import CodeBrowsingService
+        real_cb_service = CodeBrowsingService(codebase_tracker=mock_services["codebase_tracker"], query_executor=mock_services["query_executor"])
+        mock_services["code_browsing_service"] = real_cb_service
+
+        mcp = FakeMCP()
+        register_code_browsing_tools(mcp, mock_services)
+
+        func = mcp.registered.get("list_files")
+        assert func is not None
+
+        # Request only big_dir contents
+        result = func(codebase_hash="553642871dd4251e", local_path="big_dir")
+        assert result["success"] is True
+        assert "files" in result
+        root_children = result["files"]
+        # should be the children of big_dir, limited to 50
+        assert len(root_children) == 50

@@ -50,12 +50,13 @@ class CodeBrowsingService:
             "file_pattern": file_pattern,
             "callee_pattern": callee_pattern,
             "include_external": include_external,
+            "limit": limit,
         }
 
         def execute_query():
             codebase_info = self.codebase_tracker.get_codebase(codebase_hash)
-            if not codebase_info or not codebase_info.cpg_path:
-                raise ValidationError(f"CPG not found for codebase {codebase_hash}")
+            if not codebase_info:
+                raise ValidationError(f"Codebase not found for codebase {codebase_hash}")
 
             query_parts = ["cpg.method"]
             if not include_external:
@@ -71,7 +72,7 @@ class CodeBrowsingService:
                 ".map(m => (m.name, m.id, m.fullName, m.signature, m.filename, m.lineNumber.getOrElse(-1), m.isExternal))"
             )
             
-            query_limit = max(limit, 10000)
+            query_limit = min(limit, 10000)
             query = "".join(query_parts) + f".dedup.take({query_limit}).l"
             
             result = self.query_executor.execute_query(
@@ -106,6 +107,9 @@ class CodeBrowsingService:
             return full_result
 
         methods = full_result.get("methods", [])
+        # Respect the provided 'limit' for the returned list, independent of page_size
+        if limit is not None and limit > 0:
+            methods = methods[:limit]
         total = len(methods)
         
         # Pagination
@@ -125,49 +129,109 @@ class CodeBrowsingService:
     def list_files(
         self,
         codebase_hash: str,
+        local_path: Optional[str] = None,
         limit: int = 1000,
         page: int = 1,
         page_size: int = 100,
     ) -> Dict[str, Any]:
         
         validate_codebase_hash(codebase_hash)
-        cache_params = {} # No filters for now
+        cache_params = {"local_path": local_path}
 
         def execute_query():
             codebase_info = self.codebase_tracker.get_codebase(codebase_hash)
-            if not codebase_info or not codebase_info.cpg_path:
-                raise ValidationError(f"CPG not found for codebase {codebase_hash}")
-
-            query = f"cpg.file.map(f => (f.name, f.hash.getOrElse(\"\"))).take({limit}).l"
-            
-            result = self.query_executor.execute_query(
-                codebase_hash=codebase_hash,
-                cpg_path=codebase_info.cpg_path,
-                query=query,
-                timeout=30,
-                limit=limit,
+            if not codebase_info:
+                raise ValidationError(f"Codebase not found for codebase {codebase_hash}")
+            # Determine the actual filesystem path to list
+            playground_path = os.path.abspath(
+                os.path.join(os.path.dirname(__file__), "..", "..", "playground")
             )
 
-            if not result.success:
-                return {"success": False, "error": {"code": "QUERY_ERROR", "message": result.error}}
+            if codebase_info.source_type == "github":
+                from ..tools.core_tools import get_cpg_cache_key
 
-            files = []
-            for item in result.data:
-                if isinstance(item, dict):
-                    files.append({
-                        "name": item.get("_1", ""),
-                        "hash": item.get("_2", ""),
-                    })
-            return {"success": True, "files": files, "total": len(files)}
+                cpg_cache_key = get_cpg_cache_key(
+                    codebase_info.source_type,
+                    codebase_info.source_path,
+                    codebase_info.language,
+                )
+                source_dir = os.path.join(playground_path, "codebases", cpg_cache_key)
+            else:
+                source_path = codebase_info.source_path
+                if not os.path.isabs(source_path):
+                    source_path = os.path.abspath(source_path)
+                source_dir = source_path
+
+            if not os.path.exists(source_dir) or not os.path.isdir(source_dir):
+                raise ValidationError(f"Source directory not found for codebase {codebase_hash}: {source_dir}")
+
+            # Resolve target directory if a local_path is provided; otherwise, use source_dir
+            if local_path:
+                # Support both absolute and relative local_path; ensure it stays within source_dir
+                candidate = local_path
+                if not os.path.isabs(candidate):
+                    candidate = os.path.join(source_dir, candidate)
+                candidate = os.path.normpath(candidate)
+                source_dir_norm = os.path.normpath(source_dir)
+                if not candidate.startswith(source_dir_norm):
+                    raise ValidationError("local_path must be inside the codebase source directory")
+                target_dir = candidate
+            else:
+                target_dir = source_dir
+
+            # per-directory limits: default 20; 50 when a local_path was provided
+            per_dir_limit = 50 if local_path else 20
+
+            def _list_dir_tree(root: str, base: str, per_dir_limit: int) -> List[Dict[str, Any]]:
+                try:
+                    entries = sorted(os.listdir(root))
+                except OSError:
+                    entries = []
+
+                result = []
+                for name in entries[:per_dir_limit]:
+                    path = os.path.join(root, name)
+                    rel_path = os.path.relpath(path, base)
+                    if os.path.isdir(path):
+                        children = _list_dir_tree(path, base, per_dir_limit)
+                        result.append({
+                            "name": name,
+                            "path": rel_path,
+                            "type": "dir",
+                            "children": children,
+                        })
+                    else:
+                        result.append({
+                            "name": name,
+                            "path": rel_path,
+                            "type": "file",
+                        })
+                return result
+
+            tree = _list_dir_tree(target_dir, source_dir, per_dir_limit)
+
+            # Count total entries in the returned tree (non-recursive counting for top-level)
+            def _count_nodes(nodes: List[Dict[str, Any]]) -> int:
+                total = 0
+                for n in nodes:
+                    total += 1
+                    if n.get("type") == "dir":
+                        total += _count_nodes(n.get("children", []))
+                return total
+
+            total_count = _count_nodes(tree)
+            return {"success": True, "files": tree, "total": total_count}
 
         full_result = self._get_cached_or_execute("list_files", codebase_hash, cache_params, execute_query)
-        
+
         if not full_result.get("success"):
             return full_result
 
         files = full_result.get("files", [])
-        total = len(files)
-        
+        total = full_result.get("total", len(files))
+
+        # The tree-based listing does not meaningfully support pagination of top-level results,
+        # so keep backward compatibility by paginating the top-level entries only.
         start_idx = (page - 1) * page_size
         end_idx = start_idx + page_size
         paged_files = files[start_idx:end_idx]
@@ -178,7 +242,7 @@ class CodeBrowsingService:
             "total": total,
             "page": page,
             "page_size": page_size,
-            "total_pages": (total + page_size - 1) // page_size if page_size > 0 else 1
+            "total_pages": (total + page_size - 1) // page_size if page_size > 0 else 1,
         }
 
     def list_calls(
@@ -195,6 +259,7 @@ class CodeBrowsingService:
         cache_params = {
             "caller_pattern": caller_pattern,
             "callee_pattern": callee_pattern,
+            "limit": limit,
         }
 
         def execute_query():
@@ -212,7 +277,7 @@ class CodeBrowsingService:
                 ".map(c => (c.method.name, c.name, c.code, c.method.filename, c.lineNumber.getOrElse(-1)))"
             )
             
-            query_limit = max(limit, 10000)
+            query_limit = min(limit, 10000)
             query = "".join(query_parts) + f".dedup.take({query_limit}).l"
             
             result = self.query_executor.execute_query(
@@ -244,6 +309,9 @@ class CodeBrowsingService:
             return full_result
 
         calls = full_result.get("calls", [])
+        # Apply the provided limit to final result set
+        if limit is not None and limit > 0:
+            calls = calls[:limit]
         total = len(calls)
         
         start_idx = (page - 1) * page_size

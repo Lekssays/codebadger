@@ -87,6 +87,7 @@ def register_code_browsing_tools(mcp, services: dict):
     @mcp.tool()
     def list_files(
         codebase_hash: str,
+        local_path: Optional[str] = None,
         limit: int = 1000,
         page: int = 1,
         page_size: int = 100,
@@ -95,7 +96,8 @@ def register_code_browsing_tools(mcp, services: dict):
         List source files in the codebase.
 
         Args:
-            codebase_hash: The session ID from create_cpg_session
+            codebase_hash: The session ID from create_cpg_create
+            local_path: Optional path inside the codebase to list (relative to source root or absolute). When provided, per-directory limit is increased to 50.
             limit: Maximum number of results to fetch for caching (default: 1000)
             page: Page number (default: 1)
             page_size: Number of results per page (default: 100)
@@ -114,6 +116,7 @@ def register_code_browsing_tools(mcp, services: dict):
             code_browsing_service = services["code_browsing_service"]
             return code_browsing_service.list_files(
                 codebase_hash=codebase_hash,
+                local_path=local_path,
                 limit=limit,
                 page=page,
                 page_size=page_size,
@@ -995,46 +998,40 @@ def register_code_browsing_tools(mcp, services: dict):
                         },
                     }
 
-            # Execute the query directly via Joern client to get raw stdout/stderr
-            start_time = time.time()
-            
-            port = query_executor.joern_server_manager.get_server_port(codebase_hash)
-            if not port:
-                return {
-                    "success": False,
-                    "error": {"code": "SERVER_ERROR", "message": f"No Joern server running for codebase {codebase_hash}"},
-                }
-            
-            joern_client = JoernServerClient(host="localhost", port=port)
-            
-            # Execute query with the provided query string as-is
-            result = joern_client.execute_query(query.strip(), timeout=timeout or 30)
-            
-            execution_time = time.time() - start_time
-            
+            # Use the QueryExecutor service to get structured output (data and row_count)
+            result = query_executor.execute_query(
+                codebase_hash=codebase_hash,
+                cpg_path=codebase_info.cpg_path,
+                query=query.strip(),
+                timeout=timeout or 30,
+                limit=None,
+            )
+
             response = {
-                "success": result.get("success", False),
-                "stdout": result.get("stdout", ""),
-                "stderr": result.get("stderr", ""),
-                "execution_time": execution_time,
+                "success": result.success,
+                "data": result.data,
+                "row_count": result.row_count,
+                "execution_time": getattr(result, "execution_time", None),
             }
-            
+
+            # Include error information if present
+            if not result.success and getattr(result, "error", None):
+                response["error"] = result.error
+
             # If validation was requested, include it in response
             if validate and validation_result:
                 response["validation"] = validation_result
-            
-            # If query failed, try to provide helpful suggestions
-            if not response["success"] and response["stderr"]:
-                stderr = response["stderr"]
-                error_suggestion = CPGQLValidator.get_error_suggestion(stderr)
+
+            # If query failed, try to provide helpful suggestions from stderr (if available)
+            if not response["success"] and result.error:
+                error_suggestion = CPGQLValidator.get_error_suggestion(result.error)
                 if error_suggestion:
                     response["suggestion"] = error_suggestion
                     response["help"] = {
                         "description": error_suggestion.get("description"),
                         "solution": error_suggestion.get("solution"),
-                        "examples": error_suggestion.get("examples", [])[:3],  # First 3 examples
+                        "examples": error_suggestion.get("examples", [])[:3],
                     }
-            
             return response
 
         except ValidationError as e:
