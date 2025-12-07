@@ -453,8 +453,7 @@ def register_taint_analysis_tools(mcp, services: dict):
                         raise ValidationError(
                             f"{node_type}_node_id must be a valid integer: {node_id}"
                         )
-                    query = f'cpg.call.id({
-                        node_id_long}L).map(c => (c.id, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take(1).l'
+                    query = f'cpg.call.id({node_id_long}L).map(c => (c.id, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take(1).l'
                 else:
                     parts = location.split(":")
                     if len(parts) < 2:
@@ -471,11 +470,9 @@ def register_taint_analysis_tools(mcp, services: dict):
                     method_name = parts[2] if len(parts) > 2 else None
 
                     if method_name:
-                        query = f'cpg.call.where(_.file.name(".*{filename}$")).lineNumber({line_num}).filter(_.method.fullName.contains("{
-                            method_name}")).map(c => (c.id, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take(1).l'
+                        query = f'cpg.call.where(_.file.name(".*{filename}$")).lineNumber({line_num}).filter(_.method.fullName.contains("{method_name}")).map(c => (c.id, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take(1).l'
                     else:
-                        query = f'cpg.call.where(_.file.name(".*{filename}$")).lineNumber({
-                            line_num}).map(c => (c.id, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take(1).l'
+                        query = f'cpg.call.where(_.file.name(".*{filename}$")).lineNumber({line_num}).map(c => (c.id, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take(1).l'
 
                 result = query_executor.execute_query(
                     codebase_hash=codebase_hash,
@@ -699,8 +696,7 @@ def register_taint_analysis_tools(mcp, services: dict):
                 reachable = bool(result.data[0])
 
             message = (
-                f"Method '{target_method}' is {
-                    'reachable' if reachable else 'not reachable'} "
+                f"Method '{target_method}' is {'reachable' if reachable else 'not reachable'} "
                 f"from '{source_method}'"
             )
 
@@ -1125,11 +1121,9 @@ def register_taint_analysis_tools(mcp, services: dict):
             # Single-line CPGQL query for argument-matching flows
             query = (
                 f'cpg.call.name("{source_name}").flatMap(src => {{'
-                f'  val argExpr = src.argument.l.lift({
-                    arg_index}).map(_.code).getOrElse("<no-arg>"); '
+                f'  val argExpr = src.argument.l.lift({arg_index}).map(_.code).getOrElse("<no-arg>"); '
                 f'  cpg.call.name("{sink_name}").filter(sink => '
-                f"    sink.argument.l.size > {
-                    arg_index} && sink.argument.l({arg_index}).code == argExpr"
+                f"    sink.argument.l.size > {arg_index} && sink.argument.l({arg_index}).code == argExpr"
                 f"  ).map(sink => Map("
                 f'    "source" -> Map('
                 f'      "name" -> src.name, '

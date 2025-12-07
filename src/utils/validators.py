@@ -16,8 +16,7 @@ def validate_source_type(source_type: str):
     valid_types = [e.value for e in SourceType]
     if source_type not in valid_types:
         raise ValidationError(
-            f"Invalid source_type '{source_type}'. Must be one of: {
-                ', '.join(valid_types)}"
+            f"Invalid source_type '{source_type}'. Must be one of: {', '.join(valid_types)}"
         )
 
 

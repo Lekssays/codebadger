@@ -262,8 +262,7 @@ def register_code_browsing_tools(mcp, services: dict):
                             code_lines = lines[line_number - 1: actual_end_line]
                             full_code = "".join(code_lines)
                         else:
-                            full_code = f"// Invalid line range: {line_number}-{
-                                line_number_end}, file has {total_lines} lines"
+                            full_code = f"// Invalid line range: {line_number}-{line_number_end}, file has {total_lines} lines"
                     else:
                         full_code = f"// Source file not found: {method_filename}"
                 except Exception as e:
