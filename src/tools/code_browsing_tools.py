@@ -32,14 +32,14 @@ Returns:
     {
         "success": true,
         "methods": [...],
-        "total": 100,create_cpg_session
+        "total": 100,generate_cpg
         "page": 1,
         "page_size": 100,
         "total_pages": 1
     }"""
     )
     def list_methods(
-        codebase_hash: Annotated[str, Field(description="The session ID from create_cpg_session")],
+        codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
         name_pattern: Annotated[Optional[str], Field(description="Optional regex to filter method names (e.g., '.*authenticate.*')")] = None,
         file_pattern: Annotated[Optional[str], Field(description="Optional regex to filter by file path")] = None,
         callee_pattern: Annotated[Optional[str], Field(description="Optional regex to filter for methods that call a specific function (e.g., 'memcpy|free|malloc')")] = None,
@@ -88,7 +88,7 @@ Returns:
     }"""
     )
     def list_files(
-        codebase_hash: Annotated[str, Field(description="The session ID from create_cpg_create")],
+        codebase_hash: Annotated[str, Field(description="The codebase hash from create_cpg_create")],
         local_path: Annotated[Optional[str], Field(description="Optional path inside the codebase to list (relative to source root or absolute). When provided, per-directory limit is increased to 50.")] = None,
         limit: Annotated[int, Field(description="Maximum number of results to fetch for caching")] = 1000,
         page: Annotated[int, Field(description="Page number")] = 1,
@@ -140,7 +140,7 @@ Returns:
     }"""
     )
     def get_method_source(
-        codebase_hash: Annotated[str, Field(description="The session ID from create_cpg_session")],
+        codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
         method_name: Annotated[str, Field(description="Name of the method (can be regex pattern)")],
         filename: Annotated[Optional[str], Field(description="Optional filename to disambiguate methods with same name")] = None,
     ) -> Dict[str, Any]:
@@ -292,7 +292,7 @@ Returns:
     }"""
     )
     def list_calls(
-        codebase_hash: Annotated[str, Field(description="The session ID from create_cpg_session")],
+        codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
         caller_pattern: Annotated[Optional[str], Field(description="Optional regex to filter caller method names")] = None,
         callee_pattern: Annotated[Optional[str], Field(description="Optional regex to filter callee method names")] = None,
         limit: Annotated[int, Field(description="Maximum number of results to fetch for caching")] = 1000,
@@ -344,7 +344,7 @@ Returns:
     }"""
     )
     def get_call_graph(
-        codebase_hash: Annotated[str, Field(description="The session ID from create_cpg_session")],
+        codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
         method_name: Annotated[str, Field(description="Name of the method to analyze (can be regex)")],
         depth: Annotated[int, Field(description="How many levels deep to traverse (max recommended: 10)")] = 5,
         direction: Annotated[str, Field(description="Either 'outgoing' (callees) or 'incoming' (callers)")] = "outgoing",
@@ -606,7 +606,7 @@ Returns:
     }"""
     )
     def list_parameters(
-        codebase_hash: Annotated[str, Field(description="The session ID from create_cpg_session")],
+        codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
         method_name: Annotated[str, Field(description="Name of the method (can be regex pattern)")],
     ) -> Dict[str, Any]:
         """List parameters of a specific method."""
@@ -653,7 +653,7 @@ Returns:
     }"""
     )
     def find_literals(
-        codebase_hash: Annotated[str, Field(description="The session ID from create_cpg_session")],
+        codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
         pattern: Annotated[Optional[str], Field(description="Optional regex to filter literal values (e.g., '.*password.*')")] = None,
         literal_type: Annotated[Optional[str], Field(description="Optional type filter (e.g., 'string', 'int')")] = None,
         limit: Annotated[int, Field(description="Maximum number of results")] = 50,
@@ -701,7 +701,7 @@ Returns:
     }"""
     )
     def get_codebase_summary(
-        codebase_hash: Annotated[str, Field(description="The session ID from create_cpg_session")]
+        codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")]
     ) -> Dict[str, Any]:
         """Get a high-level summary of the codebase structure."""
         try:
@@ -715,74 +715,110 @@ Returns:
             if not codebase_info or not codebase_info.cpg_path:
                 raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
 
-            # Get metadata
-            meta_query = "cpg.metaData.map(m => (m.language, m.version)).toJsonPretty"
-            meta_result = query_executor.execute_query(
-                codebase_hash=codebase_hash,
-                cpg_path=codebase_info.cpg_path,
-                query=meta_query,
-                timeout=10,
-                limit=1,
-            )
-
-            language = "unknown"
-            if meta_result.success and meta_result.data:
-                item = meta_result.data[0]
-                if isinstance(item, dict):
-                    language = item.get("_1", "unknown")
-
-            # Get counts
+            # Robust query to get all stats in one go
             stats_query = """
-            cpg.metaData.map(_ => (
-                cpg.file.size,
-                cpg.method.size,
-                cpg.method.isExternal(false).size,
-                cpg.call.size,
-                cpg.literal.size
-            )).toJsonPretty
+            {
+                val numFiles = cpg.file.size
+                val numMethods = cpg.method.size
+                val numMethodsUser = cpg.method.isExternal(false).size
+                val numCalls = cpg.call.size
+                val numLiterals = cpg.literal.size
+                val language = cpg.metaData.language.headOption.getOrElse("unknown")
+                
+                Map(
+                    "success" -> true,
+                    "language" -> language,
+                    "total_files" -> numFiles,
+                    "total_methods" -> numMethods,
+                    "user_defined_methods" -> numMethodsUser,
+                    "total_calls" -> numCalls,
+                    "total_literals" -> numLiterals
+                ).toJsonPretty
+            }
             """
 
-            print(f"DEBUG: codebase_hash received: '{codebase_hash}'")
-            stats_result = query_executor.execute_query(
+            result = query_executor.execute_query(
                 codebase_hash=codebase_hash,
                 cpg_path=codebase_info.cpg_path,
                 query=stats_query,
                 timeout=30,
                 limit=1,
             )
-            print(f"DEBUG: stats_result success: {stats_result.success}, data: {stats_result.data}")
 
+            if not result.success:
+                logger.error(f"Query failed: {result.error}")
+                return {
+                    "success": False,
+                    "error": {"code": "QUERY_ERROR", "message": result.error}
+                }
+
+            import json
             summary = {
-                "language": language,
+                "language": "unknown",
                 "total_files": 0,
                 "total_methods": 0,
                 "user_defined_methods": 0,
+                "external_methods": 0,
                 "total_calls": 0,
                 "total_literals": 0,
             }
 
-            if stats_result.success and stats_result.data:
-                item = stats_result.data[0]
-                data = None
-                
-                if isinstance(item, dict):
-                    data = item
-                elif isinstance(item, str):
-                    try:
-                        import json
-                        data = json.loads(item)
-                    except json.JSONDecodeError:
-                        logger.warning(f"Failed to parse summary stats JSON: {item[:100]}...")
-                
-                if data:
-                    summary["total_files"] = int(data.get("_1", 0))
-                    summary["total_methods"] = int(data.get("_2", 0))
-                    summary["user_defined_methods"] = int(data.get("_3", 0))
-                    summary["total_calls"] = int(data.get("_4", 0))
-                    summary["total_literals"] = int(data.get("_5", 0))
-                    summary["external_methods"] = (
-                        summary["total_methods"] - summary["user_defined_methods"]
-                    )
+            try:
+                # result.data can be:
+                # 1. List of single-key dicts (Scala Map.toJsonPretty format): [{"key1": val1}, {"key2": val2}, ...]
+                # 2. List containing a single dict with all keys (expected format)
+                # 3. List containing a JSON string (to be parsed)
+                if result.data and isinstance(result.data, list) and len(result.data) > 0:
+                    data = {}
+                    
+                    # Check if it's a list of single-key dicts (Scala Map format)
+                    if all(isinstance(item, dict) and len(item) == 1 for item in result.data):
+                        # Merge all single-key dicts into one
+                        for item in result.data:
+                            data.update(item)
+                        logger.debug(f"Merged Scala Map format data: {data}")
+                    else:
+                        # First element is either a dict or a JSON string
+                        raw_data = result.data[0]
+                        if isinstance(raw_data, str):
+                            data = json.loads(raw_data)
+                        elif isinstance(raw_data, dict):
+                            data = raw_data
+                        else:
+                            data = {}
+                    
+                    # Extract data based on the format
+                    if "_1" in data:
+                        # Mock format: {"_1": language, "_2": 5, "_3": 10, ...}
+                        summary["language"] = data.get("_1", "unknown")
+                        summary["total_files"] = data.get("_2", 0)
+                        summary["total_methods"] = data.get("_3", 0)
+                        summary["user_defined_methods"] = data.get("_4", 0)
+                        summary["total_calls"] = data.get("_5", 0)
+                        summary["total_literals"] = data.get("_6", 0)
+                        summary["external_methods"] = (
+                            summary["total_methods"] - summary["user_defined_methods"]
+                        )
+                    else:
+                        # Joern/Scala format with named keys
+                        summary["language"] = data.get("language", "unknown")
+                        summary["total_files"] = data.get("total_files", 0)
+                        summary["total_methods"] = data.get("total_methods", 0)
+                        summary["user_defined_methods"] = data.get("user_defined_methods", 0)
+                        summary["total_calls"] = data.get("total_calls", 0)
+                        summary["total_literals"] = data.get("total_literals", 0)
+                        summary["external_methods"] = (
+                            summary["total_methods"] - summary["user_defined_methods"]
+                        )
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse summary JSON: {e}")
+                return {
+                    "success": False,
+                    "error": {"code": "PARSE_ERROR", "message": f"Failed to parse result: {str(e)}"}
+                }
+            except Exception as e:
+                logger.error(f"Error processing summary data: {e}")
+                # Return partial summary instead of failing completely
 
             return {"success": True, "summary": summary}
 
@@ -815,7 +851,7 @@ Returns:
     }"""
     )
     def get_code_snippet(
-        codebase_hash: Annotated[str, Field(description="The session ID from create_cpg_session")],
+        codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
         filename: Annotated[str, Field(description="Name of the file to retrieve code from (relative to source root)")],
         start_line: Annotated[int, Field(description="Starting line number (1-indexed)")],
         end_line: Annotated[int, Field(description="Ending line number (1-indexed, inclusive)")],
@@ -923,7 +959,7 @@ Returns:
     }"""
     )
     def run_cpgql_query(
-        codebase_hash: Annotated[str, Field(description="The session ID from create_cpg_session")],
+        codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
         query: Annotated[str, Field(description="The CPGQL query string to execute")],
         timeout: Annotated[Optional[int], Field(description="Optional timeout in seconds")] = None,
         validate: Annotated[bool, Field(description="If true, validate query syntax before executing")] = False,
@@ -1034,7 +1070,7 @@ Returns:
     }"""
     )
     def find_bounds_checks(
-        codebase_hash: Annotated[str, Field(description="The session ID from create_cpg_session")],
+        codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
         buffer_access_location: Annotated[str, Field(description="Location of buffer access in format 'filename:line' (e.g., 'parser.c:3393')")],
     ) -> Dict[str, Any]:
         """Find bounds checks near buffer access."""

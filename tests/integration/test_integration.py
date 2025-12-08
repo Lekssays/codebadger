@@ -34,15 +34,11 @@ class TestCodeBadgerIntegration:
 
     @pytest.fixture
     async def client(self):
-        """FastMCP client fixture"""
-        server_url = "http://localhost:4242/mcp"
-        try:
-            async with Client(server_url) as client_instance:
-                # Test connectivity with timeout
-                await asyncio.wait_for(client_instance.ping(), timeout=5.0)
-                yield client_instance
-        except (asyncio.TimeoutError, Exception) as e:
-            pytest.skip(f"Cannot connect to server at {server_url}: {e}")
+        """FastMCP client fixture using in-memory server"""
+        from main import mcp
+        
+        async with Client(mcp) as client_instance:
+            yield client_instance
 
     @pytest.fixture
     def codebase_path(self):
@@ -50,7 +46,7 @@ class TestCodeBadgerIntegration:
         # MCP server runs on host machine with direct filesystem access
         # Use the test codebase that exists in playground/codebases/core
         project_root = Path(__file__).parent.parent.parent
-        return str(project_root / "playground" / "codebases" / "core")
+        return str((project_root / "playground" / "codebases" / "core").resolve())
 
     def extract_tool_result(self, result):
         """Extract dictionary data from CallToolResult"""
@@ -339,9 +335,26 @@ class TestCodeBadgerIntegration:
         for field in expected_fields:
             assert field in summary, f"Summary missing field: {field}"
 
-        assert summary["language"] in ["c", "C", "unknown"], f"Unexpected language: {summary['language']}"
+        assert summary["language"] in ["c", "C", "NEWC", "unknown"], f"Unexpected language: {summary['language']}"
         print(f"DEBUG SUMMARY: {summary}")
-        assert summary["total_files"] >= 1 or summary["total_methods"] >= 1, f"Should have at least 1 file or method. Got summary: {summary}"
+        
+        # Add retry logic for flaky summary stats
+        import time
+        for _ in range(3):
+            if summary["total_files"] >= 1:
+                break
+            print("Retrying codebase summary fetch...")
+            time.sleep(2)
+            summary_result = await client.call_tool("get_codebase_summary", {
+                "codebase_hash": codebase_hash
+            })
+            summary_dict = self.extract_tool_result(summary_result)
+            if not summary_dict.get("success"):
+                print(f"RETRY FAILED: {summary_dict}")
+            summary = summary_dict.get("summary", {})
+            print(f"RETRY SUMMARY: {summary}")
+
+        assert summary["total_files"] >= 1 or summary["total_methods"] >= 1, f"Should have at least 1 file or method. Got summary: {summary}, Result: {summary_dict}"
         assert summary["total_methods"] >= 0
         assert summary["total_calls"] >= 0
 

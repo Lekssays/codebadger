@@ -46,7 +46,7 @@ Returns:
     }"""
     )
     def find_taint_sources(
-        codebase_hash: Annotated[str, Field(description="The session ID from create_cpg_session")],
+        codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
         language: Annotated[Optional[str], Field(description="Programming language to use for default patterns (e.g., 'c', 'java'). If not provided, uses the session's language")] = None,
         source_patterns: Annotated[Optional[list], Field(description="Optional list of regex patterns to match source function names (e.g., ['getenv', 'fgets', 'scanf']). If not provided, uses default patterns")] = None,
         filename: Annotated[Optional[str], Field(description="Optional filename to filter results (e.g., 'shell.c', 'main.c'). Uses regex matching, so partial names work (e.g., 'shell' matches 'shell.c')")] = None,
@@ -159,7 +159,7 @@ Returns:
     }"""
     )
     def find_taint_sinks(
-        codebase_hash: Annotated[str, Field(description="The session ID from create_cpg_session")],
+        codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
         language: Annotated[Optional[str], Field(description="Programming language to use for default patterns (e.g., 'c', 'java'). If not provided, uses the session's language")] = None,
         sink_patterns: Annotated[Optional[list], Field(description="Optional list of regex patterns to match sink function names (e.g., ['system', 'popen', 'sprintf']). If not provided, uses default patterns")] = None,
         filename: Annotated[Optional[str], Field(description="Optional filename to filter results (e.g., 'shell.c', 'main.c'). Uses regex matching, so partial names work (e.g., 'shell' matches 'shell.c')")] = None,
@@ -332,7 +332,7 @@ Example - Only Source provided:
     # Result: ✓ Found flows to all dangerous sinks (free, system, etc.) that use the allocated variable"""
     )
     def find_taint_flows(
-        codebase_hash: Annotated[str, Field(description="The session ID from create_cpg_session")],
+        codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
         source_node_id: Annotated[Optional[str], Field(description="Node ID of source call (from find_taint_sources). Example: '12345'")] = None,
         sink_node_id: Annotated[Optional[str], Field(description="Node ID of sink call (from find_taint_sinks). Example: '67890'")] = None,
         source_location: Annotated[Optional[str], Field(description="Alternative: 'filename:line' or 'filename:line:method'. Example: 'main.c:42' or 'main.c:42:process_data'")] = None,
@@ -552,7 +552,7 @@ Returns:
     }"""
     )
     def check_method_reachability(
-        codebase_hash: Annotated[str, Field(description="The session ID from create_cpg_session")],
+        codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
         source_method: Annotated[str, Field(description="Name of the source method (can be regex pattern)")],
         target_method: Annotated[str, Field(description="Name of the target method (can be regex pattern)")],
     ) -> Dict[str, Any]:
@@ -684,7 +684,7 @@ Returns:
     }"""
     )
     def get_program_slice(
-        codebase_hash: Annotated[str, Field(description="The session ID from create_cpg_session")],
+        codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
         node_id: Annotated[Optional[str], Field(description="Preferred: Direct CPG node ID of the target call (Get from list_calls or other query results). Example: '12345'")] = None,
         location: Annotated[Optional[str], Field(description="Alternative: 'filename:line_number' or 'filename:line_number:call_name'. Example: 'main.c:42' or 'main.c:42:memcpy'")] = None,
         include_dataflow: Annotated[bool, Field(description="Include dataflow (variable assignments) in slice")] = True,
@@ -961,7 +961,7 @@ Returns:
         - list_methods: Find methods that use specific calls (callee_pattern parameter)
 
         Args:
-            codebase_hash: The session ID from create_cpg_session
+            codebase_hash: The codebase hash from generate_cpg
             source_name: Name of the source function call (where argument originates)
             sink_name: Name of the sink function call (where argument is used)
             arg_index: Argument position to match (0-based indexing, default: 0)
@@ -1097,7 +1097,7 @@ Returns:
         can affect a potentially vulnerable operation or where tainted data can flow.
 
         Args:
-            codebase_hash: The session ID from create_cpg_session
+            codebase_hash: The codebase hash from generate_cpg
             location: Location in format "filename:line" (e.g., "parser.c:3393")
             variable: Name of the variable to analyze (e.g., "len", "buffer")
             direction: Analysis direction - "backward" (default) or "forward"

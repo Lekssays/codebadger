@@ -103,12 +103,13 @@ class JoernServerClient:
                 "stderr": f"Error: {str(e)}"
             }
 
-    def load_cpg(self, cpg_path: str, timeout: int = 120) -> bool:
+    def load_cpg(self, cpg_path: str, project_name: Optional[str] = None, timeout: int = 120) -> bool:
         """
         Load a CPG file into the Joern server
         
         Args:
             cpg_path: Path to the CPG file to load
+            project_name: Optional name to assign to the project
             timeout: Maximum time to wait for loading (seconds)
             
         Returns:
@@ -116,7 +117,9 @@ class JoernServerClient:
         """
         try:
             # Use importCpg to load pre-built cpg.bin file
-            query = f'importCpg("{cpg_path}")'
+            # Use workspace.resett to ensure clean state in the isolated workspace
+            # We don't force project name to avoid potential API issues, letting Joern derive it from filename
+            query = f'workspace.reset; importCpg("{cpg_path}")'
             logger.info(f"Loading CPG from {cpg_path}")
             
             result = self.execute_query(query, timeout=timeout)
@@ -137,17 +140,14 @@ class JoernServerClient:
                             logger.info(f"CPG verified: {method_count} methods found")
                             return True
                         else:
-                            logger.warning(f"Could not parse method count from: {stdout}")
-                            # Still return True since importCpg succeeded
-                            return True
+                            logger.error(f"Could not parse method count from: {stdout}")
+                            return False
                     else:
-                        logger.warning(f"Could not verify CPG: {verify_result.get('stderr')}")
-                        # Still return True since importCpg succeeded
-                        return True
+                        logger.error(f"Could not verify CPG: {verify_result.get('stderr')}")
+                        return False
                 except Exception as e:
-                    logger.warning(f"Could not verify CPG: {e}")
-                    # Still return True since importCpg succeeded
-                    return True
+                    logger.error(f"Could not verify CPG: {e}")
+                    return False
             else:
                 error_msg = result.get('stderr', '')
                 # Check if error mentions connection issues but might have succeeded

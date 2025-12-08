@@ -61,7 +61,9 @@ class JoernServerManager:
 
             # Start Joern server inside the existing container using exec
             # Use nohup and background to keep it running
-            joern_cmd = f"nohup /opt/joern/joern-cli/joern --server --server-host 0.0.0.0 --server-port {port} > /tmp/joern-{codebase_hash}.log 2>&1 &"
+            # IMPORTANT: Run in unique directory to isolate Joern workspace
+            work_dir = f"/tmp/joern-server-{codebase_hash}"
+            joern_cmd = f"mkdir -p {work_dir} && cd {work_dir} && nohup /opt/joern/joern-cli/joern --server --server-host 0.0.0.0 --server-port {port} > /tmp/joern-{codebase_hash}.log 2>&1 &"
             
             logger.info(f"Starting Joern server for {codebase_hash} on port {port} inside container {self.container_name}")
             logger.debug(f"Command: bash -c '{joern_cmd}'")
@@ -130,13 +132,22 @@ class JoernServerManager:
             from .joern_client import JoernServerClient
             client = JoernServerClient(host="localhost", port=port)
 
-            logger.info(f"Loading CPG {cpg_path} into Joern server for {codebase_hash} (port {port})")
+            # Convert host path to container path for Joern running in Docker
+            # Host path like /home/aleks/.../playground/cpgs/hash/cpg.bin -> /playground/cpgs/hash/cpg.bin
+            container_cpg_path = cpg_path
+            if "/playground/" in cpg_path:
+                parts = cpg_path.split("/playground/")
+                if len(parts) >= 2:
+                    container_cpg_path = f"/playground/{parts[-1]}"
+            
+            logger.info(f"Loading CPG {cpg_path} (container: {container_cpg_path}) into Joern server for {codebase_hash} (port {port})")
             
             # Retry loading with exponential backoff
             max_retries = 3
             for attempt in range(max_retries):
                 try:
-                    success = client.load_cpg(cpg_path, timeout=timeout)
+                    # Pass the container path to the client with explicit project name
+                    success = client.load_cpg(container_cpg_path, project_name=codebase_hash, timeout=timeout)
                     if success:
                         logger.info(f"CPG loaded successfully for {codebase_hash}")
                         return True

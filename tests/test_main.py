@@ -23,18 +23,8 @@ class TestLifespan:
     @pytest.mark.asyncio
     async def test_lifespan_success(self):
         """Test successful lifespan startup and shutdown"""
-        class DummyMCP:
-            def __init__(self):
-                self.registered = {}
-
-            def tool(self, **kwargs):
-                def decorator(func):
-                    self.registered[func.__name__] = func
-                    return func
-
-                return decorator
-
-        mock_mcp = DummyMCP()
+        from fastmcp import FastMCP
+        mock_mcp = FastMCP("TestServer")
 
         # Mock all the services and dependencies
         with patch("main.load_config") as mock_load_config, patch(
@@ -83,18 +73,8 @@ class TestLifespan:
     @pytest.mark.asyncio
     async def test_lifespan_initialization_failure(self):
         """Test lifespan with initialization failure"""
-        class DummyMCP:
-            def __init__(self):
-                self.registered = {}
-
-            def tool(self):
-                def decorator(func):
-                    self.registered[func.__name__] = func
-                    return func
-
-                return decorator
-
-        mock_mcp = DummyMCP()
+        from fastmcp import FastMCP
+        mock_mcp = FastMCP("TestServer")
 
         with patch(
             "main.load_config", side_effect=Exception("Config load failed")

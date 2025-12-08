@@ -9,17 +9,7 @@ from src.models import Config, CPGConfig, QueryResult, CodebaseInfo
 from src.tools.mcp_tools import register_tools
 
 
-class FakeMCP:
-    def __init__(self):
-        self.registered = {}
-
-    def tool(self):
-        # decorator to register functions by name
-        def _decorator(func):
-            self.registered[func.__name__] = func
-            return func
-
-        return _decorator
+from fastmcp import FastMCP, Client
 
 
 @pytest.fixture
@@ -86,90 +76,102 @@ def fake_services():
     return services
 
 
-def test_find_taint_sources_success(fake_services):
-    mcp = FakeMCP()
+@pytest.mark.asyncio
+async def test_find_taint_sources_success(fake_services):
+    mcp = FastMCP("TestServer")
     register_tools(mcp, fake_services)
 
-    func = mcp.registered.get("find_taint_sources")
-    assert func is not None
+    async with Client(mcp) as client:
+        res_json = await client.call_tool("find_taint_sources", {"codebase_hash": fake_services["codebase_hash"], "language": "c", "limit": 10})
+        import json
+        res = json.loads(res_json.content[0].text)
 
-    # call the registered tool function
-    res = func(codebase_hash=fake_services["codebase_hash"], language="c", limit=10)
-
-    assert res.get("success") is True
-    assert "sources" in res
-    assert isinstance(res["sources"], list)
-    assert res["total"] == 1
+        assert res.get("success") is True
+        assert "sources" in res
+        assert isinstance(res["sources"], list)
+        assert res["total"] == 1
 
 
-def test_find_taint_sources_with_filename_filter(fake_services):
+@pytest.mark.asyncio
+async def test_find_taint_sources_with_filename_filter(fake_services):
     """Test find_taint_sources with filename parameter"""
-    mcp = FakeMCP()
+    mcp = FastMCP("TestServer")
     register_tools(mcp, fake_services)
 
-    func = mcp.registered.get("find_taint_sources")
-    assert func is not None
+    async with Client(mcp) as client:
+        # Call with filename filter
+        res_json = await client.call_tool(
+            "find_taint_sources",
+            {
+                "codebase_hash": fake_services["codebase_hash"],
+                "language": "c",
+                "filename": "shell.c",
+                "limit": 10,
+            }
+        )
+        import json
+        res = json.loads(res_json.content[0].text)
 
-    # Call with filename filter
-    res = func(
-        codebase_hash=fake_services["codebase_hash"],
-        language="c",
-        filename="shell.c",
-        limit=10,
-    )
-
-    assert res.get("success") is True
-    assert "sources" in res
-    assert isinstance(res["sources"], list)
-    # Verify the query executor was called with a query containing the file filter
-    query_executor = fake_services["query_executor"]
-    assert query_executor.last_query is not None
-    assert "where(_.file.name" in query_executor.last_query
-    assert "shell" in query_executor.last_query
+        assert res.get("success") is True
+        assert "sources" in res
+        assert isinstance(res["sources"], list)
+        
+        # Verify the query executor was called with a query containing the file filter
+        query_executor = fake_services["query_executor"]
+        assert query_executor.last_query is not None
+        assert "where(_.file.name" in query_executor.last_query
+        assert "shell" in query_executor.last_query
 
 
-def test_find_taint_sinks_success(fake_services):
-    mcp = FakeMCP()
+@pytest.mark.asyncio
+async def test_find_taint_sinks_success(fake_services):
+    mcp = FastMCP("TestServer")
     register_tools(mcp, fake_services)
 
-    func = mcp.registered.get("find_taint_sinks")
-    assert func is not None
+    async with Client(mcp) as client:
+        res_json = await client.call_tool("find_taint_sinks", {"codebase_hash": fake_services["codebase_hash"], "language": "c", "limit": 10})
+        import json
+        res = json.loads(res_json.content[0].text)
 
-    res = func(codebase_hash=fake_services["codebase_hash"], language="c", limit=10)
-
-    assert res.get("success") is True
-    assert "sinks" in res
-    assert isinstance(res["sinks"], list)
-    assert res["total"] == 1
+        assert res.get("success") is True
+        assert "sinks" in res
+        assert isinstance(res["sinks"], list)
+        assert res["total"] == 1
 
 
-def test_find_taint_sinks_with_filename_filter(fake_services):
+@pytest.mark.asyncio
+async def test_find_taint_sinks_with_filename_filter(fake_services):
     """Test find_taint_sinks with filename parameter"""
-    mcp = FakeMCP()
+    mcp = FastMCP("TestServer")
     register_tools(mcp, fake_services)
 
-    func = mcp.registered.get("find_taint_sinks")
-    assert func is not None
+    async with Client(mcp) as client:
+        # Call with filename filter
+        res_json = await client.call_tool(
+            "find_taint_sinks",
+            {
+                "codebase_hash": fake_services["codebase_hash"],
+                "language": "c",
+                "filename": "main.c",
+                "limit": 10,
+            }
+        )
+        import json
+        res = json.loads(res_json.content[0].text)
 
-    # Call with filename filter
-    res = func(
-        codebase_hash=fake_services["codebase_hash"],
-        language="c",
-        filename="main.c",
-        limit=10,
-    )
-
-    assert res.get("success") is True
-    assert "sinks" in res
-    assert isinstance(res["sinks"], list)
-    # Verify the query executor was called with a query containing the file filter
-    query_executor = fake_services["query_executor"]
-    assert query_executor.last_query is not None
-    assert "where(_.file.name" in query_executor.last_query
-    assert "main" in query_executor.last_query
+        assert res.get("success") is True
+        assert "sinks" in res
+        assert isinstance(res["sinks"], list)
+        
+        # Verify the query executor was called with a query containing the file filter
+        query_executor = fake_services["query_executor"]
+        assert query_executor.last_query is not None
+        assert "where(_.file.name" in query_executor.last_query
+        assert "main" in query_executor.last_query
 
 
-def test_find_taint_flows_success(fake_services):
+@pytest.mark.asyncio
+async def test_find_taint_flows_success(fake_services):
     # Setup mock for source, sink, and flow queries
     services = fake_services
 
@@ -229,20 +231,25 @@ def test_find_taint_flows_success(fake_services):
         last_accessed=datetime.now(timezone.utc),
     )
 
-    mcp = FakeMCP()
+    mcp = FastMCP("TestServer")
     register_tools(mcp, services)
 
-    func = mcp.registered.get("find_taint_flows")
-    assert func is not None
+    async with Client(mcp) as client:
+        await client.call_tool(
+            "find_taint_flows",
+            {
+                "codebase_hash": services["codebase_hash"],
+                "source_node_id": "1001",
+                "sink_node_id": "1002",
+                "timeout": 10,
+            }
+        )
+        # We don't verify result structure much here as previous test, 
+        # but just ensuring it runs without error via client call is good for now, 
+        # or we could inspect result.
 
-    res = func(
-        codebase_hash=services["codebase_hash"],
-        source_node_id="1001",
-        sink_node_id="1002",
-        timeout=10,
-    )
-
-def test_find_taint_flows_source_only(fake_services):
+@pytest.mark.asyncio
+async def test_find_taint_flows_source_only(fake_services):
     # Setup mock for source-only query (flows to any sink)
     services = fake_services
 
@@ -291,41 +298,48 @@ def test_find_taint_flows_source_only(fake_services):
         last_accessed=datetime.now(timezone.utc),
     )
 
-    mcp = FakeMCP()
+    mcp = FastMCP("TestServer")
     register_tools(mcp, services)
 
-    func = mcp.registered.get("find_taint_flows")
-    assert func is not None
+    async with Client(mcp) as client:
+        res_json = await client.call_tool(
+            "find_taint_flows",
+            {
+                "codebase_hash": services["codebase_hash"],
+                "source_node_id": "1001",
+                "timeout": 10,
+            }
+        )
+        import json
+        res = json.loads(res_json.content[0].text)
 
-    res = func(
-        codebase_hash=services["codebase_hash"],
-        source_node_id="1001",
-        timeout=10,
-    )
-
-    assert res.get("success") is True
-    assert res["source"]["node_id"] == 1001
-    assert "flows" in res
-    assert isinstance(res["flows"], list)
-    assert res["total_flows"] == 1
+        assert res.get("success") is True
+        assert res["source"]["node_id"] == 1001
+        assert "flows" in res
+        assert isinstance(res["flows"], list)
+        assert res["total_flows"] == 1
 
 
-def test_find_taint_flows_sink_only_error(fake_services):
+@pytest.mark.asyncio
+async def test_find_taint_flows_sink_only_error(fake_services):
     # Test that sink-only queries are rejected
     services = fake_services
 
-    mcp = FakeMCP()
+    mcp = FastMCP("TestServer")
     register_tools(mcp, services)
 
-    func = mcp.registered.get("find_taint_flows")
-    assert func is not None
+    async with Client(mcp) as client:
+        res_json = await client.call_tool(
+            "find_taint_flows",
+            {
+                "codebase_hash": services["codebase_hash"],
+                "sink_node_id": "1002",
+                "timeout": 10,
+            }
+        )
+        import json
+        res = json.loads(res_json.content[0].text)
 
-    res = func(
-        codebase_hash=services["codebase_hash"],
-        sink_node_id="1002",
-        timeout=10,
-    )
-
-    assert res.get("success") is False
-    assert "error" in res
-    assert "Either source_node_id or source_location must be provided" in res["error"]["message"]
+        assert res.get("success") is False
+        assert "error" in res
+        assert "Either source_node_id or source_location must be provided" in res["error"]["message"]

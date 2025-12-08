@@ -74,7 +74,15 @@ class QueryExecutor:
         """Normalize query to ensure JSON output"""
         query = query.strip()
 
-        # Remove existing output modifiers
+        # Check if this is a block query that already produces JSON output
+        # Block queries start with { and end with }
+        if query.startswith('{') and query.endswith('}'):
+            # Check if the block contains .toJsonPretty or .toJson inside
+            if '.toJsonPretty' in query or '.toJson' in query:
+                # Block already produces JSON, don't modify
+                return query
+
+        # Remove existing output modifiers from the end
         if query.endswith('.toJsonPretty'):
             base_query = query[:-13]
         elif query.endswith('.toJson'):
