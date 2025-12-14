@@ -172,122 +172,20 @@ async def test_find_taint_sinks_with_filename_filter(fake_services):
 
 @pytest.mark.asyncio
 async def test_find_taint_flows_success(fake_services):
-    # Setup mock for source, sink, and flow queries
+    # Setup mock for point-to-point flow query
     services = fake_services
 
-    # Create side effect to return different results for 3 queries
-    source_result = QueryResult(
-        success=True,
-        data=[
-            {"_1": 1001, "_2": 'getenv("FOO")', "_3": "core.c", "_4": 10, "_5": "main"}
-        ],
-        row_count=1,
-    )
-
-    sink_result = QueryResult(
-        success=True,
-        data=[
-            {"_1": 1002, "_2": "system(cmd)", "_3": "core.c", "_4": 42, "_5": "execute"}
-        ],
-        row_count=1,
-    )
-
+    # The new API uses source_location and sink_location (file:line format)
+    # and executes a single unified query
     flow_result = QueryResult(
         success=True,
         data=[
-            {
-                "_1": 0,
-                "_2": 3,
-                "_3": [
-                    {"_1": 'getenv("FOO")', "_2": "core.c", "_3": 10, "_4": "CALL"},
-                    {"_1": "cmd", "_2": "core.c", "_3": 25, "_4": "IDENTIFIER"},
-                    {"_1": "system(cmd)", "_2": "core.c", "_3": 42, "_4": "CALL"},
-                ],
-            }
+            '[{"flow_found": true, "source": {"code": "getenv(\\"FOO\\")", "file": "core.c", "line": 10}, "sink": {"code": "system(cmd)", "file": "core.c", "line": 42}, "variable": "cmd"}]'
         ],
         row_count=1,
     )
 
-    call_count = [0]
-
-    def mock_execute(*args, **kwargs):
-        call_count[0] += 1
-        if call_count[0] == 1:
-            return source_result 
-        elif call_count[0] == 2:
-            return sink_result
-        else:
-            return flow_result
-
-    services["query_executor"].execute_query = MagicMock(side_effect=mock_execute)
-    # Set codebase tracker to return a codebase info ready for queries
-    services["codebase_tracker"].get_codebase.return_value = CodebaseInfo(
-        codebase_hash=services["codebase_hash"],
-        source_type="local",
-        source_path="/path",
-        language="c",
-        cpg_path="/tmp/test.cpg",
-        created_at=datetime.now(timezone.utc),
-        last_accessed=datetime.now(timezone.utc),
-    )
-
-    mcp = FastMCP("TestServer")
-    register_tools(mcp, services)
-
-    async with Client(mcp) as client:
-        await client.call_tool(
-            "find_taint_flows",
-            {
-                "codebase_hash": services["codebase_hash"],
-                "source_node_id": "1001",
-                "sink_node_id": "1002",
-                "timeout": 10,
-            }
-        )
-        # We don't verify result structure much here as previous test, 
-        # but just ensuring it runs without error via client call is good for now, 
-        # or we could inspect result.
-
-@pytest.mark.asyncio
-async def test_find_taint_flows_source_only(fake_services):
-    # Setup mock for source-only query (flows to any sink)
-    services = fake_services
-
-    # Create side effect to return different results for 2 queries
-    source_result = QueryResult(
-        success=True,
-        data=[
-            {"_1": 1001, "_2": 'getenv("FOO")', "_3": "core.c", "_4": 10, "_5": "main"}
-        ],
-        row_count=1,
-    )
-
-    flow_result = QueryResult(
-        success=True,
-        data=[
-            {
-                "_1": 0,
-                "_2": 3,
-                "_3": [
-                    {"_1": 'getenv("FOO")', "_2": "core.c", "_3": 10, "_4": "CALL"},
-                    {"_1": "cmd", "_2": "core.c", "_3": 25, "_4": "IDENTIFIER"},
-                    {"_1": "system(cmd)", "_2": "core.c", "_3": 42, "_4": "CALL"},
-                ],
-            }
-        ],
-        row_count=1,
-    )
-
-    call_count = [0]
-
-    def mock_execute(*args, **kwargs):
-        call_count[0] += 1
-        if call_count[0] == 1:
-            return source_result 
-        else:
-            return flow_result
-
-    services["query_executor"].execute_query = MagicMock(side_effect=mock_execute)
+    services["query_executor"].execute_query = MagicMock(return_value=flow_result)
     services["codebase_tracker"].get_codebase.return_value = CodebaseInfo(
         codebase_hash=services["codebase_hash"],
         source_type="local",
@@ -306,7 +204,8 @@ async def test_find_taint_flows_source_only(fake_services):
             "find_taint_flows",
             {
                 "codebase_hash": services["codebase_hash"],
-                "source_node_id": "1001",
+                "source_location": "core.c:10",
+                "sink_location": "core.c:42",
                 "timeout": 10,
             }
         )
@@ -314,51 +213,27 @@ async def test_find_taint_flows_source_only(fake_services):
         res = json.loads(res_json.content[0].text)
 
         assert res.get("success") is True
-        assert res["source"]["node_id"] == 1001
-        assert "flows" in res
-        assert isinstance(res["flows"], list)
-        assert res["total_flows"] == 1
+        assert res.get("mode") == "point_to_point"
+        assert res.get("flow_found") is True
+        assert res["source"]["code"] == 'getenv("FOO")'
+        assert res["sink"]["code"] == "system(cmd)"
+        assert res["variable"] == "cmd"
 
 @pytest.mark.asyncio
-async def test_find_taint_flows_sink_only_backward(fake_services):
-    """Test that sink-only queries work for backward analysis"""
+async def test_find_taint_flows_source_only(fake_services):
+    # Setup mock for forward flow query (source -> sinks)
     services = fake_services
 
-    # Create side effect to return different results for 2 queries
-    sink_result = QueryResult(
-        success=True,
-        data=[
-            {"_1": 1002, "_2": "system(cmd)", "_3": "core.c", "_4": 42, "_5": "execute"}
-        ],
-        row_count=1,
-    )
-
+    # The new API uses source_location (file:line format) for forward analysis
     flow_result = QueryResult(
         success=True,
         data=[
-            {
-                "_1": 0,
-                "_2": 3,
-                "_3": [
-                    {"_1": 'getenv("FOO")', "_2": "core.c", "_3": 10, "_4": "CALL"},
-                    {"_1": "cmd", "_2": "core.c", "_3": 25, "_4": "IDENTIFIER"},
-                    {"_1": "system(cmd)", "_2": "core.c", "_3": 42, "_4": "CALL"},
-                ],
-            }
+            '[{"source": {"code": "getenv(\\"FOO\\")", "file": "core.c", "line": 10}, "sink": {"code": "system(cmd)", "file": "core.c", "line": 42}, "variable": "cmd", "path_length": 2}]'
         ],
         row_count=1,
     )
 
-    call_count = [0]
-
-    def mock_execute(*args, **kwargs):
-        call_count[0] += 1
-        if call_count[0] == 1:
-            return sink_result 
-        else:
-            return flow_result
-
-    services["query_executor"].execute_query = MagicMock(side_effect=mock_execute)
+    services["query_executor"].execute_query = MagicMock(return_value=flow_result)
     services["codebase_tracker"].get_codebase.return_value = CodebaseInfo(
         codebase_hash=services["codebase_hash"],
         source_type="local",
@@ -377,7 +252,53 @@ async def test_find_taint_flows_sink_only_backward(fake_services):
             "find_taint_flows",
             {
                 "codebase_hash": services["codebase_hash"],
-                "sink_node_id": "1002",
+                "source_location": "core.c:10",
+                "timeout": 10,
+            }
+        )
+        import json
+        res = json.loads(res_json.content[0].text)
+
+        assert res.get("success") is True
+        assert res.get("mode") == "forward"
+        assert "flows" in res
+        assert isinstance(res["flows"], list)
+        assert res["total"] == 1
+
+@pytest.mark.asyncio
+async def test_find_taint_flows_sink_only_backward(fake_services):
+    """Test that sink-only queries work for backward analysis"""
+    services = fake_services
+
+    # The new API uses sink_location (file:line format) for backward analysis
+    flow_result = QueryResult(
+        success=True,
+        data=[
+            '[{"source": {"code": "getenv(\\"FOO\\")", "file": "core.c", "line": 10}, "sink": {"code": "system(cmd)", "file": "core.c", "line": 42}, "variable": "cmd", "path_length": 2}]'
+        ],
+        row_count=1,
+    )
+
+    services["query_executor"].execute_query = MagicMock(return_value=flow_result)
+    services["codebase_tracker"].get_codebase.return_value = CodebaseInfo(
+        codebase_hash=services["codebase_hash"],
+        source_type="local",
+        source_path="/path",
+        language="c",
+        cpg_path="/tmp/test.cpg",
+        created_at=datetime.now(timezone.utc),
+        last_accessed=datetime.now(timezone.utc),
+    )
+
+    mcp = FastMCP("TestServer")
+    register_tools(mcp, services)
+
+    async with Client(mcp) as client:
+        res_json = await client.call_tool(
+            "find_taint_flows",
+            {
+                "codebase_hash": services["codebase_hash"],
+                "sink_location": "core.c:42",
                 "timeout": 10,
             }
         )
@@ -386,7 +307,7 @@ async def test_find_taint_flows_sink_only_backward(fake_services):
 
         assert res.get("success") is True
         assert res.get("mode") == "backward"
-        assert res["sink"]["node_id"] == 1002
         assert "flows" in res
         assert isinstance(res["flows"], list)
-        assert res["total_flows"] == 1
+        assert res["total"] == 1
+
