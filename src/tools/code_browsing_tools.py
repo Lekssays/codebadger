@@ -1327,3 +1327,307 @@ Returns:
                 "success": False,
                 "error": {"code": "INTERNAL_ERROR", "message": str(e)},
             }
+
+    # ============================================================================
+    # SEMANTIC ANALYSIS TOOLS
+    # ============================================================================
+
+    @mcp.tool(
+        description="""Get control flow graph (CFG) for a method.
+
+Returns nodes and edges representing control flow. Essential for understanding
+loops, conditions, and execution paths for exploit analysis.
+
+Returns: {success, method_name, cfg: {nodes: [{id, code, type}], edges: [{from, to, label}]}}"""
+    )
+    def get_cfg(
+        codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
+        method_name: Annotated[str, Field(description="Name of the method (can be regex pattern)")],
+        max_nodes: Annotated[int, Field(description="Maximum CFG nodes to return (for large methods)")] = 100,
+    ) -> Dict[str, Any]:
+        """Get control flow graph for a method."""
+        try:
+            validate_codebase_hash(codebase_hash)
+            codebase_tracker = services["codebase_tracker"]
+            query_executor = services["query_executor"]
+
+            codebase_info = codebase_tracker.get_codebase(codebase_hash)
+            if not codebase_info or not codebase_info.cpg_path:
+                raise ValidationError(f"CPG not found for codebase {codebase_hash}")
+
+            # Query for CFG nodes AND edges
+            query = f'''{{
+              val m = cpg.method.name("{method_name}").take(1).l.headOption
+              m match {{
+                case Some(method) =>
+                  val nodes = method.cfgNode.take({max_nodes}).map(n => Map(
+                    "_1" -> n.id,
+                    "_2" -> n.code.take(100),
+                    "_3" -> n.getClass.getSimpleName
+                  )).l
+                  val nodeIds = nodes.map(_("_1")).toSet
+                  val edges = method.cfgNode.take({max_nodes}).flatMap(n => 
+                    n.cfgNext.filter(next => nodeIds.contains(next.id)).map(next => 
+                      Map("_1" -> n.id, "_2" -> next.id)
+                    )
+                  ).l.distinct
+                  Map("nodes" -> nodes, "edges" -> edges)
+                case None => Map("nodes" -> List(), "edges" -> List())
+              }}
+            }}.toJsonPretty'''
+
+            result = query_executor.execute_query(
+                codebase_hash=codebase_hash,
+                cpg_path=codebase_info.cpg_path,
+                query=query,
+                timeout=30,
+                limit=max_nodes,
+            )
+
+            if not result.success:
+                return {
+                    "success": False,
+                    "error": {"code": "QUERY_ERROR", "message": result.error},
+                }
+
+            nodes = []
+            edges = []
+            if result.data:
+                # Result is a single map with "nodes" and "edges"
+                data = result.data[0] if result.data else {}
+                if isinstance(data, dict):
+                    raw_nodes = data.get("nodes", [])
+                    raw_edges = data.get("edges", [])
+                    for item in raw_nodes:
+                        if isinstance(item, dict):
+                            nodes.append({
+                                "id": item.get("_1"),
+                                "code": item.get("_2"),
+                                "type": item.get("_3"),
+                            })
+                    for item in raw_edges:
+                        if isinstance(item, dict):
+                            edges.append({
+                                "from": item.get("_1"),
+                                "to": item.get("_2"),
+                            })
+
+            return {
+                "success": True,
+                "method_name": method_name,
+                "nodes": nodes,
+                "edges": edges,
+                "total_nodes": len(nodes),
+                "total_edges": len(edges),
+                "max_nodes": max_nodes,
+                "truncated": len(nodes) >= max_nodes,
+            }
+
+        except ValidationError as e:
+            logger.error(f"Error getting CFG: {e}")
+            return {
+                "success": False,
+                "error": {"code": type(e).__name__.upper(), "message": str(e)},
+            }
+        except Exception as e:
+            logger.error(f"Unexpected error getting CFG: {e}", exc_info=True)
+            return {
+                "success": False,
+                "error": {"code": "INTERNAL_ERROR", "message": str(e)},
+            }
+
+
+    @mcp.tool(
+        description="""Get type/struct definition with members.
+
+Inspect struct or class memory layouts without reading header files.
+Essential for understanding buffer sizes and memory layouts.
+
+Returns: {success, types: [{name, fullName, filename, lineNumber, members: [{name, type}]}]}"""
+    )
+    def get_type_definition(
+        codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
+        type_name: Annotated[str, Field(description="Type name pattern (regex, e.g., '.*Buffer.*')")],
+        limit: Annotated[int, Field(description="Maximum types to return")] = 10,
+    ) -> Dict[str, Any]:
+        """Get type/struct definition with members."""
+        try:
+            validate_codebase_hash(codebase_hash)
+            codebase_tracker = services["codebase_tracker"]
+            query_executor = services["query_executor"]
+
+            codebase_info = codebase_tracker.get_codebase(codebase_hash)
+            if not codebase_info or not codebase_info.cpg_path:
+                raise ValidationError(f"CPG not found for codebase {codebase_hash}")
+
+            # Query for type definitions with members
+            query = f'''cpg.typeDecl.name("{type_name}").filter(_.member.nonEmpty).take({limit}).map {{ t =>
+              Map(
+                "_1" -> t.name,
+                "_2" -> t.fullName,
+                "_3" -> t.file.name.headOption.getOrElse("unknown"),
+                "_4" -> t.lineNumber.getOrElse(-1),
+                "_5" -> t.member.take(20).map(m => Map("name" -> m.name, "type" -> m.typeFullName)).l
+              )
+            }}.toJsonPretty'''
+
+            result = query_executor.execute_query(
+                codebase_hash=codebase_hash,
+                cpg_path=codebase_info.cpg_path,
+                query=query,
+                timeout=30,
+                limit=limit,
+            )
+
+            if not result.success:
+                return {
+                    "success": False,
+                    "error": {"code": "QUERY_ERROR", "message": result.error},
+                }
+
+            types = []
+            if result.data:
+                for item in result.data:
+                    if isinstance(item, dict):
+                        types.append({
+                            "name": item.get("_1"),
+                            "fullName": item.get("_2"),
+                            "filename": item.get("_3"),
+                            "lineNumber": item.get("_4"),
+                            "members": item.get("_5", []),
+                        })
+
+            return {
+                "success": True,
+                "types": types,
+                "total": len(types),
+            }
+
+        except ValidationError as e:
+            logger.error(f"Error getting type definition: {e}")
+            return {
+                "success": False,
+                "error": {"code": type(e).__name__.upper(), "message": str(e)},
+            }
+        except Exception as e:
+            logger.error(f"Unexpected error getting type definition: {e}", exc_info=True)
+            return {
+                "success": False,
+                "error": {"code": "INTERNAL_ERROR", "message": str(e)},
+            }
+
+
+    @mcp.tool(
+        description="""Check if calls at a location might be macro expansions.
+
+Detects potential macros using heuristics (NOT definitive):
+- INLINED dispatch type (rare, depends on frontend)
+- ALL_CAPS naming convention (e.g., COPY_BUF, MAX_SIZE)
+
+LIMITATION: C/C++ macros are expanded by the preprocessor BEFORE
+Joern analyzes the code. The CPG sees the expanded code, not the
+original macro. This tool uses naming patterns as best-effort detection.
+
+Returns unique call names. {success, calls: [{name, is_macro, macro_hints, ...}]}"""
+    )
+    def get_macro_expansion(
+        codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
+        filename: Annotated[str, Field(description="Filename to search (partial match)")],
+        line_number: Annotated[Optional[int], Field(description="Optional line number to filter")] = None,
+    ) -> Dict[str, Any]:
+        """Check for macro expansions at a location."""
+        try:
+            validate_codebase_hash(codebase_hash)
+            codebase_tracker = services["codebase_tracker"]
+            query_executor = services["query_executor"]
+
+            codebase_info = codebase_tracker.get_codebase(codebase_hash)
+            if not codebase_info or not codebase_info.cpg_path:
+                raise ValidationError(f"CPG not found for codebase {codebase_hash}")
+
+            # Build query with optional line filter
+            line_filter = f".lineNumber({line_number})" if line_number else ""
+            query = f'''cpg.call.where(_.file.name(".*{filename}.*")){line_filter}.take(50).map {{ c =>
+              Map(
+                "_1" -> c.name,
+                "_2" -> c.code.take(100),
+                "_3" -> c.lineNumber.getOrElse(-1),
+                "_4" -> c.file.name.headOption.getOrElse("unknown"),
+                "_5" -> c.dispatchType
+              )
+            }}.toJsonPretty'''
+
+            result = query_executor.execute_query(
+                codebase_hash=codebase_hash,
+                cpg_path=codebase_info.cpg_path,
+                query=query,
+                timeout=30,
+                limit=50,
+            )
+
+            if not result.success:
+                return {
+                    "success": False,
+                    "error": {"code": "QUERY_ERROR", "message": result.error},
+                }
+
+            # Deduplicate by name - keep first occurrence of each unique name
+            seen_names = set()
+            calls = []
+            if result.data:
+                for item in result.data:
+                    if isinstance(item, dict):
+                        name = item.get("_1", "")
+                        
+                        # Skip if already seen this name (deduplication)
+                        if name in seen_names:
+                            continue
+                        seen_names.add(name)
+                        
+                        dispatch = item.get("_5", "")
+                        
+                        # Multiple heuristics for macro detection
+                        hints = []
+                        is_inlined = dispatch == "INLINED"
+                        # ALL_CAPS: uppercase letters and underscores only, length > 1, not operators
+                        is_all_caps = (
+                            len(name) > 1 and 
+                            all(c.isupper() or c == '_' for c in name) and
+                            not name.startswith("<operator>")
+                        )
+                        
+                        if is_inlined:
+                            hints.append("INLINED_DISPATCH")
+                        if is_all_caps:
+                            hints.append("ALL_CAPS_NAME")
+                        
+                        calls.append({
+                            "name": name,
+                            "code": item.get("_2"),
+                            "lineNumber": item.get("_3"),
+                            "filename": item.get("_4"),
+                            "dispatch_type": dispatch,
+                            "is_macro": len(hints) > 0,
+                            "macro_hints": hints,
+                        })
+
+            return {
+                "success": True,
+                "calls": calls,
+                "total": len(calls),
+                "unique_names": len(seen_names),
+                "note": "Heuristic detection only. Macros are expanded before CPG analysis.",
+            }
+
+        except ValidationError as e:
+            logger.error(f"Error getting macro expansion: {e}")
+            return {
+                "success": False,
+                "error": {"code": type(e).__name__.upper(), "message": str(e)},
+            }
+        except Exception as e:
+            logger.error(f"Unexpected error getting macro expansion: {e}", exc_info=True)
+            return {
+                "success": False,
+                "error": {"code": "INTERNAL_ERROR", "message": str(e)},
+            }

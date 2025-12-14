@@ -319,11 +319,55 @@ async def test_find_taint_flows_source_only(fake_services):
         assert isinstance(res["flows"], list)
         assert res["total_flows"] == 1
 
-
 @pytest.mark.asyncio
-async def test_find_taint_flows_sink_only_error(fake_services):
-    # Test that sink-only queries are rejected
+async def test_find_taint_flows_sink_only_backward(fake_services):
+    """Test that sink-only queries work for backward analysis"""
     services = fake_services
+
+    # Create side effect to return different results for 2 queries
+    sink_result = QueryResult(
+        success=True,
+        data=[
+            {"_1": 1002, "_2": "system(cmd)", "_3": "core.c", "_4": 42, "_5": "execute"}
+        ],
+        row_count=1,
+    )
+
+    flow_result = QueryResult(
+        success=True,
+        data=[
+            {
+                "_1": 0,
+                "_2": 3,
+                "_3": [
+                    {"_1": 'getenv("FOO")', "_2": "core.c", "_3": 10, "_4": "CALL"},
+                    {"_1": "cmd", "_2": "core.c", "_3": 25, "_4": "IDENTIFIER"},
+                    {"_1": "system(cmd)", "_2": "core.c", "_3": 42, "_4": "CALL"},
+                ],
+            }
+        ],
+        row_count=1,
+    )
+
+    call_count = [0]
+
+    def mock_execute(*args, **kwargs):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return sink_result 
+        else:
+            return flow_result
+
+    services["query_executor"].execute_query = MagicMock(side_effect=mock_execute)
+    services["codebase_tracker"].get_codebase.return_value = CodebaseInfo(
+        codebase_hash=services["codebase_hash"],
+        source_type="local",
+        source_path="/path",
+        language="c",
+        cpg_path="/tmp/test.cpg",
+        created_at=datetime.now(timezone.utc),
+        last_accessed=datetime.now(timezone.utc),
+    )
 
     mcp = FastMCP("TestServer")
     register_tools(mcp, services)
@@ -340,6 +384,9 @@ async def test_find_taint_flows_sink_only_error(fake_services):
         import json
         res = json.loads(res_json.content[0].text)
 
-        assert res.get("success") is False
-        assert "error" in res
-        assert "Either source_node_id or source_location must be provided" in res["error"]["message"]
+        assert res.get("success") is True
+        assert res.get("mode") == "backward"
+        assert res["sink"]["node_id"] == 1002
+        assert "flows" in res
+        assert isinstance(res["flows"], list)
+        assert res["total_flows"] == 1

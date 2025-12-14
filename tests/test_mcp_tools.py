@@ -446,3 +446,131 @@ class TestMCPTools:
             root_children = result_dict["files"]
             # should be the children of big_dir, limited to 50
             assert len(root_children) == 50
+
+    @pytest.mark.asyncio
+    async def test_get_cfg_success(self, mock_services):
+        """Test getting CFG for a method successfully"""
+        from src.tools.code_browsing_tools import register_code_browsing_tools
+        
+        # Mock query result with CFG nodes AND edges (new structure)
+        mock_services["query_executor"].execute_query.return_value = QueryResult(
+            success=True,
+            data=[
+                {
+                    "nodes": [
+                        {"_1": 1001, "_2": "if (x > 0)", "_3": "ControlStructure"},
+                        {"_1": 1002, "_2": "return x", "_3": "Return"},
+                    ],
+                    "edges": [
+                        {"_1": 1001, "_2": 1002},
+                    ]
+                }
+            ],
+            row_count=1
+        )
+
+        mcp = FastMCP("TestServer")
+        register_code_browsing_tools(mcp, mock_services)
+
+        async with Client(mcp) as client:
+            result = await client.call_tool("get_cfg", {
+                "codebase_hash": "553642871dd4251d",
+                "method_name": "test_func"
+            })
+            import json
+            result_dict = json.loads(result.content[0].text)
+
+            assert result_dict["success"] is True
+            assert "nodes" in result_dict
+            assert "edges" in result_dict
+            assert len(result_dict["nodes"]) == 2
+            assert len(result_dict["edges"]) == 1
+            assert result_dict["nodes"][0]["type"] == "ControlStructure"
+            assert result_dict["edges"][0]["from"] == 1001
+            assert result_dict["edges"][0]["to"] == 1002
+
+    @pytest.mark.asyncio
+    async def test_get_type_definition_success(self, mock_services):
+        """Test getting type definition with members"""
+        from src.tools.code_browsing_tools import register_code_browsing_tools
+        
+        # Mock query result with type info
+        mock_services["query_executor"].execute_query.return_value = QueryResult(
+            success=True,
+            data=[
+                {
+                    "_1": "Buffer",
+                    "_2": "struct Buffer",
+                    "_3": "buffer.h",
+                    "_4": 10,
+                    "_5": [
+                        {"name": "data", "type": "char*"},
+                        {"name": "size", "type": "int"},
+                    ]
+                }
+            ],
+            row_count=1
+        )
+
+        mcp = FastMCP("TestServer")
+        register_code_browsing_tools(mcp, mock_services)
+
+        async with Client(mcp) as client:
+            result = await client.call_tool("get_type_definition", {
+                "codebase_hash": "553642871dd4251d",
+                "type_name": "Buffer"
+            })
+            import json
+            result_dict = json.loads(result.content[0].text)
+
+            assert result_dict["success"] is True
+            assert "types" in result_dict
+            assert len(result_dict["types"]) == 1
+            assert result_dict["types"][0]["name"] == "Buffer"
+            assert len(result_dict["types"][0]["members"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_get_macro_expansion_success(self, mock_services):
+        """Test checking for macro expansions"""
+        from src.tools.code_browsing_tools import register_code_browsing_tools
+        
+        # Mock query result with call info including dispatch types
+        mock_services["query_executor"].execute_query.return_value = QueryResult(
+            success=True,
+            data=[
+                {
+                    "_1": "MAX",
+                    "_2": "MAX(a, b)",
+                    "_3": 42,
+                    "_4": "utils.c",
+                    "_5": "INLINED"
+                },
+                {
+                    "_1": "printf",
+                    "_2": "printf(msg)",
+                    "_3": 43,
+                    "_4": "utils.c",
+                    "_5": "STATIC_DISPATCH"
+                }
+            ],
+            row_count=2
+        )
+
+        mcp = FastMCP("TestServer")
+        register_code_browsing_tools(mcp, mock_services)
+
+        async with Client(mcp) as client:
+            result = await client.call_tool("get_macro_expansion", {
+                "codebase_hash": "553642871dd4251d",
+                "filename": "utils.c"
+            })
+            import json
+            result_dict = json.loads(result.content[0].text)
+
+            assert result_dict["success"] is True
+            assert "calls" in result_dict
+            assert len(result_dict["calls"]) == 2
+            # MAX should be detected as macro (INLINED)
+            assert result_dict["calls"][0]["is_macro"] is True
+            # printf should not be a macro
+            assert result_dict["calls"][1]["is_macro"] is False

@@ -132,29 +132,47 @@ Add the following:
 ```
 
 ## Available Tools
-### Core Tools (hash-based)
-- `generate_cpg`: Generate a CPG for a codebase (from local path or GitHub URL)
-- `get_cpg_status`: Get status and existence of a CPG by `codebase_hash`
-- `run_cpgql_query`: Execute CPGQL queries (synchronous)
+
+### Core Tools
+| Tool | Description |
+|------|-------------|
+| `generate_cpg` | Generate a CPG for a codebase (from local path or GitHub URL) |
+| `get_cpg_status` | Get status and existence of a CPG by `codebase_hash` |
+| `run_cpgql_query` | Execute raw CPGQL queries |
+| `get_cpgql_syntax_help` | Get CPGQL syntax documentation and examples |
 
 ### Code Browsing Tools
-- `get_codebase_summary`: Get codebase overview
-- `list_files`: List source files
-- `list_methods`: Discover methods/functions
-- `get_method_source`: Retrieve method source code
-- `list_calls`: Find function call relationships
-- `get_call_graph`: Build call graphs
-- `list_parameters`: Get parameter information
-- `find_literals`: Search for hardcoded values
-- `get_code_snippet`: Retrieve code snippets
+| Tool | Description |
+|------|-------------|
+| `get_codebase_summary` | Get high-level codebase overview (files, methods, calls) |
+| `list_files` | List source files in the codebase |
+| `list_methods` | Discover methods/functions with optional filtering |
+| `list_calls` | Find function call relationships |
+| `list_parameters` | Get parameter information for a method |
+| `get_method_source` | Retrieve method source code |
+| `get_code_snippet` | Retrieve code snippets by file and line range |
+| `get_call_graph` | Build call graphs (incoming/outgoing) |
 
-- `find_taint_sources`: Locate external input points
-- `find_taint_sinks`: Locate dangerous sinks
-- `find_taint_flows`: Find dataflow paths
-- `find_argument_flows`: Find expression reuse
-- `check_method_reachability`: Check call graph connections
-- `list_taint_paths`: List detailed taint paths
-- `get_program_slice`: Build program slices
+### Semantic Analysis Tools
+| Tool | Description |
+|------|-------------|
+| `get_cfg` | Get control flow graph (nodes AND edges) for a method |
+| `get_type_definition` | Get struct/type definition with members |
+| `get_macro_expansion` | Detect potential macro calls using heuristics |
+
+### Taint Analysis Tools
+| Tool | Description |
+|------|-------------|
+| `find_taint_sources` | Locate external input points (getenv, malloc, read, etc.) |
+| `find_taint_sinks` | Locate dangerous sinks (memcpy, system, free, etc.) |
+| `find_taint_flows` | Find dataflow paths (source→sink, source-only, or sink-only) |
+| `get_variable_flow` | Track variable assignments and data dependencies |
+
+### Advanced Analysis Tools
+| Tool | Description |
+|------|-------------|
+| `get_program_slice` | Build backward program slices from a call |
+| `find_bounds_checks` | Find bounds checks near buffer accesses |
 
 ## Contributing & Tests
 

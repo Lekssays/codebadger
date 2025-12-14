@@ -117,7 +117,13 @@ Returns:
                         }
                     )
 
-            return {"success": True, "sources": sources, "total": len(sources)}
+            return {
+                "success": True,
+                "sources": sources,
+                "total": len(sources),
+                "limit": limit,
+                "has_more": len(sources) >= limit,
+            }
 
         except ValidationError as e:
             logger.error(f"Error finding taint sources: {e}")
@@ -228,7 +234,13 @@ Returns:
                         }
                     )
 
-            return {"success": True, "sinks": sinks, "total": len(sinks)}
+            return {
+                "success": True,
+                "sinks": sinks,
+                "total": len(sinks),
+                "limit": limit,
+                "has_more": len(sinks) >= limit,
+            }
 
         except ValidationError as e:
             logger.error(f"Error finding taint sinks: {e}")
@@ -344,25 +356,14 @@ Example - Only Source provided:
         try:
             validate_codebase_hash(codebase_hash)
 
-            # Validate that we have proper source and sink specifications
-            if not source_node_id and not source_location:
+            # Validate that we have at least one of source or sink
+            has_source = bool(source_node_id or source_location)
+            has_sink = bool(sink_node_id or sink_location)
+            
+            if not has_source and not has_sink:
                 raise ValidationError(
-                    "Either source_node_id or source_location must be provided"
+                    "At least one of source or sink must be provided"
                 )
-            if not sink_node_id and not sink_location and (source_node_id or source_location):
-                # If only source is provided, that's fine - we'll find flows to any sink
-                pass
-            elif not sink_node_id and not sink_location:
-                # If neither source nor sink is provided, that's an error
-                raise ValidationError(
-                    "Either source_node_id/source_location or sink_node_id/sink_location must be provided"
-                )
-            elif sink_node_id or sink_location:
-                # If only sink is provided, that's an error
-                if not source_node_id and not source_location:
-                    raise ValidationError(
-                        "Only sink provided - not supported. Please provide a source to find flows from."
-                    )
 
             codebase_tracker = services["codebase_tracker"]
             query_executor = services["query_executor"]
@@ -375,10 +376,11 @@ Example - Only Source provided:
             # Resolve source and sink nodes
             source_info = None
             sink_info = None
-            has_sink = bool(sink_node_id or sink_location)
 
             # Helper function to resolve node by ID or location
             def resolve_node(node_id, location, node_type):
+                if not node_id and not location:
+                    return None
                 if node_id:
                     try:
                         node_id_long = int(node_id)
@@ -427,40 +429,45 @@ Example - Only Source provided:
                         }
                 return None
 
-            source_info = resolve_node(source_node_id, source_location, "source")
+            # Resolve nodes based on what was provided
+            if has_source:
+                source_info = resolve_node(source_node_id, source_location, "source")
             if has_sink:
                 sink_info = resolve_node(sink_node_id, sink_location, "sink")
 
-            # If source not found, return early
-            if not source_info:
+            # Validate that we could resolve the provided nodes
+            if has_source and not source_info:
                 return {
                     "success": False,
                     "source": source_info,
                     "sink": sink_info,
                     "flow_found": False,
-                    "message": f"Could not resolve source from provided identifiers",
+                    "message": "Could not resolve source from provided identifiers",
                 }
 
-            # If sink is required but not found, return early
             if has_sink and not sink_info:
                 return {
                     "success": False,
                     "source": source_info,
                     "sink": sink_info,
                     "flow_found": False,
-                    "message": f"Could not resolve sink from provided identifiers",
                 }
 
-            # Build dataflow query to find paths from source to sink
-            source_id = source_info["node_id"]
-            
-            if has_sink:
-                # Specific sink mode: find flows between source and sink
+            # Build dataflow query based on what's provided
+            if has_source and has_sink:
+                # Both source and sink: find flows between them
+                source_id = source_info["node_id"]
                 sink_id = sink_info["node_id"]
                 query = f'{{ val source = cpg.call.id({source_id}L).l.headOption; val sink = cpg.call.id({sink_id}L).l.headOption; val flows = if (source.nonEmpty && sink.nonEmpty) {{ val sourceCall = source.get; val sinkCall = sink.get; val assignments = sourceCall.inAssignment.l; if (assignments.nonEmpty) {{ val assign = assignments.head; val targetVar = assign.target.code; val sinkArgs = sinkCall.argument.code.l; val matches = sinkArgs.contains(targetVar); if (matches) {{ List(Map("_1" -> 0, "_2" -> 3, "_3" -> List(Map("_1" -> sourceCall.code, "_2" -> sourceCall.file.name.headOption.getOrElse("unknown"), "_3" -> sourceCall.lineNumber.getOrElse(-1), "_4" -> "CALL"), Map("_1" -> targetVar, "_2" -> assign.file.name.headOption.getOrElse("unknown"), "_3" -> assign.lineNumber.getOrElse(-1), "_4" -> "IDENTIFIER"), Map("_1" -> sinkCall.code, "_2" -> sinkCall.file.name.headOption.getOrElse("unknown"), "_3" -> sinkCall.lineNumber.getOrElse(-1), "_4" -> "CALL")))) }} else {{ List() }} }} else {{ List() }} }} else {{ List() }}; flows }}.toJsonPretty'
-            else:
+            elif has_source:
                 # Source-only mode: find flows from source to any dangerous sink
+                source_id = source_info["node_id"]
                 query = f'{{ val source = cpg.call.id({source_id}L).l.headOption; val flows = if (source.nonEmpty) {{ val sourceCall = source.get; val assignments = sourceCall.inAssignment.l; if (assignments.nonEmpty) {{ val assign = assignments.head; val targetVar = assign.target.code; val dangerousSinks = Set("system", "popen", "execl", "execv", "sprintf", "fprintf", "free", "delete"); val sinkPattern = dangerousSinks.mkString("|"); val sinkCalls = cpg.call.name(sinkPattern).filter(sink => {{ val sinkArgs = sink.argument.code.l; sinkArgs.contains(targetVar) }}).l.take(20); sinkCalls.map(sink => Map("_1" -> 0, "_2" -> 3, "_3" -> List(Map("_1" -> sourceCall.code, "_2" -> sourceCall.file.name.headOption.getOrElse("unknown"), "_3" -> sourceCall.lineNumber.getOrElse(-1), "_4" -> "CALL"), Map("_1" -> targetVar, "_2" -> assign.file.name.headOption.getOrElse("unknown"), "_3" -> assign.lineNumber.getOrElse(-1), "_4" -> "IDENTIFIER"), Map("_1" -> sink.code, "_2" -> sink.file.name.headOption.getOrElse("unknown"), "_3" -> sink.lineNumber.getOrElse(-1), "_4" -> "CALL")))) }} else {{ List() }} }} else {{ List() }}; flows }}.toJsonPretty'
+            else:
+                # Sink-only mode (backward analysis): find sources flowing into sink
+                sink_id = sink_info["node_id"]
+                query = f'{{ val sink = cpg.call.id({sink_id}L).l.headOption; val flows = if (sink.nonEmpty) {{ val sinkCall = sink.get; val sinkArgs = sinkCall.argument.code.l.filterNot(a => a.startsWith("\\"") || a.matches("^-?\\\\d+$")); val dangerousSources = Set("getenv", "fgets", "scanf", "fscanf", "gets", "read", "recv", "fread", "getline", "malloc", "calloc", "realloc", "strdup"); val sourcePattern = dangerousSources.mkString("|"); val sourceCalls = cpg.call.name(sourcePattern).filter(src => {{ val assigns = src.inAssignment.l; if (assigns.nonEmpty) {{ val targetVar = assigns.head.target.code; sinkArgs.contains(targetVar) }} else false }}).l.take(20); sourceCalls.map(src => {{ val assigns = src.inAssignment.l; val assign = assigns.head; val targetVar = assign.target.code; Map("_1" -> 0, "_2" -> 3, "_3" -> List(Map("_1" -> src.code, "_2" -> src.file.name.headOption.getOrElse("unknown"), "_3" -> src.lineNumber.getOrElse(-1), "_4" -> "CALL"), Map("_1" -> targetVar, "_2" -> assign.file.name.headOption.getOrElse("unknown"), "_3" -> assign.lineNumber.getOrElse(-1), "_4" -> "IDENTIFIER"), Map("_1" -> sinkCall.code, "_2" -> sinkCall.file.name.headOption.getOrElse("unknown"), "_3" -> sinkCall.lineNumber.getOrElse(-1), "_4" -> "CALL"))) }}) }} else {{ List() }}; flows }}.toJsonPretty'
+
 
             result = query_executor.execute_query(
                 codebase_hash=codebase_hash,
@@ -495,8 +502,8 @@ Example - Only Source provided:
                             }
                         )
 
-            if has_sink:
-                # Specific sink mode: return single flow result
+            if has_source and has_sink:
+                # Both source and sink mode: return single flow result
                 flow_found = len(flows) > 0
                 return {
                     "success": True,
@@ -512,15 +519,27 @@ Example - Only Source provided:
                         "explanation": f"{source_info['code']} result assigned to variable and used in {sink_info['code']}" if flow_found else None,
                     } if flow_found else None,
                 }
-            else:
-                # Source-only mode: return multiple flows
+            elif has_source:
+                # Source-only mode (forward analysis): return flows to dangerous sinks
                 return {
                     "success": True,
+                    "mode": "forward",
                     "source": source_info,
                     "flows": flows,
                     "total_flows": len(flows),
                     "message": f"Found {len(flows)} flows from source to dangerous sinks" if flows else "No flows found from source to dangerous sinks",
                 }
+            else:
+                # Sink-only mode (backward analysis): return flows from dangerous sources
+                return {
+                    "success": True,
+                    "mode": "backward",
+                    "sink": sink_info,
+                    "flows": flows,
+                    "total_flows": len(flows),
+                    "message": f"Found {len(flows)} flows from dangerous sources to sink" if flows else "No flows found from dangerous sources to sink",
+                }
+
 
         except ValidationError as e:
             logger.error(f"Error finding taint flows: {e}")
@@ -530,122 +549,6 @@ Example - Only Source provided:
             }
         except Exception as e:
             logger.error(f"Unexpected error finding taint flows: {e}", exc_info=True)
-            return {
-                "success": False,
-                "error": {"code": "INTERNAL_ERROR", "message": str(e)},
-            }
-
-    @mcp.tool(
-        description="""Check if one method can reach another through the call graph.
-
-Determines whether the target method is reachable from the source method
-by following function calls. Useful for understanding code dependencies
-and potential execution paths.
-
-Returns:
-    {
-        "success": true,
-        "reachable": true,
-        "source_method": "main",
-        "target_method": "helper",
-        "message": "Method 'helper' is reachable from 'main'"
-    }"""
-    )
-    def check_method_reachability(
-        codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
-        source_method: Annotated[str, Field(description="Name of the source method (can be regex pattern)")],
-        target_method: Annotated[str, Field(description="Name of the target method (can be regex pattern)")],
-    ) -> Dict[str, Any]:
-        """Check if one method can reach another through the call graph."""
-        try:
-            validate_codebase_hash(codebase_hash)
-
-            codebase_tracker = services["codebase_tracker"]
-            query_executor = services["query_executor"]
-
-            # Verify CPG exists for this codebase
-            codebase_info = codebase_tracker.get_codebase(codebase_hash)
-            if not codebase_info or not codebase_info.cpg_path:
-                raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
-
-            # Escape patterns for regex
-            source_escaped = re.escape(source_method)
-            target_escaped = re.escape(target_method)
-
-            # Query to check reachability using depth-independent BFS traversal.
-            # Instead of manually checking levels 1-5, we use a recursive function
-            # to traverse the entire call graph regardless of depth.
-            query = (
-                f'val source = cpg.method.name("{source_escaped}").l\n'
-                f'val target = cpg.method.name("{target_escaped}").l\n'
-                f"val reachable = if (source.nonEmpty && target.nonEmpty) {{\n"
-                f"  val targetName = target.head.name\n"
-                f"  var visited = Set[String]()\n"
-                f"  var toVisit = scala.collection.mutable.Queue[io.shiftleft.codepropertygraph.generated.nodes.Method]()\n"
-                f"  toVisit.enqueue(source.head)\n"
-                f"  var found = false\n"
-                f"  \n"
-                f"  while (toVisit.nonEmpty && !found) {{\n"
-                f"    val current = toVisit.dequeue()\n"
-                f"    val currentName = current.name\n"
-                f"    if (!visited.contains(currentName)) {{\n"
-                f"      visited = visited + currentName\n"
-                f"      val callees = current.call.callee.l\n"
-                f"      for (callee <- callees) {{\n"
-                f"        val calleeName = callee.name\n"
-                f"        if (calleeName == targetName) {{\n"
-                f"          found = true\n"
-                f'        }} else if (!visited.contains(calleeName) && !calleeName.startsWith("<operator>")) {{\n'
-                f"          toVisit.enqueue(callee)\n"
-                f"        }}\n"
-                f"      }}\n"
-                f"    }}\n"
-                f"  }}\n"
-                f"  found\n"
-                f"}} else false\n"
-                f"List(reachable).toJsonPretty"
-            )
-
-            result = query_executor.execute_query(
-                codebase_hash=codebase_hash,
-                cpg_path=codebase_info.cpg_path,
-                query=query,
-                timeout=60,
-                limit=1,
-            )
-
-            if not result.success:
-                return {
-                    "success": False,
-                    "error": {"code": "QUERY_ERROR", "message": result.error},
-                }
-
-            reachable = False
-            if result.data and len(result.data) > 0:
-                # The query returns a boolean result
-                reachable = bool(result.data[0])
-
-            message = (
-                f"Method '{target_method}' is {'reachable' if reachable else 'not reachable'} "
-                f"from '{source_method}'"
-            )
-
-            return {
-                "success": True,
-                "reachable": reachable,
-                "source_method": source_method,
-                "target_method": target_method,
-                "message": message,
-            }
-
-        except ValidationError as e:
-            logger.error(f"Error checking method reachability: {e}")
-            return {
-                "success": False,
-                "error": {"code": type(e).__name__.upper(), "message": str(e)},
-            }
-        except Exception as e:
-            logger.error(f"Unexpected error: {e}", exc_info=True)
             return {
                 "success": False,
                 "error": {"code": "INTERNAL_ERROR", "message": str(e)},
@@ -936,12 +839,6 @@ Returns: {success, target: {file, line, variable, method}, direction, dependenci
             location: Location as "filename:line" (e.g., "parser.c:3393")
             variable: Variable name to analyze (e.g., "len", "buffer")
             direction: "backward" (what affects it) or "forward" (what it affects)
-        """
-
-                variable="len",
-                direction="forward"
-            )
-            # Returns all usages and propagations of 'len' after line 3383
         """
         try:
             validate_codebase_hash(codebase_hash)
