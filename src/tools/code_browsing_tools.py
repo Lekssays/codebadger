@@ -631,58 +631,8 @@ Returns:
 
 
     @mcp.tool(
-        description="""Find literal values in the code (strings, numbers, etc).
-
-Search for hardcoded values like strings, numbers, or constants.
-Useful for finding configuration values, API keys, URLs, or
-magic numbers in the code.
-
-Returns:
-    {
-        "success": true,
-        "literals": [
-            {
-                "value": "admin_password",
-                "type": "string",
-                "filename": "config.c",
-                "lineNumber": 42,
-                "method": "init_config"
-            }
-        ],
-        "total": 1
-    }"""
-    )
-    def find_literals(
-        codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
-        pattern: Annotated[Optional[str], Field(description="Optional regex to filter literal values (e.g., '.*password.*')")] = None,
-        literal_type: Annotated[Optional[str], Field(description="Optional type filter (e.g., 'string', 'int')")] = None,
-        limit: Annotated[int, Field(description="Maximum number of results")] = 50,
-    ) -> Dict[str, Any]:
-        """Find literal values in the code (strings, numbers, etc)."""
-        try:
-            code_browsing_service = services["code_browsing_service"]
-            return code_browsing_service.find_literals(
-                codebase_hash=codebase_hash,
-                pattern=pattern,
-                literal_type=literal_type,
-                limit=limit,
-            )
-        except ValidationError as e:
-            logger.error(f"Error finding literals: {e}")
-            return {
-                "success": False,
-                "error": {"code": type(e).__name__.upper(), "message": str(e)},
-            }
-        except Exception as e:
-            logger.error(f"Unexpected error: {e}", exc_info=True)
-            return {
-                "success": False,
-                "error": {"code": "INTERNAL_ERROR", "message": str(e)},
-            }
-
-
-    @mcp.tool(
         description="""Get a high-level summary of the codebase structure.
+
 
 Provides an overview including file count, method count, language,
 and other metadata. Useful as a first step when exploring a new codebase.

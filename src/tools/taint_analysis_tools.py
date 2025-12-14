@@ -913,239 +913,31 @@ Returns:
                 "error": {"code": "INTERNAL_ERROR", "message": str(e)},
             }
 
-    @mcp.tool()
-    def find_argument_flows(
-        codebase_hash: str,
-        source_name: str,
-        sink_name: str,
-        arg_index: int = 0,
-        limit: int = 100,
-    ) -> Dict[str, Any]:
-        """
-        Find flows where the EXACT SAME expression is passed as an argument to both source and sink calls.
 
-        This tool matches calls based on argument expression equality. It is useful for finding
-        cases where a variable or expression is reused across multiple function calls within
-        the same scope or function.
+    @mcp.tool(
+        description="""Analyze variable data flow in backward or forward direction.
 
-        ✅ WHAT IT CAN DO:
-        - Match variables passed to multiple functions with the same name
-          Example: count passed to both validate_input(count) and process_data(count)
-        - Find constant values used across calls
-          Example: BUFFER_SIZE used in allocate_buffer(BUFFER_SIZE) and init_buffer(BUFFER_SIZE)
-        - Track simple expressions reused in multiple calls
-          Example: offset+4 used in read_data(offset+4) and write_data(offset+4)
+Backward: Find definitions, assignments, and modifications affecting a variable.
+Forward: Find usages and propagations of a variable.
 
-        ❌ WHAT IT CANNOT DO:
-        - Track variables that change names across function boundaries
-          Example: data (in main) → input_data (in helper function)
-          Reason: These are different identifiers, requires parameter alias tracking
-        - Follow return values assigned to new variables
-          Example: ptr = allocate_memory(size) → deallocate_memory(ptr)
-          Reason: allocate_memory() returns a value, deallocate_memory() takes "ptr" variable
-        - Track array element or struct field accesses
-          Example: array[i].field passed through calls
-          Reason: Complex expressions don't maintain exact equality
-        - Perform interprocedural dataflow analysis
-          Reason: Only looks at argument text matching, not semantic flow
-
-        💡 USE THIS TOOL WHEN:
-        - Looking for intra-procedural argument reuse patterns
-        - Finding variables passed to multiple validation/processing functions
-        - Identifying shared constants or configuration values
-        - Analyzing argument consistency within the same function scope
-
-        🔧 FOR INTERPROCEDURAL ANALYSIS, USE:
-        - find_taint_flows: Full dataflow analysis with source/sink tracking
-        - get_call_graph: Understand call relationships
-        - list_methods: Find methods that use specific calls (callee_pattern parameter)
-
-        Args:
-            codebase_hash: The codebase hash from generate_cpg
-            source_name: Name of the source function call (where argument originates)
-            sink_name: Name of the sink function call (where argument is used)
-            arg_index: Argument position to match (0-based indexing, default: 0)
-            limit: Maximum number of matching flows to return (default: 100)
-
-        Returns:
-            {
-                "success": true,
-                "flows": [
-                    {
-                        "source": {
-                            "name": "validate_input",
-                            "filename": "main.c",
-                            "lineNumber": 42,
-                            "code": "validate_input(user_count)",
-                            "method": "process_request",
-                            "matched_arg": "user_count"
-                        },
-                        "sink": {
-                            "name": "process_data",
-                            "filename": "main.c",
-                            "lineNumber": 45,
-                            "code": "process_data(user_count, buffer)",
-                            "method": "process_request",
-                            "matched_arg": "user_count"
-                        }
-                    }
-                ],
-                "total": 1,
-                "note": "Only finds EXACT expression matches, not semantic dataflow"
-            }
-
-        Example Usage:
-            # Find where user_count is passed to both functions
-            find_argument_flows(
-                codebase_hash="abc-123",
-                source_name="validate_input",
-                sink_name="process_data",
-                arg_index=0  # user_count is the first argument
-            )
-
-            # This WON'T work: malloc -> free (return value vs variable name)
-            find_argument_flows(
-                codebase_hash="abc-123",
-                source_name="malloc",
-                sink_name="free",
-                arg_index=0  # Won't match: malloc returns pointer, free takes variable
-            )
-        """
-        try:
-            validate_codebase_hash(codebase_hash)
-            codebase_tracker = services["codebase_tracker"]
-            query_executor = services["query_executor"]
-
-            # Verify CPG exists for this codebase
-            codebase_info = codebase_tracker.get_codebase(codebase_hash)
-            if not codebase_info or not codebase_info.cpg_path:
-                raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
-
-            # Single-line CPGQL query for argument-matching flows
-            query = (
-                f'cpg.call.name("{source_name}").flatMap(src => {{'
-                f'  val argExpr = src.argument.l.lift({arg_index}).map(_.code).getOrElse("<no-arg>"); '
-                f'  cpg.call.name("{sink_name}").filter(sink => '
-                f"    sink.argument.l.size > {arg_index} && sink.argument.l({arg_index}).code == argExpr"
-                f"  ).map(sink => Map("
-                f'    "source" -> Map('
-                f'      "name" -> src.name, '
-                f'      "filename" -> src.file.name.headOption.getOrElse("unknown"), '
-                f'      "lineNumber" -> src.lineNumber.getOrElse(-1), '
-                f'      "code" -> src.code, '
-                f'      "method" -> src.methodFullName, '
-                f'      "matched_arg" -> argExpr'
-                f"    ), "
-                f'    "sink" -> Map('
-                f'      "name" -> sink.name, '
-                f'      "filename" -> sink.file.name.headOption.getOrElse("unknown"), '
-                f'      "lineNumber" -> sink.lineNumber.getOrElse(-1), '
-                f'      "code" -> sink.code, '
-                f'      "method" -> sink.methodFullName, '
-                f'      "matched_arg" -> argExpr'
-                f"    )"
-                f"  ))"
-                f"}}).toJsonPretty"
-            )
-
-            result = query_executor.execute_query(
-                codebase_hash=codebase_hash,
-                cpg_path=codebase_info.cpg_path,
-                query=query,
-                timeout=60,
-                limit=limit,
-            )
-
-            if not result.success:
-                return {
-                    "success": False,
-                    "error": {"code": "QUERY_ERROR", "message": result.error},
-                }
-
-            return {
-                "success": True,
-                "flows": result.data if result.data else [],
-                "total": len(result.data) if result.data else 0,
-                "note": "Only finds EXACT expression matches, not semantic dataflow",
-            }
-
-        except ValidationError as e:
-            logger.error(f"Error finding argument flows: {e}")
-            return {
-                "success": False,
-                "error": {"code": type(e).__name__.upper(), "message": str(e)},
-            }
-        except Exception as e:
-            logger.error(f"Unexpected error finding argument flows: {e}", exc_info=True)
-            return {
-                "success": False,
-                "error": {"code": "INTERNAL_ERROR", "message": str(e)},
-            }
-
-    @mcp.tool()
-    def get_data_dependencies(
+Returns: {success, target: {file, line, variable, method}, direction, dependencies: [{line, code, type, filename}], total}"""
+    )
+    def get_variable_flow(
         codebase_hash: str,
         location: str,
         variable: str,
         direction: str = "backward",
     ) -> Dict[str, Any]:
         """
-        Analyze data dependencies for a variable at a specific location.
-
-        Find all code locations that influence (backward) or are influenced by (forward)
-        a variable at a specific line of code. Critical for understanding what values
-        can affect a potentially vulnerable operation or where tainted data can flow.
+        Analyze variable data flow.
 
         Args:
             codebase_hash: The codebase hash from generate_cpg
-            location: Location in format "filename:line" (e.g., "parser.c:3393")
-            variable: Name of the variable to analyze (e.g., "len", "buffer")
-            direction: Analysis direction - "backward" (default) or "forward"
-                - "backward": Find what affects this variable (definitions, assignments)
-                - "forward": Find what uses this variable (usages, propagations)
+            location: Location as "filename:line" (e.g., "parser.c:3393")
+            variable: Variable name to analyze (e.g., "len", "buffer")
+            direction: "backward" (what affects it) or "forward" (what it affects)
+        """
 
-        Returns:
-            {
-                "success": true,
-                "target": {
-                    "file": "parser.c",
-                    "line": 3393,
-                    "variable": "len",
-                    "method": "xmlParseNmtoken"
-                },
-                "direction": "backward",
-                "dependencies": [
-                    {"line": 3383, "code": "int len = 0", "type": "initialization", "filename": "parser.c"},
-                    {"line": 3393, "code": "len++", "type": "modification", "filename": "parser.c"},
-                    {"line": 3393, "code": "len += xmlCopyCharMultiByte(...)", "type": "modification", "filename": "parser.c"}
-                ],
-                "total": 3
-            }
-
-        Dependency Types (backward):
-            - initialization: Variable declaration/initialization
-            - assignment: Direct assignments to the variable
-            - modification: Increments, decrements, compound assignments (+=, -=, etc.)
-            - function_call: Function calls that may modify the variable (pass by reference)
-
-        Dependency Types (forward):
-            - usage: Where the variable is used as a function argument
-            - propagation: Assignments where the variable appears on the right-hand side
-
-        Example - Backward Analysis (find what sets a variable):
-            get_data_dependencies(
-                codebase_hash="abc-123",
-                location="parser.c:3393",  # The COPY_BUF call
-                variable="len",
-                direction="backward"
-            )
-            # Returns all assignments, modifications, and initializations of 'len'
-            # before line 3393
-
-        Example - Forward Analysis (find what uses a variable):
-            get_data_dependencies(
-                codebase_hash="abc-123",
-                location="parser.c:3383",  # Where len is initialized
                 variable="len",
                 direction="forward"
             )
