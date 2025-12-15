@@ -264,48 +264,58 @@ Examples:
             }
 
     @mcp.tool(
-        description="""Track data flow from source to sink via variable assignments.
+        description="""Find taint flows from sources to sinks across function boundaries.
 
-Traces data flow through simple assignments within the same function or via
-defined source/sink points.
+Detects data flow from untrusted input sources (e.g., file I/O, user input) to
+dangerous sinks (e.g., memory operations, system calls). Supports inter-procedural
+analysis by tracking flows through function call chains.
 
 Args:
-    codebase_hash: The codebase hash.
-    source_location: 'file:line' or 'file:line:method' for source.
-    sink_location: 'file:line' or 'file:line:method' for sink.
-    source_pattern: Regex for source functions (if location not given).
-    sink_pattern: Regex for sink functions (if location not given).
-    filename_filter: Filter to specific file.
+    codebase_hash: The codebase hash from generate_cpg.
+    source_pattern: Regex for source functions (e.g., 'fread|getenv|scanf').
+    sink_pattern: Regex for sink functions (e.g., 'memcpy|strcpy|system').
+    source_location: Alternative: specific source at 'file:line'.
+    sink_location: Alternative: specific sink at 'file:line'.
+    filename_filter: Limit analysis to specific file.
+    max_depth: Call depth for inter-procedural tracking (0=intra-procedural, 1+=inter-procedural).
 
 Returns:
     {
         "success": true,
-        "mode": "forward|backward|point-to-point",
+        "mode": "forward|backward",
         "flows": [
-            {"source": {...}, "sink": {...}, "variable": "varname", "path_length": 3}
+            {
+                "source": {"code": "...", "file": "...", "line": N},
+                "sink": {"code": "...", "file": "...", "line": N},
+                "bridge_function": "function_name",  # For inter-procedural flows
+                "path_length": N
+            }
         ]
     }
 
 Notes:
-    - Intra-procedural only: Tracks variables within the same function or global identifiers.
-    - Modes:
-        * Forward: Source given -> Find all Sinks.
-        * Backward: Sink given -> Find all Sources.
-        * Point-to-Point: Both given -> Verify connection.
+    - max_depth=0: Intra-procedural only (sources and sinks in same function).
+    - max_depth>=1: Inter-procedural (detects calls to functions containing sinks).
+    - Use source_pattern + sink_pattern for broad analysis.
+    - Use source_location/sink_location for targeted verification.
 
 Examples:
-    find_taint_flows(codebase_hash="abc", source_location="main.c:20")
-    find_taint_flows(codebase_hash="abc", sink_location="main.c:50")"""
+    # Find flows from file I/O to memory operations (inter-procedural)
+    find_taint_flows(codebase_hash="abc", source_pattern="fread", sink_pattern="memcpy", max_depth=2)
+    
+    # Verify specific source reaches specific sink
+    find_taint_flows(codebase_hash="abc", source_location="io.c:100", sink_location="parser.c:500")"""
     )
     def find_taint_flows(
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
-        source_location: Annotated[Optional[str], Field(description="Source as 'file:line' (e.g., 'parser.c:782')")] = None,
-        sink_location: Annotated[Optional[str], Field(description="Sink as 'file:line' (e.g., 'parser.c:800')")] = None,
-        source_pattern: Annotated[Optional[str], Field(description="Regex to find sources (e.g., 'malloc|getenv'). Used when source_location not provided")] = None,
-        sink_pattern: Annotated[Optional[str], Field(description="Regex to find sinks (e.g., 'free|system'). Used when sink_location not provided")] = None,
-        filename_filter: Annotated[Optional[str], Field(description="Filter results to specific file (e.g., 'parser.c')")] = None,
-        max_results: Annotated[int, Field(description="Maximum number of flows to return")] = 10,
-        timeout: Annotated[int, Field(description="Maximum execution time in seconds")] = 60,
+        source_pattern: Annotated[Optional[str], Field(description="Regex for source functions (e.g., 'fread|getenv')")] = None,
+        sink_pattern: Annotated[Optional[str], Field(description="Regex for sink functions (e.g., 'memcpy|system')")] = None,
+        source_location: Annotated[Optional[str], Field(description="Alternative: source at 'file:line' (e.g., 'parser.c:782')")] = None,
+        sink_location: Annotated[Optional[str], Field(description="Alternative: sink at 'file:line' (e.g., 'parser.c:800')")] = None,
+        filename_filter: Annotated[Optional[str], Field(description="Limit to specific file (e.g., 'parser.c')")] = None,
+        max_depth: Annotated[int, Field(description="Call depth: 0=intra-procedural, 1+=inter-procedural")] = 2,
+        max_results: Annotated[int, Field(description="Maximum flows to return")] = 10,
+        timeout: Annotated[int, Field(description="Query timeout in seconds")] = 60,
     ) -> Dict[str, Any]:
         """Find data flow paths between sources and sinks using variable tracking."""
         try:
@@ -319,26 +329,22 @@ Examples:
             if not codebase_info or not codebase_info.cpg_path:
                 raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first.")
 
-            # Determine mode based on provided parameters
+            # Validate input
             has_source_loc = bool(source_location)
             has_sink_loc = bool(sink_location)
             has_source_pattern = bool(source_pattern)
             has_sink_pattern = bool(sink_pattern)
 
-            # Validate we have at least one identifier
             if not any([has_source_loc, has_sink_loc, has_source_pattern, has_sink_pattern]):
                 raise ValidationError(
                     "Provide at least one of: source_location, sink_location, source_pattern, or sink_pattern"
                 )
 
-            # Default patterns for dangerous sources/sinks
-            default_sources = "getenv|fgets|scanf|fscanf|gets|read|recv|fread|getline|malloc|calloc|realloc|strdup|xmlMalloc|xmlRealloc"
-            default_sinks = "system|popen|execl|execv|sprintf|fprintf|free|delete|memcpy|strcpy|xmlFree"
+            # Default patterns
+            default_sources = "getenv|fgets|scanf|fscanf|gets|read|recv|fread|getline"
+            default_sinks = "system|popen|execl|execv|sprintf|fprintf|strcpy|memcpy|strcat"
 
-            # Build file filter clause
-            file_filter = f'.where(_.file.name(".*{filename_filter}.*"))' if filename_filter else ""
-            
-            # Helper to parse location
+            # Parse locations if provided
             def parse_location(loc):
                 if not loc:
                     return None, None
@@ -352,92 +358,164 @@ Examples:
 
             source_file, source_line = parse_location(source_location)
             sink_file, sink_line = parse_location(sink_location)
+            
+            # File filter
+            file_filter = f'.where(_.file.name(".*{filename_filter}.*"))' if filename_filter else ""
 
-            # Build unified query based on mode
-            if has_source_loc and has_sink_loc:
-                # Point-to-point mode: check specific source → sink flow
-                query = f'''{{
-  val sourceCall = cpg.call.where(_.file.name(".*{source_file}$")).lineNumber({source_line}).headOption
-  val sinkCall = cpg.call.where(_.file.name(".*{sink_file}$")).lineNumber({sink_line}).headOption
-  
-  val result = (sourceCall, sinkCall) match {{
-    case (Some(src), Some(snk)) =>
-      val assigns = src.inAssignment.l
-      if (assigns.nonEmpty) {{
-        val varName = assigns.head.target.code
-        val sinkArgs = snk.argument.code.l
-        val flowExists = sinkArgs.contains(varName)
-        List(Map(
-          "flow_found" -> flowExists,
-          "source" -> Map("code" -> src.code, "file" -> src.file.name.headOption.getOrElse("unknown"), "line" -> src.lineNumber.getOrElse(-1)),
-          "sink" -> Map("code" -> snk.code, "file" -> snk.file.name.headOption.getOrElse("unknown"), "line" -> snk.lineNumber.getOrElse(-1)),
-          "variable" -> varName
-        ))
-      }} else List(Map("flow_found" -> false, "message" -> "Source has no assignment"))
-    case _ => List(Map("flow_found" -> false, "message" -> "Could not resolve source or sink"))
-  }}
-  result
-}}.toJsonPretty'''
-                mode = "point_to_point"
-
-            elif has_source_loc or has_source_pattern:
-                # Forward mode: source → dangerous sinks
+            # Determine mode and build query
+            if has_source_pattern or has_source_loc:
+                # FORWARD MODE: Find sinks reachable from sources
+                mode = "forward"
+                source_pat = source_pattern or default_sources
                 sink_pat = sink_pattern or default_sinks
                 
+                # Build source selector
                 if has_source_loc:
                     source_selector = f'cpg.call.where(_.file.name(".*{source_file}$")).lineNumber({source_line})'
                 else:
-                    source_selector = f'cpg.call.name("{source_pattern}"){file_filter}'
-                
-                query = f'''{{
+                    source_selector = f'cpg.call.name("{source_pat}"){file_filter}'
+
+                if max_depth == 0:
+                    # Intra-procedural: sources and sinks in same function
+                    query = f'''{{
   val sources = {source_selector}.l.take({max_results})
   val flows = sources.flatMap {{ src =>
-    val assigns = src.inAssignment.l
-    if (assigns.nonEmpty) {{
-      val varName = assigns.head.target.code
-      val sinks = cpg.call.name("{sink_pat}").filter(snk => snk.argument.code.l.contains(varName)).l.take(5)
-      sinks.map(snk => Map(
-        "source" -> Map("code" -> src.code, "file" -> src.file.name.headOption.getOrElse("unknown"), "line" -> src.lineNumber.getOrElse(-1)),
-        "sink" -> Map("code" -> snk.code, "file" -> snk.file.name.headOption.getOrElse("unknown"), "line" -> snk.lineNumber.getOrElse(-1)),
-        "variable" -> varName,
-        "path_length" -> 2
-      ))
-    }} else List()
-  }}.take({max_results})
-  flows
-}}.toJsonPretty'''
-                mode = "forward"
-
-            else:
-                # Backward mode: dangerous sources → sink
-                source_pat = source_pattern or default_sources
-                
-                if has_sink_loc:
-                    sink_selector = f'cpg.call.where(_.file.name(".*{sink_file}$")).lineNumber({sink_line})'
-                else:
-                    sink_selector = f'cpg.call.name("{sink_pattern}"){file_filter}'
-                
-                query = f'''{{
-  val sinks = {sink_selector}.l.take({max_results})
-  val flows = sinks.flatMap {{ snk =>
-    val sinkArgs = snk.argument.code.l.filterNot(a => a.startsWith("\\"") || a.matches("^-?\\\\d+$"))
-    val sources = cpg.call.name("{source_pat}").filter {{ src =>
-      val assigns = src.inAssignment.l
-      assigns.nonEmpty && sinkArgs.contains(assigns.head.target.code)
-    }}.l.take(5)
-    sources.map {{ src =>
-      val varName = src.inAssignment.l.head.target.code
-      Map(
-        "source" -> Map("code" -> src.code, "file" -> src.file.name.headOption.getOrElse("unknown"), "line" -> src.lineNumber.getOrElse(-1)),
-        "sink" -> Map("code" -> snk.code, "file" -> snk.file.name.headOption.getOrElse("unknown"), "line" -> snk.lineNumber.getOrElse(-1)),
-        "variable" -> varName,
-        "path_length" -> 2
-      )
+    val method = src.method
+    val sinks = method.call.name("{sink_pat}").l
+    
+    sinks.flatMap {{ snk =>
+      // Check if there's data flow from source to sink
+      val srcAssigns = src.inAssignment.l
+      if (srcAssigns.nonEmpty) {{
+        val varName = srcAssigns.head.target.code
+        val sinkArgs = snk.argument.code.l
+        if (sinkArgs.contains(varName)) {{
+          Some(Map(
+            "source" -> Map("code" -> src.code, "file" -> src.file.name.headOption.getOrElse("?"), "line" -> src.lineNumber.getOrElse(-1)),
+            "sink" -> Map("code" -> snk.code, "file" -> snk.file.name.headOption.getOrElse("?"), "line" -> snk.lineNumber.getOrElse(-1)),
+            "path_length" -> 1
+          ))
+        }} else None
+      }} else None
     }}
   }}.take({max_results})
   flows
 }}.toJsonPretty'''
+
+                else:
+                    # Inter-procedural: Find bridge functions containing sinks, then check if sources call them
+                    query = f'''{{
+  // Step 1: Find bridge functions (functions containing sinks)
+  val bridgeFunctions = cpg.method
+    .where(_.call.name("{sink_pat}"))
+    .filterNot(_.name == "<global>")
+    .l
+    
+  // Step 2: Find sources
+  val sources = {source_selector}.l.take({max_results * 3})
+  
+  // Step 3: For each source, find calls to bridge functions
+  val flows = sources.flatMap {{ src =>
+    val srcMethod = src.method
+    
+    // Find calls from source's method to bridge functions
+    bridgeFunctions.flatMap {{ bridgeFunc =>
+      val callsToBridge = srcMethod.call.name(bridgeFunc.name).l
+      
+      if (callsToBridge.nonEmpty) {{
+        // Get the actual sink call inside bridge function
+        val sinkInBridge = bridgeFunc.call.name("{sink_pat}").headOption
+        
+        sinkInBridge.map {{ snk =>
+          Map(
+            "source" -> Map("code" -> src.code, "file" -> src.file.name.headOption.getOrElse("?"), "line" -> src.lineNumber.getOrElse(-1)),
+            "sink" -> Map("code" -> snk.code, "file" -> snk.file.name.headOption.getOrElse("?"), "line" -> snk.lineNumber.getOrElse(-1)),
+            "bridge_function" -> bridgeFunc.name,
+            "path_length" -> 2
+          )
+        }}
+      }} else None
+    }}
+  }}.take({max_results})
+  
+  flows
+}}.toJsonPretty'''
+
+            else:
+                # BACKWARD MODE: Find sources that reach given sinks
                 mode = "backward"
+                source_pat = source_pattern or default_sources
+                sink_pat = sink_pattern or default_sinks
+                
+                # Build sink selector
+                if has_sink_loc:
+                    sink_selector = f'cpg.call.where(_.file.name(".*{sink_file}$")).lineNumber({sink_line})'
+                else:
+                    sink_selector = f'cpg.call.name("{sink_pat}"){file_filter}'
+
+                if max_depth == 0:
+                    # Intra-procedural
+                    query = f'''{{
+  val sinks = {sink_selector}.l.take({max_results})
+  val flows = sinks.flatMap {{ snk =>
+    val method = snk.method
+    val sources = method.call.name("{source_pat}").l
+    
+    sources.flatMap {{ src =>
+      val srcAssigns = src.inAssignment.l
+      if (srcAssigns.nonEmpty) {{
+        val varName = srcAssigns.head.target.code
+        val sinkArgs = snk.argument.code.l
+        if (sinkArgs.contains(varName)) {{
+          Some(Map(
+            "source" -> Map("code" -> src.code, "file" -> src.file.name.headOption.getOrElse("?"), "line" -> src.lineNumber.getOrElse(-1)),
+            "sink" -> Map("code" -> snk.code, "file" -> snk.file.name.headOption.getOrElse("?"), "line" -> snk.lineNumber.getOrElse(-1)),
+            "path_length" -> 1
+          ))
+        }} else None
+      }} else None
+    }}
+  }}.take({max_results})
+  flows
+}}.toJsonPretty'''
+
+                else:
+                    # Inter-procedural: Find which bridge functions contain sinks, then find sources calling them
+                    query = f'''{{
+  // Step 1: Find sinks
+  val sinks = {sink_selector}.l.take({max_results})
+  
+  // Step 2: Find bridge functions containing these sinks
+  val bridgeFunctions = sinks.map(_.method).dedup.filterNot(_.name == "<global>").l
+  
+  // Step 3: Find calls to bridge functions from methods containing sources
+  val flows = bridgeFunctions.flatMap {{ bridgeFunc =>
+    // Find who calls this bridge function
+    val callers = cpg.call.name(bridgeFunc.name).l
+    
+    callers.flatMap {{ callSite =>
+      val callerMethod = callSite.method
+      // Check if caller method has source calls
+      val sourceCalls = callerMethod.call.name("{source_pat}").l
+      
+      if (sourceCalls.nonEmpty) {{
+        val src = sourceCalls.head
+        val snk = bridgeFunc.call.name("{sink_pat}").headOption.getOrElse(null)
+        
+        if (snk != null) {{
+          Some(Map(
+            "source" -> Map("code" -> src.code, "file" -> src.file.name.headOption.getOrElse("?"), "line" -> src.lineNumber.getOrElse(-1)),
+            "sink" -> Map("code" -> snk.code, "file" -> snk.file.name.headOption.getOrElse("?"), "line" -> snk.lineNumber.getOrElse(-1)),
+            "bridge_function" -> bridgeFunc.name,
+            "path_length" -> 2
+          ))
+        }} else None
+      }} else None
+    }}
+  }}.take({max_results})
+  
+  flows
+}}.toJsonPretty'''
 
             # Execute query
             result = query_executor.execute_query(
@@ -470,25 +548,12 @@ Examples:
                     elif isinstance(item, dict):
                         flows.append(item)
 
-            # Handle point-to-point mode specially
-            if mode == "point_to_point" and flows:
-                flow_data = flows[0] if flows else {}
-                return {
-                    "success": True,
-                    "mode": mode,
-                    "flow_found": flow_data.get("flow_found", False),
-                    "source": flow_data.get("source"),
-                    "sink": flow_data.get("sink"),
-                    "variable": flow_data.get("variable"),
-                    "message": flow_data.get("message"),
-                }
-
             return {
                 "success": True,
                 "mode": mode,
+                "max_depth": max_depth,
                 "flows": flows,
                 "total": len(flows),
-                "truncated": len(flows) >= max_results,
             }
 
         except ValidationError as e:
