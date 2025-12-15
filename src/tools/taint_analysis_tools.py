@@ -606,6 +606,7 @@ Examples:
   }} else {{
     cpg.method
       .filter(m => normalizeFilename(m.file.name.headOption.getOrElse(""), filename))
+      .filterNot(_.name == "\u003cglobal\u003e")  // Exclude <global> pseudo-method
       .filter(m => {{
         val start = m.lineNumber.getOrElse(-1)
         val end = m.lineNumberEnd.getOrElse(-1)
@@ -851,6 +852,7 @@ Examples:
       val f = m.file.name.headOption.getOrElse("")
       f.endsWith(filename) || f.contains(filename)
     })
+    .filterNot(_.name == "\u003cglobal\u003e")  // Exclude <global> pseudo-method
     .filter(m => {
       val start = m.lineNumber.getOrElse(-1)
       val end = m.lineNumberEnd.getOrElse(-1)
