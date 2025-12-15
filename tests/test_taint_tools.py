@@ -172,15 +172,14 @@ async def test_find_taint_sinks_with_filename_filter(fake_services):
 
 @pytest.mark.asyncio
 async def test_find_taint_flows_success(fake_services):
-    # Setup mock for point-to-point flow query
+    # Setup mock for flow query with both source and sink locations
     services = fake_services
 
-    # The new API uses source_location and sink_location (file:line format)
-    # and executes a single unified query
+    # The refactored API treats source+sink as forward mode, returning flows array
     flow_result = QueryResult(
         success=True,
         data=[
-            '[{"flow_found": true, "source": {"code": "getenv(\\"FOO\\")", "file": "core.c", "line": 10}, "sink": {"code": "system(cmd)", "file": "core.c", "line": 42}, "variable": "cmd"}]'
+            '[{"source": {"code": "getenv(\\"FOO\\")", "file": "core.c", "line": 10}, "sink": {"code": "system(cmd)", "file": "core.c", "line": 42}, "path_length": 1}]'
         ],
         row_count=1,
     )
@@ -213,11 +212,15 @@ async def test_find_taint_flows_success(fake_services):
         res = json.loads(res_json.content[0].text)
 
         assert res.get("success") is True
-        assert res.get("mode") == "point_to_point"
-        assert res.get("flow_found") is True
-        assert res["source"]["code"] == 'getenv("FOO")'
-        assert res["sink"]["code"] == "system(cmd)"
-        assert res["variable"] == "cmd"
+        assert res.get("mode") == "forward"
+        assert "flows" in res
+        assert isinstance(res["flows"], list)
+        assert len(res["flows"]) >= 1
+        # Check first flow
+        flow = res["flows"][0]
+        assert flow["source"]["code"] == 'getenv("FOO")'
+        assert flow["sink"]["code"] == "system(cmd)"
+
 
 @pytest.mark.asyncio
 async def test_find_taint_flows_source_only(fake_services):
