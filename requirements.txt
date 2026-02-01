@@ -1,6 +1,6 @@
 # Core dependencies
-fastmcp>=2.12.4
-mcp>=1.16.0
+fastmcp>=2.14.4
+mcp>=1.26.0
 httpx>=0.28.1
 aiohttp>=3.13.2
 uvicorn>=0.38.0
