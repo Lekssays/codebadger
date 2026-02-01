@@ -573,75 +573,102 @@ Examples:
             }
 
     @mcp.tool(
-        description="""Build a program slice from a specific call node.
+        description="""Build a bidirectional program slice from a specific call node.
 
-Creates a backward program slice showing all code that could affect the
-execution at a specific point (dataflow and control dependencies).
+Creates a program slice showing all code that affects (backward) and is affected by (forward)
+a specific call, including dataflow and control dependencies. Optimized for static code analysis.
 
 Args:
-    codebase_hash: The codebase hash.
-    node_id: Precise CPG node ID of the target call.
-    location: Alternative 'file:line' specifier (file relative to project root).
-    include_dataflow: Track variable assignments (default True).
-    include_control_flow: Track if/while conditions (default True).
-    max_depth: limit for backward traversal.
+    codebase_hash: The codebase hash from generate_cpg.
+    location: 'filename:line' or 'filename:line:call_name' (file relative to project root).
+    node_id: Alternative: Direct CPG node ID of the target call.
+    direction: 'backward' (what affects), 'forward' (what is affected), or 'both' (default).
+    max_depth: Depth limit for recursive dependency tracking (default 5).
+    include_control_flow: Include control dependencies like if/while conditions (default True).
+    timeout: Maximum execution time in seconds (default 60).
 
 Returns:
     {
         "success": true,
-        "slice": {
-            "target_call": {...},
-            "dataflow": [...],
-            "control_dependencies": [...]
+        "target": {
+            "node_id": "12345",
+            "name": "memcpy",
+            "code": "memcpy(&ret[0], prefix, lenp)",
+            "file": "tree.c",
+            "line": 195,
+            "method": "xmlBuildQName",
+            "arguments": ["&ret[0]", "prefix", "lenp"]  
         },
-        "total_nodes": N
+        "backward_slice": {
+            "data_dependencies": [
+                {"variable": "ret", "line": 189, "code": "ret = xmlMalloc(...)", "depends_on": ["lenn", "lenp"]}
+            ],
+            "control_dependencies": [
+                {"line": 174, "type": "IF", "condition": "(ncname == NULL) || (len < 0)"}
+            ],
+            "parameters": [{"name": "prefix", "type": "xmlChar*", "position": 2}],
+            "locals": [{"name": "ret", "type": "xmlChar*", "line": 172}]
+        },
+        "forward_slice": {
+            "result_variable": "bytes",
+            "propagations": [
+                {"line": 809, "code": "ret += bytes", "type": "usage"}
+            ],
+            "control_affected": [
+                {"line": 798, "type": "IF", "condition": "bytes < 0"}
+            ]
+        },
+        "summary": {"backward_nodes": 5, "forward_nodes": 3, "direction": "both"}
     }
 
 Notes:
-    - Use node_id for precision when multiple calls exist on one line.
-    - Essential for understanding the context of a potential vulnerability.
-    - location file should be relative to the project root (e.g., 'src/main.c:42').
+    - Use 'both' direction for complete vulnerability context analysis.
+    - Backward slice shows data origins and control conditions.
+    - Forward slice shows how results propagate and affect control flow.
+    - Depth limits prevent excessive traversal in complex code.
 
 Examples:
-    get_program_slice(codebase_hash="abc", location="main.c:42")
-    get_program_slice(codebase_hash="abc", node_id="100234")"""
+    get_program_slice(codebase_hash="abc", location="main.c:42", direction="both")
+    get_program_slice(codebase_hash="abc", location="parser.c:500:memcpy", direction="backward", max_depth=3)
+    get_program_slice(codebase_hash="abc", node_id="100234", direction="forward")"""
     )
     def get_program_slice(
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
-        node_id: Annotated[Optional[str], Field(description="Preferred: Direct CPG node ID of the target call (Get from list_calls or other query results). Example: '12345'")] = None,
-        location: Annotated[Optional[str], Field(description="Alternative: 'filename:line_number' or 'filename:line_number:call_name'. Example: 'main.c:42' or 'main.c:42:memcpy'")] = None,
-        include_dataflow: Annotated[bool, Field(description="Include dataflow (variable assignments) in slice")] = True,
+        location: Annotated[Optional[str], Field(description="'filename:line' or 'filename:line:call_name'. Example: 'main.c:42' or 'main.c:42:memcpy'")] = None,
+        node_id: Annotated[Optional[str], Field(description="Direct CPG node ID of the target call. Example: '12345'")] = None,
+        direction: Annotated[str, Field(description="Slice direction: 'backward', 'forward', or 'both'")] = "both",
+        max_depth: Annotated[int, Field(description="Maximum depth for recursive dependency tracking")] = 5,
         include_control_flow: Annotated[bool, Field(description="Include control dependencies (if/while conditions)")] = True,
-        max_depth: Annotated[int, Field(description="Maximum depth for dataflow tracking")] = 5,
         timeout: Annotated[int, Field(description="Maximum execution time in seconds")] = 60,
     ) -> Dict[str, Any]:
-        """Get backward slice showing all code affecting execution at a specific call."""
+        """Get bidirectional program slice showing code affecting and affected by a specific call."""
         try:
             validate_codebase_hash(codebase_hash)
 
-            # Validate that we have proper node identification
+            # Validate inputs
             if not node_id and not location:
                 raise ValidationError("Either node_id or location must be provided")
+            
+            if direction not in ["backward", "forward", "both"]:
+                raise ValidationError("direction must be 'backward', 'forward', or 'both'")
 
             codebase_tracker = services["codebase_tracker"]
             query_executor = services["query_executor"]
 
-            # Verify CPG exists for this codebase
+            # Verify CPG exists
             codebase_info = codebase_tracker.get_codebase(codebase_hash)
             if not codebase_info or not codebase_info.cpg_path:
                 raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
 
             # Parse location if provided
-            filename = None
-            line_num = None
-            call_name = None
+            filename = ""
+            line_num = 0
+            call_name = ""
             
             if location:
                 parts = location.split(":")
                 if len(parts) < 2:
-                    raise ValidationError(
-                        "location must be in format 'filename:line' or 'filename:line:callname'"
-                    )
+                    raise ValidationError("location must be 'filename:line' or 'filename:line:callname'")
                 filename = parts[0]
                 try:
                     line_num = int(parts[1])
@@ -649,25 +676,31 @@ Examples:
                     raise ValidationError(f"Invalid line number in location: {parts[1]}")
                 call_name = parts[2] if len(parts) > 2 else ""
 
-            # Build multi-line Scala query (complex queries need proper block structure)
+            # Build comprehensive Scala query for bidirectional slicing
+            include_backward = direction in ["backward", "both"]
+            include_forward = direction in ["forward", "both"]
+            
             query = f'''
 {{
+  import scala.collection.mutable
+  
   def escapeJson(s: String): String = {{
     s.replace("\\\\", "\\\\\\\\").replace("\\"", "\\\\\\"").replace("\\n", "\\\\n").replace("\\r", "\\\\r").replace("\\t", "\\\\t")
   }}
   
   def normalizeFilename(path: String, filename: String): Boolean = {{
-    path.endsWith("/" + filename) || path == filename
+    path.endsWith("/" + filename) || path == filename || path.endsWith(filename)
   }}
   
   val filename = "{filename}"
   val lineNum = {line_num}
   val useNodeId = {str(node_id is not None).lower()}
   val nodeId = "{node_id if node_id else ""}"
-  val callName = "{call_name if call_name else ""}"
-  val includeDataflow = {str(include_dataflow).lower()}
-  val includeControlFlow = {str(include_control_flow).lower()}
+  val callName = "{call_name}"
   val maxDepth = {max_depth}
+  val includeBackward = {str(include_backward).lower()}
+  val includeForward = {str(include_forward).lower()}
+  val includeControlFlow = {str(include_control_flow).lower()}
   
   // Find target method
   val targetMethodOpt = if (useNodeId && nodeId.nonEmpty) {{
@@ -675,7 +708,7 @@ Examples:
   }} else {{
     cpg.method
       .filter(m => normalizeFilename(m.file.name.headOption.getOrElse(""), filename))
-      .filterNot(_.name == "\u003cglobal\u003e")  // Exclude <global> pseudo-method
+      .filterNot(_.name == "\\u003cglobal\\u003e")
       .filter(m => {{
         val start = m.lineNumber.getOrElse(-1)
         val end = m.lineNumberEnd.getOrElse(-1)
@@ -684,7 +717,6 @@ Examples:
       .headOption
   }}
   
-  // Process result
   targetMethodOpt match {{
     case Some(method) => {{
       // Find target call
@@ -695,7 +727,7 @@ Examples:
         if (callName.nonEmpty && callsOnLine.nonEmpty) {{
           callsOnLine.filter(_.name == callName).headOption
         }} else if (callsOnLine.nonEmpty) {{
-          callsOnLine.headOption
+          callsOnLine.filterNot(_.name.startsWith("<operator>")).headOption.orElse(callsOnLine.headOption)
         }} else {{
           None
         }}
@@ -703,94 +735,166 @@ Examples:
       
       targetCallOpt match {{
         case Some(targetCall) => {{
-          // Collect dataflow information
-          val dataflow = if (includeDataflow) {{
-            val argVars = targetCall.argument.code.l
-            method.assignment
-              .filter(assign => assign.lineNumber.getOrElse(-1) < lineNum)
-              .filter(assign => {{
-                val targetCode = assign.target.code
-                argVars.exists(arg => arg.contains(targetCode.trim) || targetCode.contains(arg.trim))
-              }})
-              .map(assign => Map(
-                "variable" -> assign.target.code,
-                "code" -> escapeJson(assign.code),
-                "filename" -> escapeJson(assign.file.name.headOption.getOrElse("unknown")),
-                "lineNumber" -> assign.lineNumber.getOrElse(-1),
-                "method" -> escapeJson(assign.method.fullName)
-              ))
+          val targetLine = targetCall.lineNumber.getOrElse(lineNum)
+          val argVars = targetCall.argument.ast.isIdentifier.name.l.distinct
+          
+          // === BACKWARD SLICE ===
+          val backwardSlice = if (includeBackward) {{
+            val visited = mutable.Set[String]()
+            val dataDepsList = mutable.ListBuffer[Map[String, Any]]()
+            
+            def backwardTrace(varName: String, beforeLine: Int, depth: Int): Unit = {{
+              if (depth <= 0 || visited.contains(s"$varName:$beforeLine")) return
+              visited.add(s"$varName:$beforeLine")
+              
+              method.assignment
+                .filter(a => a.lineNumber.getOrElse(0) > 0 && a.lineNumber.getOrElse(0) < beforeLine)
+                .filter(a => a.target.code == varName || a.target.code.startsWith(varName + "[") || a.target.code.startsWith(varName + "->"))
+                .l
+                .foreach {{ assign =>
+                  val rhsVars = assign.source.ast.isIdentifier.name.l.distinct.filter(_ != varName)
+                  dataDepsList += Map(
+                    "variable" -> varName,
+                    "line" -> assign.lineNumber.getOrElse(-1),
+                    "code" -> escapeJson(assign.code),
+                    "depends_on" -> rhsVars
+                  )
+                  rhsVars.foreach(v => backwardTrace(v, assign.lineNumber.getOrElse(0), depth - 1))
+                }}
+            }}
+            
+            argVars.foreach(v => backwardTrace(v, targetLine, maxDepth))
+            
+            val controlDeps = if (includeControlFlow) {{
+              method.controlStructure
+                .filter(c => c.lineNumber.getOrElse(0) > 0 && c.lineNumber.getOrElse(0) < targetLine)
+                .map(ctrl => Map(
+                  "line" -> ctrl.lineNumber.getOrElse(-1),
+                  "type" -> ctrl.controlStructureType,
+                  "condition" -> escapeJson(ctrl.condition.code.headOption.getOrElse(ctrl.code.take(60)))
+                ))
+                .l.take(30)
+            }} else List()
+            
+            val params = method.parameter
+              .filter(p => argVars.contains(p.name))
+              .map(p => Map("name" -> p.name, "type" -> p.typeFullName, "position" -> p.index))
               .l
-              .take(100)
-          }} else {{
-            List()
-          }}
-          
-          // Collect control flow information
-          val controlDeps = if (includeControlFlow) {{
-            method.ast
-              .isControlStructure
-              .filter(ctrl => {{
-                val ctrlLine = ctrl.lineNumber.getOrElse(-1)
-                ctrlLine < lineNum && ctrlLine >= 0
-              }})
-              .map(ctrl => Map(
-                "code" -> escapeJson(ctrl.code),
-                "filename" -> escapeJson(ctrl.file.name.headOption.getOrElse("unknown")),
-                "lineNumber" -> ctrl.lineNumber.getOrElse(-1),
-                "method" -> escapeJson(ctrl.method.fullName)
-              ))
+            
+            val locals = method.local
+              .filter(l => argVars.contains(l.name))
+              .map(l => Map("name" -> l.name, "type" -> l.typeFullName, "line" -> l.lineNumber.getOrElse(-1)))
               .l
-              .take(50)
-          }} else {{
-            List()
-          }}
+            
+            Map(
+              "data_dependencies" -> dataDepsList.toList.sortBy(_("line").asInstanceOf[Int]),
+              "control_dependencies" -> controlDeps,
+              "parameters" -> params,
+              "locals" -> locals
+            )
+          }} else Map[String, Any]()
           
-          // Build target call map
-          val targetCallMap = Map(
-            "node_id" -> targetCall.id.toString,
-            "name" -> targetCall.name,
-            "code" -> escapeJson(targetCall.code),
-            "filename" -> escapeJson(targetCall.file.name.headOption.getOrElse("unknown")),
-            "lineNumber" -> targetCall.lineNumber.getOrElse(-1),
-            "method" -> escapeJson(targetCall.method.fullName),
-            "arguments" -> targetCall.argument.code.l
-          )
+          // === FORWARD SLICE ===
+          val forwardSlice = if (includeForward) {{
+            val resultVars = method.assignment
+              .filter(a => a.lineNumber.getOrElse(0) == targetLine)
+              .filter(a => a.source.code.contains(targetCall.name))
+              .target.code.l.distinct
+            
+            val forwardVisited = mutable.Set[String]()
+            val propagationsList = mutable.ListBuffer[Map[String, Any]]()
+            
+            def forwardTrace(varName: String, afterLine: Int, depth: Int): Unit = {{
+              if (depth <= 0 || forwardVisited.contains(s"$varName:$afterLine")) return
+              forwardVisited.add(s"$varName:$afterLine")
+              
+              method.call
+                .filter(c => c.lineNumber.getOrElse(0) > afterLine)
+                .filter(c => c.argument.code.l.exists(_.contains(varName)))
+                .l.take(15)
+                .foreach {{ call =>
+                  propagationsList += Map(
+                    "line" -> call.lineNumber.getOrElse(-1),
+                    "code" -> escapeJson(call.code),
+                    "type" -> "usage",
+                    "variable" -> varName
+                  )
+                }}
+              
+              method.assignment
+                .filter(a => a.lineNumber.getOrElse(0) > afterLine)
+                .filter(a => a.source.code.contains(varName))
+                .l.take(15)
+                .foreach {{ assign =>
+                  val targetVar = assign.target.code
+                  propagationsList += Map(
+                    "line" -> assign.lineNumber.getOrElse(-1),
+                    "code" -> escapeJson(assign.code),
+                    "type" -> "propagation",
+                    "variable" -> varName,
+                    "propagates_to" -> targetVar
+                  )
+                  if (targetVar != varName) forwardTrace(targetVar, assign.lineNumber.getOrElse(0), depth - 1)
+                }}
+            }}
+            
+            resultVars.foreach(v => forwardTrace(v, targetLine, maxDepth))
+            
+            val controlAffected = if (includeControlFlow) {{
+              method.controlStructure
+                .filter(c => c.lineNumber.getOrElse(0) > targetLine)
+                .filter(c => resultVars.exists(v => c.condition.code.headOption.getOrElse("").contains(v)))
+                .map(ctrl => Map(
+                  "line" -> ctrl.lineNumber.getOrElse(-1),
+                  "type" -> ctrl.controlStructureType,
+                  "condition" -> escapeJson(ctrl.condition.code.headOption.getOrElse(""))
+                ))
+                .l.take(20)
+            }} else List()
+            
+            Map(
+              "result_variable" -> resultVars.headOption.getOrElse(""),
+              "propagations" -> propagationsList.toList.sortBy(_("line").asInstanceOf[Int]).distinct,
+              "control_affected" -> controlAffected
+            )
+          }} else Map[String, Any]()
           
-          // Build success response
+          // Build response
           Map(
             "success" -> true,
-            "slice" -> Map(
-              "target_call" -> targetCallMap,
-              "dataflow" -> dataflow,
-              "control_dependencies" -> controlDeps
+            "target" -> Map(
+              "node_id" -> targetCall.id.toString,
+              "name" -> targetCall.name,
+              "code" -> escapeJson(targetCall.code),
+              "file" -> escapeJson(targetCall.file.name.headOption.getOrElse("unknown")),
+              "line" -> targetCall.lineNumber.getOrElse(-1),
+              "method" -> escapeJson(method.fullName),
+              "arguments" -> targetCall.argument.code.l
             ),
-            "total_nodes" -> (1 + dataflow.size + controlDeps.size)
-          )
-        }}
-        case None => {{
-          Map(
-            "success" -> false,
-            "error" -> Map(
-              "code" -> "CALL_NOT_FOUND",
-              "message" -> "No call found at specified location"
+            "backward_slice" -> backwardSlice,
+            "forward_slice" -> forwardSlice,
+            "summary" -> Map(
+              "direction" -> "{direction}",
+              "max_depth" -> maxDepth,
+              "backward_nodes" -> (if (includeBackward) backwardSlice.getOrElse("data_dependencies", List()).asInstanceOf[List[Any]].size + backwardSlice.getOrElse("control_dependencies", List()).asInstanceOf[List[Any]].size else 0),
+              "forward_nodes" -> (if (includeForward) forwardSlice.getOrElse("propagations", List()).asInstanceOf[List[Any]].size + forwardSlice.getOrElse("control_affected", List()).asInstanceOf[List[Any]].size else 0)
             )
           )
         }}
+        case None => Map(
+          "success" -> false,
+          "error" -> Map("code" -> "CALL_NOT_FOUND", "message" -> s"No call found at $filename:$lineNum")
+        )
       }}
     }}
-    case None => {{
-      Map(
-        "success" -> false,
-        "error" -> Map(
-          "code" -> "METHOD_NOT_FOUND",
-          "message" -> "No method found containing the specified line"
-        )
-      )
-    }}
+    case None => Map(
+      "success" -> false,
+      "error" -> Map("code" -> "METHOD_NOT_FOUND", "message" -> s"No method found containing line $lineNum in $filename")
+    )
   }}
 }}.toJsonPretty'''
 
-            # Execute the query
+            # Execute query
             result = query_executor.execute_query(
                 codebase_hash=codebase_hash,
                 cpg_path=codebase_info.cpg_path,
@@ -804,25 +908,19 @@ Examples:
                     "error": {"code": "QUERY_ERROR", "message": result.error},
                 }
 
-            # Parse the JSON result (same as get_data_dependencies)
+            # Parse JSON result
             import json
 
             if isinstance(result.data, list) and len(result.data) > 0:
                 result_data = result.data[0]
-
-                # Handle JSON string response
                 if isinstance(result_data, str):
                     return json.loads(result_data)
-                else:
-                    return result_data
-            else:
-                return {
-                    "success": False,
-                    "error": {
-                        "code": "NO_RESULT",
-                        "message": "Query returned no results",
-                    },
-                }
+                return result_data
+            
+            return {
+                "success": False,
+                "error": {"code": "NO_RESULT", "message": "Query returned no results"},
+            }
 
         except ValidationError as e:
             logger.error(f"Error getting program slice: {e}")
