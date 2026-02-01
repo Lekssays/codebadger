@@ -12,6 +12,7 @@ from ..exceptions import (
             ValidationError,
 )
 from ..utils.validators import validate_codebase_hash
+from .queries import QueryLoader
 
 logger = logging.getLogger(__name__)
 
@@ -380,69 +381,21 @@ Examples:
 
                 if max_depth == 0:
                     # Intra-procedural: sources and sinks in same function
-                    query = f'''{{
-  val sources = {source_selector}.l.take({max_results})
-  val flows = sources.flatMap {{ src =>
-    val method = src.method
-    val sinks = method.call.name("{sink_pat}").l
-    
-    sinks.flatMap {{ snk =>
-      // Check if there's data flow from source to sink
-      val srcAssigns = src.inAssignment.l
-      if (srcAssigns.nonEmpty) {{
-        val varName = srcAssigns.head.target.code
-        val sinkArgs = snk.argument.code.l
-        if (sinkArgs.contains(varName)) {{
-          Some(Map(
-            "source" -> Map("code" -> src.code, "file" -> src.file.name.headOption.getOrElse("?"), "line" -> src.lineNumber.getOrElse(-1)),
-            "sink" -> Map("code" -> snk.code, "file" -> snk.file.name.headOption.getOrElse("?"), "line" -> snk.lineNumber.getOrElse(-1)),
-            "path_length" -> 1
-          ))
-        }} else None
-      }} else None
-    }}
-  }}.take({max_results})
-  flows
-}}.toJsonPretty'''
-
+                    query = QueryLoader.load(
+                        "taint_flows_intra_forward",
+                        source_selector=source_selector,
+                        sink_pattern=sink_pat,
+                        max_results=max_results
+                    )
                 else:
                     # Inter-procedural: Find bridge functions containing sinks, then check if sources call them
-                    query = f'''{{
-  // Step 1: Find bridge functions (functions containing sinks)
-  val bridgeFunctions = cpg.method
-    .where(_.call.name("{sink_pat}"))
-    .filterNot(_.name == "<global>")
-    .l
-    
-  // Step 2: Find sources
-  val sources = {source_selector}.l.take({max_results * 3})
-  
-  // Step 3: For each source, find calls to bridge functions
-  val flows = sources.flatMap {{ src =>
-    val srcMethod = src.method
-    
-    // Find calls from source's method to bridge functions
-    bridgeFunctions.flatMap {{ bridgeFunc =>
-      val callsToBridge = srcMethod.call.name(bridgeFunc.name).l
-      
-      if (callsToBridge.nonEmpty) {{
-        // Get the actual sink call inside bridge function
-        val sinkInBridge = bridgeFunc.call.name("{sink_pat}").headOption
-        
-        sinkInBridge.map {{ snk =>
-          Map(
-            "source" -> Map("code" -> src.code, "file" -> src.file.name.headOption.getOrElse("?"), "line" -> src.lineNumber.getOrElse(-1)),
-            "sink" -> Map("code" -> snk.code, "file" -> snk.file.name.headOption.getOrElse("?"), "line" -> snk.lineNumber.getOrElse(-1)),
-            "bridge_function" -> bridgeFunc.name,
-            "path_length" -> 2
-          )
-        }}
-      }} else None
-    }}
-  }}.take({max_results})
-  
-  flows
-}}.toJsonPretty'''
+                    query = QueryLoader.load(
+                        "taint_flows_inter_forward",
+                        source_selector=source_selector,
+                        sink_pattern=sink_pat,
+                        max_results=max_results,
+                        max_results_x3=max_results * 3
+                    )
 
             else:
                 # BACKWARD MODE: Find sources that reach given sinks
@@ -458,67 +411,21 @@ Examples:
 
                 if max_depth == 0:
                     # Intra-procedural
-                    query = f'''{{
-  val sinks = {sink_selector}.l.take({max_results})
-  val flows = sinks.flatMap {{ snk =>
-    val method = snk.method
-    val sources = method.call.name("{source_pat}").l
-    
-    sources.flatMap {{ src =>
-      val srcAssigns = src.inAssignment.l
-      if (srcAssigns.nonEmpty) {{
-        val varName = srcAssigns.head.target.code
-        val sinkArgs = snk.argument.code.l
-        if (sinkArgs.contains(varName)) {{
-          Some(Map(
-            "source" -> Map("code" -> src.code, "file" -> src.file.name.headOption.getOrElse("?"), "line" -> src.lineNumber.getOrElse(-1)),
-            "sink" -> Map("code" -> snk.code, "file" -> snk.file.name.headOption.getOrElse("?"), "line" -> snk.lineNumber.getOrElse(-1)),
-            "path_length" -> 1
-          ))
-        }} else None
-      }} else None
-    }}
-  }}.take({max_results})
-  flows
-}}.toJsonPretty'''
-
+                    query = QueryLoader.load(
+                        "taint_flows_intra_backward",
+                        sink_selector=sink_selector,
+                        source_pattern=source_pat,
+                        max_results=max_results
+                    )
                 else:
                     # Inter-procedural: Find which bridge functions contain sinks, then find sources calling them
-                    query = f'''{{
-  // Step 1: Find sinks
-  val sinks = {sink_selector}.l.take({max_results})
-  
-  // Step 2: Find bridge functions containing these sinks
-  val bridgeFunctions = sinks.map(_.method).dedup.filterNot(_.name == "<global>").l
-  
-  // Step 3: Find calls to bridge functions from methods containing sources
-  val flows = bridgeFunctions.flatMap {{ bridgeFunc =>
-    // Find who calls this bridge function
-    val callers = cpg.call.name(bridgeFunc.name).l
-    
-    callers.flatMap {{ callSite =>
-      val callerMethod = callSite.method
-      // Check if caller method has source calls
-      val sourceCalls = callerMethod.call.name("{source_pat}").l
-      
-      if (sourceCalls.nonEmpty) {{
-        val src = sourceCalls.head
-        val snk = bridgeFunc.call.name("{sink_pat}").headOption.getOrElse(null)
-        
-        if (snk != null) {{
-          Some(Map(
-            "source" -> Map("code" -> src.code, "file" -> src.file.name.headOption.getOrElse("?"), "line" -> src.lineNumber.getOrElse(-1)),
-            "sink" -> Map("code" -> snk.code, "file" -> snk.file.name.headOption.getOrElse("?"), "line" -> snk.lineNumber.getOrElse(-1)),
-            "bridge_function" -> bridgeFunc.name,
-            "path_length" -> 2
-          ))
-        }} else None
-      }} else None
-    }}
-  }}.take({max_results})
-  
-  flows
-}}.toJsonPretty'''
+                    query = QueryLoader.load(
+                        "taint_flows_inter_backward",
+                        sink_selector=sink_selector,
+                        source_pattern=source_pat,
+                        sink_pattern=sink_pat,
+                        max_results=max_results
+                    )
 
             # Execute query
             result = query_executor.execute_query(
@@ -680,219 +587,20 @@ Examples:
             include_backward = direction in ["backward", "both"]
             include_forward = direction in ["forward", "both"]
             
-            query = f'''
-{{
-  import scala.collection.mutable
-  
-  def escapeJson(s: String): String = {{
-    s.replace("\\\\", "\\\\\\\\").replace("\\"", "\\\\\\"").replace("\\n", "\\\\n").replace("\\r", "\\\\r").replace("\\t", "\\\\t")
-  }}
-  
-  def normalizeFilename(path: String, filename: String): Boolean = {{
-    path.endsWith("/" + filename) || path == filename || path.endsWith(filename)
-  }}
-  
-  val filename = "{filename}"
-  val lineNum = {line_num}
-  val useNodeId = {str(node_id is not None).lower()}
-  val nodeId = "{node_id if node_id else ""}"
-  val callName = "{call_name}"
-  val maxDepth = {max_depth}
-  val includeBackward = {str(include_backward).lower()}
-  val includeForward = {str(include_forward).lower()}
-  val includeControlFlow = {str(include_control_flow).lower()}
-  
-  // Find target method
-  val targetMethodOpt = if (useNodeId && nodeId.nonEmpty) {{
-    cpg.call.id(nodeId.toLong).method.headOption
-  }} else {{
-    cpg.method
-      .filter(m => normalizeFilename(m.file.name.headOption.getOrElse(""), filename))
-      .filterNot(_.name == "\\u003cglobal\\u003e")
-      .filter(m => {{
-        val start = m.lineNumber.getOrElse(-1)
-        val end = m.lineNumberEnd.getOrElse(-1)
-        start <= lineNum && end >= lineNum
-      }})
-      .headOption
-  }}
-  
-  targetMethodOpt match {{
-    case Some(method) => {{
-      // Find target call
-      val targetCallOpt = if (useNodeId && nodeId.nonEmpty) {{
-        cpg.call.id(nodeId.toLong).headOption
-      }} else {{
-        val callsOnLine = method.call.filter(c => c.lineNumber.getOrElse(-1) == lineNum).l
-        if (callName.nonEmpty && callsOnLine.nonEmpty) {{
-          callsOnLine.filter(_.name == callName).headOption
-        }} else if (callsOnLine.nonEmpty) {{
-          callsOnLine.filterNot(_.name.startsWith("<operator>")).headOption.orElse(callsOnLine.headOption)
-        }} else {{
-          None
-        }}
-      }}
-      
-      targetCallOpt match {{
-        case Some(targetCall) => {{
-          val targetLine = targetCall.lineNumber.getOrElse(lineNum)
-          val argVars = targetCall.argument.ast.isIdentifier.name.l.distinct
-          
-          // === BACKWARD SLICE ===
-          val backwardSlice = if (includeBackward) {{
-            val visited = mutable.Set[String]()
-            val dataDepsList = mutable.ListBuffer[Map[String, Any]]()
-            
-            def backwardTrace(varName: String, beforeLine: Int, depth: Int): Unit = {{
-              if (depth <= 0 || visited.contains(s"$varName:$beforeLine")) return
-              visited.add(s"$varName:$beforeLine")
-              
-              method.assignment
-                .filter(a => a.lineNumber.getOrElse(0) > 0 && a.lineNumber.getOrElse(0) < beforeLine)
-                .filter(a => a.target.code == varName || a.target.code.startsWith(varName + "[") || a.target.code.startsWith(varName + "->"))
-                .l
-                .foreach {{ assign =>
-                  val rhsVars = assign.source.ast.isIdentifier.name.l.distinct.filter(_ != varName)
-                  dataDepsList += Map(
-                    "variable" -> varName,
-                    "line" -> assign.lineNumber.getOrElse(-1),
-                    "code" -> escapeJson(assign.code),
-                    "depends_on" -> rhsVars
-                  )
-                  rhsVars.foreach(v => backwardTrace(v, assign.lineNumber.getOrElse(0), depth - 1))
-                }}
-            }}
-            
-            argVars.foreach(v => backwardTrace(v, targetLine, maxDepth))
-            
-            val controlDeps = if (includeControlFlow) {{
-              method.controlStructure
-                .filter(c => c.lineNumber.getOrElse(0) > 0 && c.lineNumber.getOrElse(0) < targetLine)
-                .map(ctrl => Map(
-                  "line" -> ctrl.lineNumber.getOrElse(-1),
-                  "type" -> ctrl.controlStructureType,
-                  "condition" -> escapeJson(ctrl.condition.code.headOption.getOrElse(ctrl.code.take(60)))
-                ))
-                .l.take(30)
-            }} else List()
-            
-            val params = method.parameter
-              .filter(p => argVars.contains(p.name))
-              .map(p => Map("name" -> p.name, "type" -> p.typeFullName, "position" -> p.index))
-              .l
-            
-            val locals = method.local
-              .filter(l => argVars.contains(l.name))
-              .map(l => Map("name" -> l.name, "type" -> l.typeFullName, "line" -> l.lineNumber.getOrElse(-1)))
-              .l
-            
-            Map(
-              "data_dependencies" -> dataDepsList.toList.sortBy(_("line").asInstanceOf[Int]),
-              "control_dependencies" -> controlDeps,
-              "parameters" -> params,
-              "locals" -> locals
+            # Load query from external file
+            query = QueryLoader.load(
+                "program_slice",
+                filename=filename,
+                line_num=line_num,
+                use_node_id=str(node_id is not None).lower(),
+                node_id=node_id if node_id else "",
+                call_name=call_name,
+                max_depth=max_depth,
+                include_backward=str(include_backward).lower(),
+                include_forward=str(include_forward).lower(),
+                include_control_flow=str(include_control_flow).lower(),
+                direction=direction
             )
-          }} else Map[String, Any]()
-          
-          // === FORWARD SLICE ===
-          val forwardSlice = if (includeForward) {{
-            val resultVars = method.assignment
-              .filter(a => a.lineNumber.getOrElse(0) == targetLine)
-              .filter(a => a.source.code.contains(targetCall.name))
-              .target.code.l.distinct
-            
-            val forwardVisited = mutable.Set[String]()
-            val propagationsList = mutable.ListBuffer[Map[String, Any]]()
-            
-            def forwardTrace(varName: String, afterLine: Int, depth: Int): Unit = {{
-              if (depth <= 0 || forwardVisited.contains(s"$varName:$afterLine")) return
-              forwardVisited.add(s"$varName:$afterLine")
-              
-              method.call
-                .filter(c => c.lineNumber.getOrElse(0) > afterLine)
-                .filter(c => c.argument.code.l.exists(_.contains(varName)))
-                .l.take(15)
-                .foreach {{ call =>
-                  propagationsList += Map(
-                    "line" -> call.lineNumber.getOrElse(-1),
-                    "code" -> escapeJson(call.code),
-                    "type" -> "usage",
-                    "variable" -> varName
-                  )
-                }}
-              
-              method.assignment
-                .filter(a => a.lineNumber.getOrElse(0) > afterLine)
-                .filter(a => a.source.code.contains(varName))
-                .l.take(15)
-                .foreach {{ assign =>
-                  val targetVar = assign.target.code
-                  propagationsList += Map(
-                    "line" -> assign.lineNumber.getOrElse(-1),
-                    "code" -> escapeJson(assign.code),
-                    "type" -> "propagation",
-                    "variable" -> varName,
-                    "propagates_to" -> targetVar
-                  )
-                  if (targetVar != varName) forwardTrace(targetVar, assign.lineNumber.getOrElse(0), depth - 1)
-                }}
-            }}
-            
-            resultVars.foreach(v => forwardTrace(v, targetLine, maxDepth))
-            
-            val controlAffected = if (includeControlFlow) {{
-              method.controlStructure
-                .filter(c => c.lineNumber.getOrElse(0) > targetLine)
-                .filter(c => resultVars.exists(v => c.condition.code.headOption.getOrElse("").contains(v)))
-                .map(ctrl => Map(
-                  "line" -> ctrl.lineNumber.getOrElse(-1),
-                  "type" -> ctrl.controlStructureType,
-                  "condition" -> escapeJson(ctrl.condition.code.headOption.getOrElse(""))
-                ))
-                .l.take(20)
-            }} else List()
-            
-            Map(
-              "result_variable" -> resultVars.headOption.getOrElse(""),
-              "propagations" -> propagationsList.toList.sortBy(_("line").asInstanceOf[Int]).distinct,
-              "control_affected" -> controlAffected
-            )
-          }} else Map[String, Any]()
-          
-          // Build response
-          Map(
-            "success" -> true,
-            "target" -> Map(
-              "node_id" -> targetCall.id.toString,
-              "name" -> targetCall.name,
-              "code" -> escapeJson(targetCall.code),
-              "file" -> escapeJson(targetCall.file.name.headOption.getOrElse("unknown")),
-              "line" -> targetCall.lineNumber.getOrElse(-1),
-              "method" -> escapeJson(method.fullName),
-              "arguments" -> targetCall.argument.code.l
-            ),
-            "backward_slice" -> backwardSlice,
-            "forward_slice" -> forwardSlice,
-            "summary" -> Map(
-              "direction" -> "{direction}",
-              "max_depth" -> maxDepth,
-              "backward_nodes" -> (if (includeBackward) backwardSlice.getOrElse("data_dependencies", List()).asInstanceOf[List[Any]].size + backwardSlice.getOrElse("control_dependencies", List()).asInstanceOf[List[Any]].size else 0),
-              "forward_nodes" -> (if (includeForward) forwardSlice.getOrElse("propagations", List()).asInstanceOf[List[Any]].size + forwardSlice.getOrElse("control_affected", List()).asInstanceOf[List[Any]].size else 0)
-            )
-          )
-        }}
-        case None => Map(
-          "success" -> false,
-          "error" -> Map("code" -> "CALL_NOT_FOUND", "message" -> s"No call found at $filename:$lineNum")
-        )
-      }}
-    }}
-    case None => Map(
-      "success" -> false,
-      "error" -> Map("code" -> "METHOD_NOT_FOUND", "message" -> s"No method found containing line $lineNum in $filename")
-    )
-  }}
-}}.toJsonPretty'''
 
             # Execute query
             result = query_executor.execute_query(
@@ -1002,212 +710,13 @@ Examples:
             if not codebase_info or not codebase_info.cpg_path:
                 raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
 
-            # Build improved CPGQL query with proper JSON output
-            # This query correctly handles variable data flow analysis
-            query_template = r'''{
-  def escapeJson(s: String): String = {
-    s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
-  }
-
-  val targetLine = LINE_NUM_PLACEHOLDER
-  val varName = "VARIABLE_PLACEHOLDER"
-  val filename = "FILENAME_PLACEHOLDER"
-  val direction = "DIRECTION_PLACEHOLDER"
-  val maxResults = 50
-
-  val targetMethodOpt = cpg.method
-    .filter(m => {
-      val f = m.file.name.headOption.getOrElse("")
-      f.endsWith(filename) || f.contains(filename)
-    })
-    .filterNot(_.name == "\u003cglobal\u003e")  // Exclude <global> pseudo-method
-    .filter(m => {
-      val start = m.lineNumber.getOrElse(-1)
-      val end = m.lineNumberEnd.getOrElse(-1)
-      start <= targetLine && end >= targetLine
-    })
-    .headOption
-
-  val result = targetMethodOpt match {
-    case Some(method) => {
-      val methodName = method.name
-      val methodFile = method.file.name.headOption.getOrElse("unknown")
-      val dependencies = scala.collection.mutable.ListBuffer[Map[String, Any]]()
-
-      if (direction == "backward") {
-        val inits = method.local.name(varName).l
-        inits.foreach { local =>
-          dependencies += Map(
-            "line" -> local.lineNumber.getOrElse(-1),
-            "code" -> escapeJson(s"${local.typeFullName} ${local.code}"),
-            "type" -> "initialization",
-            "filename" -> escapeJson(methodFile)
-          )
-        }
-
-        val assignments = method.assignment.l
-          .filter(a => {
-            val line = a.lineNumber.getOrElse(-1)
-            line < targetLine
-          })
-          .filter(a => {
-            val targetCode = a.target.code
-            targetCode == varName || targetCode.startsWith(varName + "[") || targetCode.startsWith(varName + ".")
-          })
-          .take(maxResults)
-
-        assignments.foreach { assign =>
-          dependencies += Map(
-            "line" -> assign.lineNumber.getOrElse(-1),
-            "code" -> escapeJson(assign.code),
-            "type" -> "assignment",
-            "filename" -> escapeJson(methodFile)
-          )
-        }
-
-        val modifications = method.call
-          .name("<operator>.(postIncrement|preIncrement|postDecrement|preDecrement|assignmentPlus|assignmentMinus|assignmentMultiplication|assignmentDivision)")
-          .l
-          .filter(c => {
-            val line = c.lineNumber.getOrElse(-1)
-            line < targetLine
-          })
-          .filter(c => {
-            val args = c.argument.code.l
-            args.exists(arg => arg == varName || arg.startsWith(varName + "[") || arg.startsWith(varName + "."))
-          })
-          .take(maxResults)
-
-        modifications.foreach { call =>
-          dependencies += Map(
-            "line" -> call.lineNumber.getOrElse(-1),
-            "code" -> escapeJson(call.code),
-            "type" -> "modification",
-            "filename" -> escapeJson(methodFile)
-          )
-        }
-
-        val funcCalls = method.call.l
-          .filter(c => {
-            val line = c.lineNumber.getOrElse(-1)
-            line < targetLine
-          })
-          .filter(c => {
-            val args = c.argument.code.l
-            args.exists(arg => arg.contains("&" + varName) || arg.contains(varName))
-          })
-          .take(maxResults)
-
-        funcCalls.foreach { call =>
-          dependencies += Map(
-            "line" -> call.lineNumber.getOrElse(-1),
-            "code" -> escapeJson(call.code),
-            "type" -> "function_call",
-            "filename" -> escapeJson(methodFile)
-          )
-        }
-      } else if (direction == "forward") {
-        val usages = method.call.l
-          .filter(c => {
-            val line = c.lineNumber.getOrElse(-1)
-            line > targetLine
-          })
-          .filter(c => {
-            val args = c.argument.code.l
-            args.exists(arg => arg.contains(varName))
-          })
-          .take(maxResults)
-
-        usages.foreach { call =>
-          dependencies += Map(
-            "line" -> call.lineNumber.getOrElse(-1),
-            "code" -> escapeJson(call.code),
-            "type" -> "usage",
-            "filename" -> escapeJson(methodFile)
-          )
-        }
-
-        val propagations = method.assignment.l
-          .filter(a => {
-            val line = a.lineNumber.getOrElse(-1)
-            line > targetLine
-          })
-          .filter(a => {
-            val sourceCode = a.source.code
-            sourceCode.contains(varName)
-          })
-          .take(maxResults)
-
-        propagations.foreach { assign =>
-          dependencies += Map(
-            "line" -> assign.lineNumber.getOrElse(-1),
-            "code" -> escapeJson(assign.code),
-            "type" -> "propagation",
-            "filename" -> escapeJson(methodFile)
-          )
-        }
-
-        val mods = method.call
-          .name("<operator>.(postIncrement|preIncrement|postDecrement|preDecrement|assignmentPlus|assignmentMinus)")
-          .l
-          .filter(c => {
-            val line = c.lineNumber.getOrElse(-1)
-            line > targetLine
-          })
-          .filter(c => {
-            val args = c.argument.code.l
-            args.exists(arg => arg == varName)
-          })
-          .take(maxResults)
-
-        mods.foreach { call =>
-          dependencies += Map(
-            "line" -> call.lineNumber.getOrElse(-1),
-            "code" -> escapeJson(call.code),
-            "type" -> "modification",
-            "filename" -> escapeJson(methodFile)
-          )
-        }
-      }
-
-      val sortedDeps = dependencies.sortBy(d => d.getOrElse("line", -1).asInstanceOf[Int])
-
-      List(
-        Map(
-          "success" -> true,
-          "target" -> Map(
-            "file" -> methodFile,
-            "line" -> targetLine,
-            "variable" -> varName,
-            "method" -> methodName
-          ),
-          "direction" -> direction,
-          "dependencies" -> sortedDeps.toList,
-          "total" -> sortedDeps.size
-        )
-      )
-    }
-    case None => {
-      List(
-        Map(
-          "success" -> false,
-          "error" -> Map(
-            "code" -> "METHOD_NOT_FOUND",
-            "message" -> s"No method found containing line $targetLine in file containing '$filename'"
-          )
-        )
-      )
-    }
-  }
-
-  result.toJsonPretty
-}'''
-
-            query = (
-                query_template.replace("FILENAME_PLACEHOLDER", filename)
-                .replace("LINE_NUM_PLACEHOLDER", str(line_num))
-                .replace("VARIABLE_PLACEHOLDER", variable)
-                .replace("DIRECTION_PLACEHOLDER", direction)
+            # Load query from external file
+            query = QueryLoader.load(
+                "variable_flow",
+                filename=filename,
+                line_num=line_num,
+                variable=variable,
+                direction=direction
             )
 
             # Execute the query

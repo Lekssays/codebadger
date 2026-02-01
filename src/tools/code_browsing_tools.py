@@ -13,6 +13,7 @@ from ..exceptions import (
             ValidationError,
 )
 from ..utils.validators import validate_codebase_hash
+from .queries import QueryLoader
 
 logger = logging.getLogger(__name__)
 
@@ -419,163 +420,13 @@ Examples:
             if not codebase_info or not codebase_info.cpg_path:
                 raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
 
-            # Build improved CPGQL query with proper structure
-            query_template = r'''{
-  def escapeJson(s: String): String = {
-    s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
-  }
-
-  val methodName = "METHOD_NAME_PLACEHOLDER"
-  val maxDepth = DEPTH_PLACEHOLDER
-  val direction = "DIRECTION_PLACEHOLDER"
-  val maxResults = 500
-
-  val rootMethodOpt = cpg.method.name(methodName).headOption
-
-  val result = rootMethodOpt match {
-    case Some(rootMethod) => {
-      val rootName = rootMethod.name
-      val allCalls = scala.collection.mutable.ListBuffer[Map[String, Any]]()
-      
-      if (direction == "outgoing") {
-        var toVisit = scala.collection.mutable.Queue[(io.shiftleft.codepropertygraph.generated.nodes.Method, Int)]()
-        var visited = Set[String]()
-        var edgesVisited = Set[(String, String, Int)]()
-        
-        toVisit.enqueue((rootMethod, 0))
-        
-        while (toVisit.nonEmpty && allCalls.size < maxResults) {
-          val (current, currentDepth) = toVisit.dequeue()
-          val currentName = current.name
-          
-          if (!visited.contains(currentName) && currentDepth < maxDepth) {
-            visited = visited + currentName
-            
-            val callees = current.call.callee.l
-              .filterNot(_.name.startsWith("<operator>"))
-              .take(50)
-            
-            for (callee <- callees) {
-              val calleeName = callee.name
-              val edgeKey = (currentName, calleeName, currentDepth + 1)
-              
-              if (!edgesVisited.contains(edgeKey)) {
-                edgesVisited = edgesVisited + edgeKey
-                allCalls += Map(
-                  "from" -> currentName,
-                  "to" -> escapeJson(calleeName),
-                  "depth" -> (currentDepth + 1)
-                )
-                
-                if (!visited.contains(calleeName) && currentDepth + 1 < maxDepth) {
-                  toVisit.enqueue((callee, currentDepth + 1))
-                }
-              }
-            }
-          }
-        }
-        
-        List(
-          Map(
-            "success" -> true,
-            "root_method" -> rootName,
-            "direction" -> direction,
-            "calls" -> allCalls.toList.sortBy(c => (c.getOrElse("depth", 0).asInstanceOf[Int], c.getOrElse("from", "").asInstanceOf[String])),
-            "total" -> allCalls.size
-          )
-        )
-      } else if (direction == "incoming") {
-        var toVisit = scala.collection.mutable.Queue[(io.shiftleft.codepropertygraph.generated.nodes.Method, Int)]()
-        var visited = Set[String]()
-        var edgesVisited = Set[(String, String, Int)]()
-        
-        val directCallers = rootMethod.caller.l.filterNot(_.name.startsWith("<operator>"))
-        for (caller <- directCallers) {
-          val edgeKey = (caller.name, rootName, 1)
-          if (!edgesVisited.contains(edgeKey)) {
-            edgesVisited = edgesVisited + edgeKey
-            allCalls += Map(
-              "from" -> escapeJson(caller.name),
-              "to" -> rootName,
-              "depth" -> 1
+            # Load query from external file
+            query = QueryLoader.load(
+                "call_graph",
+                method_name=method_name,
+                depth=depth,
+                direction=direction
             )
-            toVisit.enqueue((caller, 1))
-          }
-        }
-        
-        visited = visited + rootName
-        
-        while (toVisit.nonEmpty && allCalls.size < maxResults) {
-          val (current, currentDepth) = toVisit.dequeue()
-          val currentName = current.name
-          
-          if (!visited.contains(currentName) && currentDepth < maxDepth) {
-            visited = visited + currentName
-            
-            val incomingCallers = current.caller.l
-              .filterNot(_.name.startsWith("<operator>"))
-              .take(50)
-            
-            for (caller <- incomingCallers) {
-              val callerName = caller.name
-              val edgeKey = (callerName, rootName, currentDepth + 1)
-              
-              if (!edgesVisited.contains(edgeKey)) {
-                edgesVisited = edgesVisited + edgeKey
-                allCalls += Map(
-                  "from" -> escapeJson(callerName),
-                  "to" -> rootName,
-                  "depth" -> (currentDepth + 1)
-                )
-                
-                if (!visited.contains(callerName) && currentDepth + 1 < maxDepth) {
-                  toVisit.enqueue((caller, currentDepth + 1))
-                }
-              }
-            }
-          }
-        }
-        
-        List(
-          Map(
-            "success" -> true,
-            "root_method" -> rootName,
-            "direction" -> direction,
-            "calls" -> allCalls.toList.sortBy(c => (c.getOrElse("depth", 0).asInstanceOf[Int], c.getOrElse("from", "").asInstanceOf[String])),
-            "total" -> allCalls.size
-          )
-        )
-      } else {
-        List(
-          Map(
-            "success" -> false,
-            "error" -> Map(
-              "code" -> "INVALID_DIRECTION",
-              "message" -> s"Direction must be 'outgoing' or 'incoming', got: '$direction'"
-            )
-          )
-        )
-      }
-    }
-    case None => {
-      List(
-        Map(
-          "success" -> false,
-          "error" -> Map(
-            "code" -> "METHOD_NOT_FOUND",
-            "message" -> s"Method not found: $methodName"
-          )
-        )
-      )
-    }
-  }
-
-  result.toJsonPretty
-}'''
-
-            query = query_template.replace("METHOD_NAME_PLACEHOLDER", method_name)
-            query = query.replace("DEPTH_PLACEHOLDER", str(depth))
-            query = query.replace("DIRECTION_PLACEHOLDER", direction)
 
             result = query_executor.execute_query(
                 codebase_hash=codebase_hash,
@@ -1141,120 +992,12 @@ Examples:
             if not codebase_info or not codebase_info.cpg_path:
                 raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
 
-            # Build multi-line Scala query for bounds check analysis
-            query = f'''
-{{
-  def escapeJson(s: String): String = {{
-    s.replace("\\\\", "\\\\\\\\").replace("\\"", "\\\\\\"").replace("\\n", "\\\\n").replace("\\r", "\\\\r").replace("\\t", "\\\\t")
-  }}
-  
-  def extractIndexVariable(indexExpr: String): String = {{
-    indexExpr.replaceAll("[^a-zA-Z0-9_].*", "").trim
-  }}
-  
-  def getOperatorSymbol(operatorName: String): String = {{
-    operatorName match {{
-      case "<operator>.lessThan" => "<"
-      case "<operator>.greaterThan" => ">"
-      case "<operator>.lessEqualsThan" => "<="
-      case "<operator>.greaterEqualsThan" => ">="
-      case "<operator>.notEquals" => "!="
-      case "<operator>.equals" => "=="
-      case _ => "?"
-    }}
-  }}
-  
-  val filename = "{filename}"
-  val lineNum = {line_num}
-  
-  val bufferAccessOpt = cpg.call
-    .name("<operator>.indirectIndexAccess")
-    .filter(c => {{
-      val f = c.file.name.headOption.getOrElse("")
-      f.endsWith("/" + filename) || f == filename
-    }})
-    .filter(c => c.lineNumber.getOrElse(-1) == lineNum)
-    .headOption
-  
-  val resultMap = bufferAccessOpt match {{
-    case Some(bufferAccess) =>
-      val accessLine = bufferAccess.lineNumber.getOrElse(0)
-      val args = bufferAccess.argument.l
-      
-      val bufferName = if (args.nonEmpty) escapeJson(args.head.code) else "unknown"
-      val indexExpr = if (args.size > 1) escapeJson(args.last.code) else "unknown"
-      val indexVar = extractIndexVariable(args.lastOption.map(_.code).getOrElse(""))
-      
-      val method = bufferAccess.method
-      
-      val comparisons = method.call
-        .filter(c => {{
-          val name = c.name
-          name.contains("<operator>") && 
-          (name.contains("essThan") || name.contains("ualsThan") || name.contains("quals") || name.contains("otEquals"))
-        }})
-        .filter(cmp => {{
-          val cmpCode = cmp.code
-          cmpCode.contains(indexVar) || cmpCode.contains(indexExpr.replaceAll("\\\\\\\\\"", "\""))
-        }})
-        .l
-      
-      val boundsChecksList = comparisons
-        .map(cmp => {{
-          val cmpLine = cmp.lineNumber.getOrElse(0)
-          val position = if (cmpLine < accessLine) {{
-            "BEFORE_ACCESS"
-          }} else if (cmpLine > accessLine) {{
-            "AFTER_ACCESS"
-          }} else {{
-            "SAME_LINE"
-          }}
-          
-          val cmpArgs = cmp.argument.l
-          val leftArg = if (cmpArgs.nonEmpty) cmpArgs.head.code else "?"
-          val rightArg = if (cmpArgs.size > 1) cmpArgs.last.code else "?"
-          val operator = getOperatorSymbol(cmp.name)
-          
-          Map(
-            "line" -> cmpLine,
-            "code" -> escapeJson(cmp.code),
-            "checked_variable" -> escapeJson(leftArg),
-            "bound" -> escapeJson(rightArg),
-            "operator" -> operator,
-            "position" -> position
-          )
-        }})
-        .take(50)
-      
-      val checkBefore = comparisons.exists(c => c.lineNumber.getOrElse(0) < accessLine)
-      val checkAfter = comparisons.exists(c => c.lineNumber.getOrElse(0) > accessLine)
-      
-      Map(
-        "success" -> true,
-        "buffer_access" -> Map(
-          "line" -> accessLine,
-          "code" -> escapeJson(bufferAccess.code),
-          "buffer" -> bufferName,
-          "index" -> indexExpr
-        ),
-        "bounds_checks" -> boundsChecksList,
-        "check_before_access" -> checkBefore,
-        "check_after_access" -> checkAfter,
-        "index_variable" -> indexVar
-      )
-    
-    case None =>
-      Map(
-        "success" -> false,
-        "error" -> Map(
-          "code" -> "NOT_FOUND",
-          "message" -> s"No buffer access found at $filename:$lineNum"
-        )
-      )
-  }}
-  
-  List(resultMap)
-}}.toJsonPretty'''
+            # Load query from external file
+            query = QueryLoader.load(
+                "bounds_checks",
+                filename=filename,
+                line_num=line_num
+            )
 
             result = query_executor.execute_query(
                 codebase_hash=codebase_hash,
@@ -1475,26 +1218,12 @@ Examples:
             if not codebase_info or not codebase_info.cpg_path:
                 raise ValidationError(f"CPG not found for codebase {codebase_hash}")
 
-            # Query for CFG nodes AND edges
-            query = f'''{{
-              val m = cpg.method.name("{method_name}").take(1).l.headOption
-              m match {{
-                case Some(method) =>
-                  val nodes = method.cfgNode.take({max_nodes}).map(n => Map(
-                    "_1" -> n.id,
-                    "_2" -> n.code.take(100),
-                    "_3" -> n.getClass.getSimpleName
-                  )).l
-                  val nodeIds = nodes.map(_("_1")).toSet
-                  val edges = method.cfgNode.take({max_nodes}).flatMap(n => 
-                    n.cfgNext.filter(next => nodeIds.contains(next.id)).map(next => 
-                      Map("_1" -> n.id, "_2" -> next.id)
-                    )
-                  ).l.distinct
-                  Map("nodes" -> nodes, "edges" -> edges)
-                case None => Map("nodes" -> List(), "edges" -> List())
-              }}
-            }}.toJsonPretty'''
+            # Load query from external file
+            query = QueryLoader.load(
+                "cfg",
+                method_name=method_name,
+                max_nodes=max_nodes
+            )
 
             result = query_executor.execute_query(
                 codebase_hash=codebase_hash,
@@ -1600,16 +1329,12 @@ Examples:
             if not codebase_info or not codebase_info.cpg_path:
                 raise ValidationError(f"CPG not found for codebase {codebase_hash}")
 
-            # Query for type definitions with members
-            query = f'''cpg.typeDecl.name("{type_name}").filter(_.member.nonEmpty).take({limit}).map {{ t =>
-              Map(
-                "_1" -> t.name,
-                "_2" -> t.fullName,
-                "_3" -> t.file.name.headOption.getOrElse("unknown"),
-                "_4" -> t.lineNumber.getOrElse(-1),
-                "_5" -> t.member.take(20).map(m => Map("name" -> m.name, "type" -> m.typeFullName)).l
-              )
-            }}.toJsonPretty'''
+            # Load query from external file
+            query = QueryLoader.load(
+                "type_definition",
+                type_name=type_name,
+                limit=limit
+            )
 
             result = query_executor.execute_query(
                 codebase_hash=codebase_hash,
@@ -1698,17 +1423,13 @@ Examples:
             if not codebase_info or not codebase_info.cpg_path:
                 raise ValidationError(f"CPG not found for codebase {codebase_hash}")
 
-            # Build query with optional line filter
+            # Load query from external file
             line_filter = f".lineNumber({line_number})" if line_number else ""
-            query = f'''cpg.call.where(_.file.name(".*{filename}.*")){line_filter}.take(50).map {{ c =>
-              Map(
-                "_1" -> c.name,
-                "_2" -> c.code.take(100),
-                "_3" -> c.lineNumber.getOrElse(-1),
-                "_4" -> c.file.name.headOption.getOrElse("unknown"),
-                "_5" -> c.dispatchType
-              )
-            }}.toJsonPretty'''
+            query = QueryLoader.load(
+                "macro_expansion",
+                filename=filename,
+                line_filter=line_filter
+            )
 
             result = query_executor.execute_query(
                 codebase_hash=codebase_hash,
