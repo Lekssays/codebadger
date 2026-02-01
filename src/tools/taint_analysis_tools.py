@@ -106,7 +106,7 @@ Examples:
             if not result.success:
                 return {
                     "success": False,
-                    "error": {"code": "QUERY_ERROR", "message": result.error},
+                    "error": result.error,
                 }
 
             sources = []
@@ -135,13 +135,13 @@ Examples:
             logger.error(f"Error finding taint sources: {e}")
             return {
                 "success": False,
-                "error": {"code": type(e).__name__.upper(), "message": str(e)},
+                "error": str(e),
             }
         except Exception as e:
             logger.error(f"Unexpected error finding taint sources: {e}", exc_info=True)
             return {
                 "success": False,
-                "error": {"code": "INTERNAL_ERROR", "message": str(e)},
+                "error": str(e),
             }
 
     @mcp.tool(
@@ -228,7 +228,7 @@ Examples:
             if not result.success:
                 return {
                     "success": False,
-                    "error": {"code": "QUERY_ERROR", "message": result.error},
+                    "error": result.error,
                 }
 
             sinks = []
@@ -257,13 +257,13 @@ Examples:
             logger.error(f"Error finding taint sinks: {e}")
             return {
                 "success": False,
-                "error": {"code": type(e).__name__.upper(), "message": str(e)},
+                "error": str(e),
             }
         except Exception as e:
             logger.error(f"Unexpected error finding taint sinks: {e}", exc_info=True)
             return {
                 "success": False,
-                "error": {"code": "INTERNAL_ERROR", "message": str(e)},
+                "error": str(e),
             }
 
     @mcp.tool(
@@ -438,7 +438,7 @@ Examples:
             if not result.success:
                 return {
                     "success": False,
-                    "error": {"code": "QUERY_ERROR", "message": result.error},
+                    "error": result.error,
                 }
 
             # Parse result
@@ -470,13 +470,13 @@ Examples:
             logger.error(f"Error finding taint flows: {e}")
             return {
                 "success": False,
-                "error": {"code": type(e).__name__.upper(), "message": str(e)},
+                "error": str(e),
             }
         except Exception as e:
             logger.error(f"Unexpected error finding taint flows: {e}", exc_info=True)
             return {
                 "success": False,
-                "error": {"code": "INTERNAL_ERROR", "message": str(e)},
+                "error": str(e),
             }
 
     @mcp.tool(
@@ -613,7 +613,7 @@ Examples:
             if not result.success:
                 return {
                     "success": False,
-                    "error": {"code": "QUERY_ERROR", "message": result.error},
+                    "error": result.error,
                 }
 
             # Parse JSON result
@@ -627,20 +627,20 @@ Examples:
             
             return {
                 "success": False,
-                "error": {"code": "NO_RESULT", "message": "Query returned no results"},
+                "error": "Query returned no results",
             }
 
         except ValidationError as e:
             logger.error(f"Error getting program slice: {e}")
             return {
                 "success": False,
-                "error": {"code": type(e).__name__.upper(), "message": str(e)},
+                "error": str(e),
             }
         except Exception as e:
             logger.error(f"Unexpected error getting program slice: {e}", exc_info=True)
             return {
                 "success": False,
-                "error": {"code": "INTERNAL_ERROR", "message": str(e)},
+                "error": str(e),
             }
 
 
@@ -730,7 +730,7 @@ Examples:
             if not result.success:
                 return {
                     "success": False,
-                    "error": {"code": "QUERY_ERROR", "message": result.error},
+                    "error": result.error,
                 }
 
             # Parse the JSON result (same as find_bounds_checks)
@@ -747,21 +747,18 @@ Examples:
             else:
                 return {
                     "success": False,
-                    "error": {
-                        "code": "NO_RESULT",
-                        "message": "Query returned no results",
-                    },
+                    "error": "Query returned no results",
                 }
 
         except ValidationError as e:
             logger.error(f"Error getting data dependencies: {e}")
             return {
                 "success": False,
-                "error": {"code": type(e).__name__.upper(), "message": str(e)},
+                "error": str(e),
             }
         except Exception as e:
             logger.error(f"Unexpected error: {e}", exc_info=True)
             return {
                 "success": False,
-                "error": {"code": "INTERNAL_ERROR", "message": str(e)},
+                "error": str(e),
             }

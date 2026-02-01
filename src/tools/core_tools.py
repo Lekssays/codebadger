@@ -383,13 +383,13 @@ Examples:
             logger.error(f"Validation error: {e}")
             return {
                 "success": False,
-                "error": {"code": "VALIDATION_ERROR", "message": str(e)},
+                "error": str(e),
             }
         except Exception as e:
             logger.error(f"Failed to generate CPG: {e}", exc_info=True)
             return {
                 "success": False,
-                "error": {"code": "INTERNAL_ERROR", "message": str(e)},
+                "error": str(e),
             }
 
     @mcp.tool(
@@ -488,5 +488,5 @@ Examples:
             logger.error(f"Failed to get CPG status: {e}", exc_info=True)
             return {
                 "success": False,
-                "error": {"code": "INTERNAL_ERROR", "message": str(e)},
+                "error": str(e),
             }

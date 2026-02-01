@@ -343,7 +343,7 @@ async def test_get_program_slice_invalid_direction(fake_services_slice):
         res = json.loads(res_json.content[0].text)
 
         assert res.get("success") is False
-        assert "direction" in res["error"]["message"].lower()
+        assert "direction" in res["error"].lower()
 
 
 @pytest.mark.asyncio
@@ -360,7 +360,7 @@ async def test_get_program_slice_missing_required_params(fake_services_slice):
         res = json.loads(res_json.content[0].text)
 
         assert res.get("success") is False
-        assert "node_id" in res["error"]["message"] or "location" in res["error"]["message"]
+        assert "node_id" in res["error"] or "location" in res["error"]
 
 
 @pytest.mark.asyncio

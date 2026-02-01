@@ -80,13 +80,13 @@ Examples:
             logger.error(f"Error listing methods: {e}")
             return {
                 "success": False,
-                "error": {"code": type(e).__name__.upper(), "message": str(e)},
+                "error": str(e),
             }
         except Exception as e:
             logger.error(f"Unexpected error: {e}", exc_info=True)
             return {
                 "success": False,
-                "error": {"code": "INTERNAL_ERROR", "message": str(e)},
+                "error": str(e),
             }
 
     @mcp.tool(
@@ -127,13 +127,13 @@ Examples:
             logger.error(f"Error listing files: {e}")
             return {
                 "success": False,
-                "error": {"code": type(e).__name__.upper(), "message": str(e)},
+                "error": str(e),
             }
         except Exception as e:
             logger.error(f"Unexpected error: {e}", exc_info=True)
             return {
                 "success": False,
-                "error": {"code": "INTERNAL_ERROR", "message": str(e)},
+                "error": str(e),
             }
 
 
@@ -208,7 +208,7 @@ Examples:
             if not result.success:
                 return {
                     "success": False,
-                    "error": {"code": "QUERY_ERROR", "message": result.error},
+                    "error": result.error,
                 }
 
             methods = []
@@ -296,13 +296,13 @@ Examples:
             logger.error(f"Error getting method source: {e}")
             return {
                 "success": False,
-                "error": {"code": type(e).__name__.upper(), "message": str(e)},
+                "error": str(e),
             }
         except Exception as e:
             logger.error(f"Unexpected error: {e}", exc_info=True)
             return {
                 "success": False,
-                "error": {"code": "INTERNAL_ERROR", "message": str(e)},
+                "error": str(e),
             }
 
     @mcp.tool(
@@ -356,13 +356,13 @@ Examples:
             logger.error(f"Error listing calls: {e}")
             return {
                 "success": False,
-                "error": {"code": type(e).__name__.upper(), "message": str(e)},
+                "error": str(e),
             }
         except Exception as e:
             logger.error(f"Unexpected error: {e}", exc_info=True)
             return {
                 "success": False,
-                "error": {"code": "INTERNAL_ERROR", "message": str(e)},
+                "error": str(e),
             }
 
 
@@ -439,7 +439,7 @@ Examples:
             if not result.success:
                 return {
                     "success": False,
-                    "error": {"code": "QUERY_ERROR", "message": result.error},
+                    "error": result.error,
                 }
 
             # Parse the JSON result
@@ -466,25 +466,25 @@ Examples:
                 else:
                     return {
                         "success": False,
-                        "error": result_obj.get("error", {"code": "UNKNOWN", "message": "Unknown error"}),
+                        "error": result_obj.get("error", "Unknown error"),
                     }
             else:
                 return {
                     "success": False,
-                    "error": {"code": "NO_RESULT", "message": "Query returned no results"},
+                    "error": "Query returned no results",
                 }
 
         except ValidationError as e:
             logger.error(f"Error getting call graph: {e}")
             return {
                 "success": False,
-                "error": {"code": type(e).__name__.upper(), "message": str(e)},
+                "error": str(e),
             }
         except Exception as e:
             logger.error(f"Unexpected error: {e}", exc_info=True)
             return {
                 "success": False,
-                "error": {"code": "INTERNAL_ERROR", "message": str(e)},
+                "error": str(e),
             }
 
     @mcp.tool(
@@ -532,13 +532,13 @@ Examples:
             logger.error(f"Error listing parameters: {e}")
             return {
                 "success": False,
-                "error": {"code": type(e).__name__.upper(), "message": str(e)},
+                "error": str(e),
             }
         except Exception as e:
             logger.error(f"Unexpected error: {e}", exc_info=True)
             return {
                 "success": False,
-                "error": {"code": "INTERNAL_ERROR", "message": str(e)},
+                "error": str(e),
             }
 
 
@@ -617,7 +617,7 @@ Examples:
                 logger.error(f"Query failed: {result.error}")
                 return {
                     "success": False,
-                    "error": {"code": "QUERY_ERROR", "message": result.error}
+                    "error": result.error
                 }
 
             import json
@@ -682,7 +682,7 @@ Examples:
                 logger.error(f"Failed to parse summary JSON: {e}")
                 return {
                     "success": False,
-                    "error": {"code": "PARSE_ERROR", "message": f"Failed to parse result: {str(e)}"}
+                    "error": f"Failed to parse result: {str(e)}"
                 }
             except Exception as e:
                 logger.error(f"Error processing summary data: {e}")
@@ -694,13 +694,13 @@ Examples:
             logger.error(f"Error getting codebase summary: {e}")
             return {
                 "success": False,
-                "error": {"code": type(e).__name__.upper(), "message": str(e)},
+                "error": str(e),
             }
         except Exception as e:
             logger.error(f"Unexpected error: {e}", exc_info=True)
             return {
                 "success": False,
-                "error": {"code": "INTERNAL_ERROR", "message": str(e)},
+                "error": str(e),
             }
 
     @mcp.tool(
@@ -814,13 +814,13 @@ Examples:
             logger.error(f"Error getting code snippet: {e}")
             return {
                 "success": False,
-                "error": {"code": type(e).__name__.upper(), "message": str(e)},
+                "error": str(e),
             }
         except Exception as e:
             logger.error(f"Unexpected error: {e}", exc_info=True)
             return {
                 "success": False,
-                "error": {"code": "INTERNAL_ERROR", "message": str(e)},
+                "error": str(e),
             }
     @mcp.tool(
         description="""Execute a raw CPGQL query against the codebase.
@@ -881,11 +881,7 @@ Examples:
                     return {
                         "success": False,
                         "validation": validation_result,
-                        "error": {
-                            "code": "VALIDATION_ERROR",
-                            "message": "Query validation failed",
-                            "details": validation_result['errors'],
-                        },
+                        "error": "Query validation failed",
                     }
 
             # Use the QueryExecutor service to get structured output (data and row_count)
@@ -928,13 +924,13 @@ Examples:
             logger.error(f"Error executing CPGQL query: {e}")
             return {
                 "success": False,
-                "error": {"code": type(e).__name__.upper(), "message": str(e)},
+                "error": str(e),
             }
         except Exception as e:
             logger.error(f"Unexpected error executing CPGQL query: {e}", exc_info=True)
             return {
                 "success": False,
-                "error": {"code": "INTERNAL_ERROR", "message": str(e)},
+                "error": str(e),
             }
 
     @mcp.tool(
@@ -1009,7 +1005,7 @@ Examples:
             if not result.success:
                 return {
                     "success": False,
-                    "error": {"code": "QUERY_ERROR", "message": result.error},
+                    "error": result.error,
                 }
 
             # Parse the JSON result - the query now uses Map().toJsonPretty
@@ -1031,34 +1027,31 @@ Examples:
                         logger.error(f"Failed to parse bounds check JSON: {e}, raw: {result_data[:200]}")
                         return {
                             "success": False,
-                            "error": {"code": "PARSE_ERROR", "message": f"Failed to parse result: {str(e)}"},
+                            "error": f"Failed to parse result: {str(e)}",
                         }
                 else:
                     logger.error(f"Unexpected result_data type: {type(result_data)}, value: {result_data}")
                     return {
                         "success": False,
-                        "error": {"code": "UNEXPECTED_FORMAT", "message": "Unexpected response format"},
+                        "error": "Unexpected response format",
                     }
             else:
                 return {
                     "success": False,
-                    "error": {
-                        "code": "NO_RESULT",
-                        "message": "Query returned no results",
-                    },
+                    "error": "Query returned no results",
                 }
 
         except ValidationError as e:
             logger.error(f"Error finding bounds checks: {e}")
             return {
                 "success": False,
-                "error": {"code": type(e).__name__.upper(), "message": str(e)},
+                "error": str(e),
             }
         except Exception as e:
             logger.error(f"Unexpected error: {e}", exc_info=True)
             return {
                 "success": False,
-                "error": {"code": "INTERNAL_ERROR", "message": str(e)},
+                "error": str(e),
             }
 
     @mcp.tool(
@@ -1170,7 +1163,7 @@ Examples:
             logger.error(f"Error getting CPGQL syntax help: {e}", exc_info=True)
             return {
                 "success": False,
-                "error": {"code": "INTERNAL_ERROR", "message": str(e)},
+                "error": str(e),
             }
 
     # ============================================================================
@@ -1236,7 +1229,7 @@ Examples:
             if not result.success:
                 return {
                     "success": False,
-                    "error": {"code": "QUERY_ERROR", "message": result.error},
+                    "error": result.error,
                 }
 
             nodes = []
@@ -1276,13 +1269,13 @@ Examples:
             logger.error(f"Error getting CFG: {e}")
             return {
                 "success": False,
-                "error": {"code": type(e).__name__.upper(), "message": str(e)},
+                "error": str(e),
             }
         except Exception as e:
             logger.error(f"Unexpected error getting CFG: {e}", exc_info=True)
             return {
                 "success": False,
-                "error": {"code": "INTERNAL_ERROR", "message": str(e)},
+                "error": str(e),
             }
 
 
@@ -1347,7 +1340,7 @@ Examples:
             if not result.success:
                 return {
                     "success": False,
-                    "error": {"code": "QUERY_ERROR", "message": result.error},
+                    "error": result.error,
                 }
 
             types = []
@@ -1372,13 +1365,13 @@ Examples:
             logger.error(f"Error getting type definition: {e}")
             return {
                 "success": False,
-                "error": {"code": type(e).__name__.upper(), "message": str(e)},
+                "error": str(e),
             }
         except Exception as e:
             logger.error(f"Unexpected error getting type definition: {e}", exc_info=True)
             return {
                 "success": False,
-                "error": {"code": "INTERNAL_ERROR", "message": str(e)},
+                "error": str(e),
             }
 
 
@@ -1442,7 +1435,7 @@ Examples:
             if not result.success:
                 return {
                     "success": False,
-                    "error": {"code": "QUERY_ERROR", "message": result.error},
+                    "error": result.error,
                 }
 
             # Deduplicate by name - keep first occurrence of each unique name
@@ -1497,11 +1490,11 @@ Examples:
             logger.error(f"Error getting macro expansion: {e}")
             return {
                 "success": False,
-                "error": {"code": type(e).__name__.upper(), "message": str(e)},
+                "error": str(e),
             }
         except Exception as e:
             logger.error(f"Unexpected error getting macro expansion: {e}", exc_info=True)
             return {
                 "success": False,
-                "error": {"code": "INTERNAL_ERROR", "message": str(e)},
+                "error": str(e),
             }
