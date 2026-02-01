@@ -89,24 +89,23 @@ Examples:
             }
 
     @mcp.tool(
-        description="""List source files in the codebase.
+        description="""List source files in the codebase as a tree structure.
 
 Args:
     codebase_hash: The codebase hash.
-    local_path: Optional relative path filter.
-    limit: Max results.
-    page: Page number.
+    local_path: Optional relative path to list from.
 
 Returns:
     {
         "success": true,
-        "files": ["main.c", "lib/utils.c", ...],
-        "total": 15,
-        "page": 1
+        "tree": "project/\\n├── src/\\n│   ├── main.c\\n│   └── utils.c\\n└── README.md",
+        "total": 4
     }
 
 Notes:
-    - Returns logical paths in the CPG.
+    - Returns a text-based tree representation of the file structure.
+    - The .git folder is automatically excluded.
+    - Each directory is limited to showing 20 items (50 when local_path is specified).
 
 Examples:
     list_files(codebase_hash="abc")
@@ -115,19 +114,13 @@ Examples:
     def list_files(
         codebase_hash: Annotated[str, Field(description="The codebase hash from create_cpg_create")],
         local_path: Annotated[Optional[str], Field(description="Optional path inside the codebase to list (relative to source root or absolute). When provided, per-directory limit is increased to 50.")] = None,
-        limit: Annotated[int, Field(description="Maximum number of results to fetch for caching")] = 1000,
-        page: Annotated[int, Field(description="Page number")] = 1,
-        page_size: Annotated[int, Field(description="Number of results per page")] = 100,
     ) -> Dict[str, Any]:
-        """Get all source files tracked in the CPG."""
+        """Get all source files as a tree structure."""
         try:
             code_browsing_service = services["code_browsing_service"]
             return code_browsing_service.list_files(
                 codebase_hash=codebase_hash,
                 local_path=local_path,
-                limit=limit,
-                page=page,
-                page_size=page_size,
             )
         except ValidationError as e:
             logger.error(f"Error listing files: {e}")

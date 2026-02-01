@@ -130,9 +130,6 @@ class CodeBrowsingService:
         self,
         codebase_hash: str,
         local_path: Optional[str] = None,
-        limit: int = 1000,
-        page: int = 1,
-        page_size: int = 100,
     ) -> Dict[str, Any]:
         
         validate_codebase_hash(codebase_hash)
@@ -182,67 +179,64 @@ class CodeBrowsingService:
             # per-directory limits: default 20; 50 when a local_path was provided
             per_dir_limit = 50 if local_path else 20
 
-            def _list_dir_tree(root: str, base: str, per_dir_limit: int) -> List[Dict[str, Any]]:
+            # Folders to ignore
+            ignored_folders = {".git"}
+
+            def _build_tree_text(root: str, prefix: str = "", per_dir_limit: int = 20) -> List[str]:
+                """Build a text-based tree representation of the directory structure."""
                 try:
                     entries = sorted(os.listdir(root))
                 except OSError:
                     entries = []
 
-                result = []
-                for name in entries[:per_dir_limit]:
+                # Filter out ignored folders
+                entries = [e for e in entries if e not in ignored_folders]
+                
+                lines = []
+                # Limit entries per directory
+                limited_entries = entries[:per_dir_limit]
+                truncated = len(entries) > per_dir_limit
+
+                for i, name in enumerate(limited_entries):
                     path = os.path.join(root, name)
-                    rel_path = os.path.relpath(path, base)
+                    is_last = (i == len(limited_entries) - 1) and not truncated
+                    connector = "└── " if is_last else "├── "
+                    
                     if os.path.isdir(path):
-                        children = _list_dir_tree(path, base, per_dir_limit)
-                        result.append({
-                            "name": name,
-                            "path": rel_path,
-                            "type": "dir",
-                            "children": children,
-                        })
+                        lines.append(f"{prefix}{connector}{name}/")
+                        # Extend prefix for children
+                        extension = "    " if is_last else "│   "
+                        lines.extend(_build_tree_text(path, prefix + extension, per_dir_limit))
                     else:
-                        result.append({
-                            "name": name,
-                            "path": rel_path,
-                            "type": "file",
-                        })
-                return result
+                        lines.append(f"{prefix}{connector}{name}")
+                
+                # Indicate if entries were truncated
+                if truncated:
+                    lines.append(f"{prefix}└── ... ({len(entries) - per_dir_limit} more items)")
+                
+                return lines
 
-            tree = _list_dir_tree(target_dir, source_dir, per_dir_limit)
+            # Get the root directory name for the tree header
+            root_name = os.path.basename(target_dir) or target_dir
+            tree_lines = [f"{root_name}/"]
+            tree_lines.extend(_build_tree_text(target_dir, "", per_dir_limit))
+            tree_text = "\n".join(tree_lines)
 
-            # Count total entries in the returned tree (non-recursive counting for top-level)
-            def _count_nodes(nodes: List[Dict[str, Any]]) -> int:
-                total = 0
-                for n in nodes:
-                    total += 1
-                    if n.get("type") == "dir":
-                        total += _count_nodes(n.get("children", []))
-                return total
+            # Count total entries
+            total_count = len(tree_lines) - 1  # Exclude the root header
 
-            total_count = _count_nodes(tree)
-            return {"success": True, "files": tree, "total": total_count}
+            return {"success": True, "tree": tree_text, "total": total_count}
 
         full_result = self._get_cached_or_execute("list_files", codebase_hash, cache_params, execute_query)
 
         if not full_result.get("success"):
             return full_result
 
-        files = full_result.get("files", [])
-        total = full_result.get("total", len(files))
-
-        # The tree-based listing does not meaningfully support pagination of top-level results,
-        # so keep backward compatibility by paginating the top-level entries only.
-        start_idx = (page - 1) * page_size
-        end_idx = start_idx + page_size
-        paged_files = files[start_idx:end_idx]
-
+        # Return the tree text directly - pagination doesn't apply to tree format
         return {
             "success": True,
-            "files": paged_files,
-            "total": total,
-            "page": page,
-            "page_size": page_size,
-            "total_pages": (total + page_size - 1) // page_size if page_size > 0 else 1,
+            "tree": full_result.get("tree", ""),
+            "total": full_result.get("total", 0),
         }
 
     def list_calls(

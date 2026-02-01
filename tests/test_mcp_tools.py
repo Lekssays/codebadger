@@ -58,7 +58,7 @@ def mock_services():
     # Mock code browsing service
     code_browsing_service = MagicMock()
     code_browsing_service.list_methods.return_value = {"success": True, "methods": []}
-    code_browsing_service.list_files.return_value = {"success": True, "files": [], "total": 0}
+    code_browsing_service.list_files.return_value = {"success": True, "tree": "", "total": 0}
     code_browsing_service.run_query.return_value = {"success": True, "data": [], "row_count": 0}
 
     # Mock joern server manager
@@ -358,7 +358,7 @@ class TestMCPTools:
         subdir = source_dir / "many_files"
         subdir.mkdir()
         for i in range(25):
-            f = subdir / f"file_{i}.txt"
+            f = subdir / f"file_{i:02d}.txt"  # Use zero-padded names for consistent sorting
             f.write_text(f"content {i}")
 
         # Create nested directories
@@ -391,18 +391,14 @@ class TestMCPTools:
             result_dict = json.loads(result.content[0].text)
 
             assert result_dict["success"] is True
-            assert "files" in result_dict
-            # root should include at least the many_files dir; check its children per-dir limit
-            root_children = result_dict["files"]
-            found = False
-            for node in root_children:
-                if node["name"] == "many_files":
-                    found = True
-                    # The type now comes as string from JSON
-                    assert node["type"] == "dir"
-                    # children of many_files should be limited to 20
-                    assert len(node["children"]) == 20
-            assert found
+            assert "tree" in result_dict
+            tree_text = result_dict["tree"]
+            # Check that tree contains the directory
+            assert "many_files/" in tree_text
+            # Check that tree contains truncation indicator (25 files + 1 nested dir, limit 20 = 6 more)
+            assert "... (6 more items)" in tree_text
+            # Check tree formatting characters are present
+            assert "├──" in tree_text or "└──" in tree_text
 
     @pytest.mark.asyncio
     async def test_list_files_local_path_limit(self, mock_services, tmp_path):
@@ -418,7 +414,7 @@ class TestMCPTools:
         big_dir = source_dir / "big_dir"
         big_dir.mkdir()
         for i in range(60):
-            f = big_dir / f"file_{i}.txt"
+            f = big_dir / f"file_{i:02d}.txt"  # Use zero-padded names for consistent sorting
             f.write_text(f"content {i}")
 
         mock_services["codebase_tracker"].get_codebase.return_value = CodebaseInfo(
@@ -442,10 +438,14 @@ class TestMCPTools:
             result_dict = json.loads(result.content[0].text)
 
             assert result_dict["success"] is True
-            assert "files" in result_dict
-            root_children = result_dict["files"]
-            # should be the children of big_dir, limited to 50
-            assert len(root_children) == 50
+            assert "tree" in result_dict
+            tree_text = result_dict["tree"]
+            # Tree should start with the dir name
+            assert tree_text.startswith("big_dir/")
+            # Check that truncation indicator shows (60 files, limit 50 = 10 more)
+            assert "... (10 more items)" in tree_text
+            # Verify total count is correct (50 files shown + 1 truncation line)
+            assert result_dict["total"] == 51
 
     @pytest.mark.asyncio
     async def test_get_cfg_success(self, mock_services):
