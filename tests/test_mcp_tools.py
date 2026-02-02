@@ -58,7 +58,7 @@ def mock_services():
     # Mock code browsing service
     code_browsing_service = MagicMock()
     code_browsing_service.list_methods.return_value = {"success": True, "methods": []}
-    code_browsing_service.list_files.return_value = {"success": True, "tree": "", "total": 0}
+    code_browsing_service.list_files.return_value = "test_codebase/"
     code_browsing_service.run_query.return_value = {"success": True, "data": [], "row_count": 0}
 
     # Mock joern server manager
@@ -346,7 +346,7 @@ class TestMCPTools:
 
     @pytest.mark.asyncio
     async def test_list_files_local_tree_default(self, mock_services, tmp_path):
-        """Test listing files as a tree for a local codebase, default per-dir limit 20"""
+        """Test listing files as a tree for a local codebase with pagination"""
         from src.tools.code_browsing_tools import register_code_browsing_tools
         from src.models import CodebaseInfo
 
@@ -354,7 +354,7 @@ class TestMCPTools:
         source_dir = tmp_path / "test_codebase"
         source_dir.mkdir()
 
-        # create a subdir with 25 files to check per-dir limit (20)
+        # create a subdir with 25 files
         subdir = source_dir / "many_files"
         subdir.mkdir()
         for i in range(25):
@@ -387,38 +387,35 @@ class TestMCPTools:
 
         async with Client(mcp) as client:
             result = await client.call_tool("list_files", {"codebase_hash": "553642871dd4251d"})
-            import json
-            result_dict = json.loads(result.content[0].text)
+            # Result is now a plain text string, not JSON
+            tree_text = result.content[0].text
 
-            assert result_dict["success"] is True
-            assert "tree" in result_dict
-            tree_text = result_dict["tree"]
             # Check that tree contains the directory
             assert "many_files/" in tree_text
-            # Check that tree contains truncation indicator (25 files + 1 nested dir, limit 20 = 6 more)
-            assert "... (6 more items)" in tree_text
+            # Check that all files are present (25 files + 3 nested = 28 items, under 100 limit)
+            assert "file_24.txt" in tree_text
+            assert "nested/" in tree_text
+            assert "nfile_2.txt" in tree_text
             # Check tree formatting characters are present
             assert "├──" in tree_text or "└──" in tree_text
 
     @pytest.mark.asyncio
-    async def test_list_files_local_path_limit(self, mock_services, tmp_path):
-        """Test listing files for a specific local_path with per-dir limit 50"""
+    async def test_list_files_pagination(self, mock_services, tmp_path):
+        """Test listing files with pagination for large directories"""
         from src.tools.code_browsing_tools import register_code_browsing_tools
         from src.models import CodebaseInfo
 
-        # Build a source dir
-        source_dir = tmp_path / "test_codebase2"
+        # Build a source dir with 150 files (more than 100 limit)
+        source_dir = tmp_path / "test_codebase_large"
         source_dir.mkdir()
 
-        # Create a directory with 60 files
-        big_dir = source_dir / "big_dir"
-        big_dir.mkdir()
-        for i in range(60):
-            f = big_dir / f"file_{i:02d}.txt"  # Use zero-padded names for consistent sorting
+        # Create 150 files directly in source_dir
+        for i in range(150):
+            f = source_dir / f"file_{i:03d}.txt"
             f.write_text(f"content {i}")
 
         mock_services["codebase_tracker"].get_codebase.return_value = CodebaseInfo(
-            codebase_hash="553642871dd4251e",
+            codebase_hash="553642871dd4251f",
             source_type="local",
             source_path=str(source_dir),
             language="python",
@@ -433,19 +430,34 @@ class TestMCPTools:
         register_code_browsing_tools(mcp, mock_services)
 
         async with Client(mcp) as client:
-            result = await client.call_tool("list_files", {"codebase_hash": "553642871dd4251e", "local_path": "big_dir"})
-            import json
-            result_dict = json.loads(result.content[0].text)
+            # Test page 1
+            result = await client.call_tool("list_files", {"codebase_hash": "553642871dd4251f"})
+            tree_text = result.content[0].text
 
-            assert result_dict["success"] is True
-            assert "tree" in result_dict
-            tree_text = result_dict["tree"]
             # Tree should start with the dir name
-            assert tree_text.startswith("big_dir/")
-            # Check that truncation indicator shows (60 files, limit 50 = 10 more)
-            assert "... (10 more items)" in tree_text
-            # Verify total count is correct (50 files shown + 1 truncation line)
-            assert result_dict["total"] == 51
+            assert tree_text.startswith("test_codebase_large/")
+            # First 100 files should be present
+            assert "file_000.txt" in tree_text
+            assert "file_099.txt" in tree_text
+            # File 100 should NOT be present on page 1
+            assert "file_100.txt" not in tree_text
+            # Pagination info should be shown
+            assert "Page 1/2" in tree_text
+            assert "Showing 100 of 150 items" in tree_text
+            assert "Use page=2 to see more" in tree_text
+
+            # Test page 2
+            result2 = await client.call_tool("list_files", {"codebase_hash": "553642871dd4251f", "page": 2})
+            tree_text2 = result2.content[0].text
+
+            # File 100-149 should be present on page 2
+            assert "file_100.txt" in tree_text2
+            assert "file_149.txt" in tree_text2
+            # Pagination info should show page 2
+            assert "Page 2/2" in tree_text2
+            assert "Showing 50 of 150 items" in tree_text2
+            # No "Use page=3" since this is the last page
+            assert "Use page=3" not in tree_text2
 
     @pytest.mark.asyncio
     async def test_get_cfg_success(self, mock_services):

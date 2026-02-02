@@ -90,38 +90,54 @@ Examples:
             }
 
     @mcp.tool(
-        description="""List source files in the codebase as a tree structure.
+        description="""List source files in the codebase as a tree structure with pagination.
 
 Args:
     codebase_hash: The codebase hash.
     local_path: Optional relative path to list from.
+    page: Page number (default 1).
+    page_size: Number of files per page (default 500).
 
 Returns:
-    {
-        "success": true,
-        "tree": "project/\\n├── src/\\n│   ├── main.c\\n│   └── utils.c\\n└── README.md",
-        "total": 4
-    }
+    A text-based tree representation of the file structure:
+    
+    project/
+    ├── src/
+    │   ├── main.c
+    │   └── utils.c
+    └── README.md
+    
+    --- Page 1/3 | Showing 100 of 250 items ---
+    (Use page=2 to see more)
 
 Notes:
-    - Returns a text-based tree representation of the file structure.
+    - Returns plain text tree, NOT JSON.
     - The .git folder is automatically excluded.
-    - Each directory is limited to showing 20 items (50 when local_path is specified).
+    - Default limit is 100 files per page.
 
 Examples:
     list_files(codebase_hash="abc")
-    list_files(codebase_hash="abc", local_path="src/lib")"""
+    list_files(codebase_hash="abc", local_path="src/lib")
+    list_files(codebase_hash="abc", page=2)"""
     )
     def list_files(
-        codebase_hash: Annotated[str, Field(description="The codebase hash from create_cpg_create")],
-        local_path: Annotated[Optional[str], Field(description="Optional path inside the codebase to list (relative to source root or absolute). When provided, per-directory limit is increased to 50.")] = None,
-    ) -> Dict[str, Any]:
-        """Get all source files as a tree structure."""
+        codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
+        local_path: Annotated[Optional[str], Field(description="Optional path inside the codebase to list (relative to source root or absolute).")] = None,
+        page: Annotated[int, Field(description="Page number (1-indexed)")] = 1,
+        page_size: Annotated[int, Field(description="Number of files per page (default 500)")] = 500,
+    ) -> str:
+        """Get all source files as a tree structure with pagination.
+        
+        Returns:
+            str: A text-based tree representation of the file structure.
+        """
         try:
             code_browsing_service = services["code_browsing_service"]
             return code_browsing_service.list_files(
                 codebase_hash=codebase_hash,
                 local_path=local_path,
+                page=page,
+                page_size=page_size,
             )
         except ValidationError as e:
             logger.error(f"Error listing files: {e}")

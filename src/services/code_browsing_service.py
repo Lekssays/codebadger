@@ -130,114 +130,120 @@ class CodeBrowsingService:
         self,
         codebase_hash: str,
         local_path: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        page: int = 1,
+        page_size: int = 100,
+    ) -> str:
+        """List files in the codebase as a tree structure with pagination.
         
+        Args:
+            codebase_hash: The codebase hash.
+            local_path: Optional path inside the codebase to list.
+            page: Page number (1-indexed).
+            page_size: Number of files per page (default 100).
+        
+        Returns:
+            str: A text-based tree representation of the directory structure.
+                 Includes pagination info at the end if there are more pages.
+        """
         validate_codebase_hash(codebase_hash)
-        cache_params = {"local_path": local_path}
 
-        def execute_query():
-            codebase_info = self.codebase_tracker.get_codebase(codebase_hash)
-            if not codebase_info:
-                raise ValidationError(f"Codebase not found for codebase {codebase_hash}")
-            # Determine the actual filesystem path to list
-            playground_path = os.path.abspath(
-                os.path.join(os.path.dirname(__file__), "..", "..", "playground")
+        codebase_info = self.codebase_tracker.get_codebase(codebase_hash)
+        if not codebase_info:
+            raise ValidationError(f"Codebase not found for codebase {codebase_hash}")
+        
+        # Determine the actual filesystem path to list
+        playground_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "playground")
+        )
+
+        if codebase_info.source_type == "github":
+            from ..tools.core_tools import get_cpg_cache_key
+
+            cpg_cache_key = get_cpg_cache_key(
+                codebase_info.source_type,
+                codebase_info.source_path,
+                codebase_info.language,
             )
+            source_dir = os.path.join(playground_path, "codebases", cpg_cache_key)
+        else:
+            source_path = codebase_info.source_path
+            if not os.path.isabs(source_path):
+                source_path = os.path.abspath(source_path)
+            source_dir = source_path
 
-            if codebase_info.source_type == "github":
-                from ..tools.core_tools import get_cpg_cache_key
+        if not os.path.exists(source_dir) or not os.path.isdir(source_dir):
+            raise ValidationError(f"Source directory not found for codebase {codebase_hash}: {source_dir}")
 
-                cpg_cache_key = get_cpg_cache_key(
-                    codebase_info.source_type,
-                    codebase_info.source_path,
-                    codebase_info.language,
-                )
-                source_dir = os.path.join(playground_path, "codebases", cpg_cache_key)
-            else:
-                source_path = codebase_info.source_path
-                if not os.path.isabs(source_path):
-                    source_path = os.path.abspath(source_path)
-                source_dir = source_path
+        # Resolve target directory if a local_path is provided; otherwise, use source_dir
+        if local_path:
+            # Support both absolute and relative local_path; ensure it stays within source_dir
+            candidate = local_path
+            if not os.path.isabs(candidate):
+                candidate = os.path.join(source_dir, candidate)
+            candidate = os.path.normpath(candidate)
+            source_dir_norm = os.path.normpath(source_dir)
+            if not candidate.startswith(source_dir_norm):
+                raise ValidationError("local_path must be inside the codebase source directory")
+            target_dir = candidate
+        else:
+            target_dir = source_dir
 
-            if not os.path.exists(source_dir) or not os.path.isdir(source_dir):
-                raise ValidationError(f"Source directory not found for codebase {codebase_hash}: {source_dir}")
+        # Folders to ignore
+        ignored_folders = {".git"}
 
-            # Resolve target directory if a local_path is provided; otherwise, use source_dir
-            if local_path:
-                # Support both absolute and relative local_path; ensure it stays within source_dir
-                candidate = local_path
-                if not os.path.isabs(candidate):
-                    candidate = os.path.join(source_dir, candidate)
-                candidate = os.path.normpath(candidate)
-                source_dir_norm = os.path.normpath(source_dir)
-                if not candidate.startswith(source_dir_norm):
-                    raise ValidationError("local_path must be inside the codebase source directory")
-                target_dir = candidate
-            else:
-                target_dir = source_dir
+        def _collect_all_files(root: str, prefix: str = "") -> List[tuple]:
+            """Collect all files/dirs as (prefix, connector, name, is_dir) tuples."""
+            try:
+                entries = sorted(os.listdir(root))
+            except OSError:
+                entries = []
 
-            # per-directory limits: default 20; 50 when a local_path was provided
-            per_dir_limit = 50 if local_path else 20
-
-            # Folders to ignore
-            ignored_folders = {".git"}
-
-            def _build_tree_text(root: str, prefix: str = "", per_dir_limit: int = 20) -> List[str]:
-                """Build a text-based tree representation of the directory structure."""
-                try:
-                    entries = sorted(os.listdir(root))
-                except OSError:
-                    entries = []
-
-                # Filter out ignored folders
-                entries = [e for e in entries if e not in ignored_folders]
+            # Filter out ignored folders
+            entries = [e for e in entries if e not in ignored_folders]
+            
+            items = []
+            for i, name in enumerate(entries):
+                path = os.path.join(root, name)
+                is_last = (i == len(entries) - 1)
+                connector = "└── " if is_last else "├── "
+                is_dir = os.path.isdir(path)
                 
-                lines = []
-                # Limit entries per directory
-                limited_entries = entries[:per_dir_limit]
-                truncated = len(entries) > per_dir_limit
+                if is_dir:
+                    items.append((prefix, connector, f"{name}/", True))
+                    # Extend prefix for children
+                    extension = "    " if is_last else "│   "
+                    items.extend(_collect_all_files(path, prefix + extension))
+                else:
+                    items.append((prefix, connector, name, False))
+            
+            return items
 
-                for i, name in enumerate(limited_entries):
-                    path = os.path.join(root, name)
-                    is_last = (i == len(limited_entries) - 1) and not truncated
-                    connector = "└── " if is_last else "├── "
-                    
-                    if os.path.isdir(path):
-                        lines.append(f"{prefix}{connector}{name}/")
-                        # Extend prefix for children
-                        extension = "    " if is_last else "│   "
-                        lines.extend(_build_tree_text(path, prefix + extension, per_dir_limit))
-                    else:
-                        lines.append(f"{prefix}{connector}{name}")
-                
-                # Indicate if entries were truncated
-                if truncated:
-                    lines.append(f"{prefix}└── ... ({len(entries) - per_dir_limit} more items)")
-                
-                return lines
+        # Collect all items
+        all_items = _collect_all_files(target_dir, "")
+        total_items = len(all_items)
+        
+        # Calculate pagination
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+        paged_items = all_items[start_idx:end_idx]
+        total_pages = (total_items + page_size - 1) // page_size if page_size > 0 else 1
+        
+        # Build tree text for this page
+        root_name = os.path.basename(target_dir) or target_dir
+        tree_lines = [f"{root_name}/"]
+        
+        for prefix, connector, name, is_dir in paged_items:
+            tree_lines.append(f"{prefix}{connector}{name}")
+        
+        tree_text = "\n".join(tree_lines)
+        
+        # Add pagination info if there are multiple pages
+        if total_pages > 1:
+            tree_text += f"\n\n--- Page {page}/{total_pages} | Showing {len(paged_items)} of {total_items} items ---"
+            if page < total_pages:
+                tree_text += f"\n(Use page={page + 1} to see more)"
 
-            # Get the root directory name for the tree header
-            root_name = os.path.basename(target_dir) or target_dir
-            tree_lines = [f"{root_name}/"]
-            tree_lines.extend(_build_tree_text(target_dir, "", per_dir_limit))
-            tree_text = "\n".join(tree_lines)
-
-            # Count total entries
-            total_count = len(tree_lines) - 1  # Exclude the root header
-
-            return {"success": True, "tree": tree_text, "total": total_count}
-
-        full_result = self._get_cached_or_execute("list_files", codebase_hash, cache_params, execute_query)
-
-        if not full_result.get("success"):
-            return full_result
-
-        # Return the tree text directly - pagination doesn't apply to tree format
-        return {
-            "success": True,
-            "tree": full_result.get("tree", ""),
-            "total": full_result.get("total", 0),
-        }
+        return tree_text
 
     def list_calls(
         self,
