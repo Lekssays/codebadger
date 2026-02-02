@@ -1,10 +1,6 @@
 {
-  def escapeJson(s: String): String = {
-    s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
-  }
-
   val targetLine = {{line_num}}
-  val varName = "{{variable}}"
+  val targetVar = "{{variable}}"
   val filename = "{{filename}}"
   val direction = "{{direction}}"
   val maxResults = 50
@@ -14,7 +10,7 @@
       val f = m.file.name.headOption.getOrElse("")
       f.endsWith(filename) || f.contains(filename)
     })
-    .filterNot(_.name == "\u003cglobal\u003e")  // Exclude <global> pseudo-method
+    .filterNot(_.name == "<global>")
     .filter(m => {
       val start = m.lineNumber.getOrElse(-1)
       val end = m.lineNumberEnd.getOrElse(-1)
@@ -24,175 +20,136 @@
 
   val result = targetMethodOpt match {
     case Some(method) => {
+      val sb = new StringBuilder
       val methodName = method.name
       val methodFile = method.file.name.headOption.getOrElse("unknown")
-      val dependencies = scala.collection.mutable.ListBuffer[Map[String, Any]]()
+      
+      sb.append(s"Variable Flow Analysis\n")
+      sb.append(s"======================\n")
+      sb.append(s"Target: variable '$targetVar' at $filename:$targetLine\n")
+      sb.append(s"Method: $methodName\n")
+      sb.append(s"Direction: $direction\n")
 
-      if (direction == "backward") {
-        val inits = method.local.name(varName).l
-        inits.foreach { local =>
-          dependencies += Map(
-            "line" -> local.lineNumber.getOrElse(-1),
-            "code" -> escapeJson(s"${local.typeFullName} ${local.code}"),
-            "type" -> "initialization",
-            "filename" -> escapeJson(methodFile)
-          )
-        }
+      // 1. Identify Aliases
+      // Find local variables that are assigned the address of targetVar (e.g. p = &x)
+      val pointerAliases = method.assignment
+        .filter(_.source.code.contains("&" + targetVar))
+        .map(_.target.code)
+        .l.distinct
+        
+      // Combined set of variables to track (target + aliases)
+      val monitoredVars = (targetVar :: pointerAliases).distinct
+      
+      if (pointerAliases.nonEmpty) {
+        sb.append(s"Aliases detected: ${pointerAliases.mkString(", ")}\n")
+      }
+      
+      sb.append("\nDependencies:\n")
 
-        val assignments = method.assignment.l
-          .filter(a => {
-            val line = a.lineNumber.getOrElse(-1)
-            line < targetLine
-          })
-          .filter(a => {
-            val targetCode = a.target.code
-            targetCode == varName || targetCode.startsWith(varName + "[") || targetCode.startsWith(varName + ".")
-          })
-          .take(maxResults)
-
-        assignments.foreach { assign =>
-          dependencies += Map(
-            "line" -> assign.lineNumber.getOrElse(-1),
-            "code" -> escapeJson(assign.code),
-            "type" -> "assignment",
-            "filename" -> escapeJson(methodFile)
-          )
-        }
-
-        val modifications = method.call
-          .name("<operator>.(postIncrement|preIncrement|postDecrement|preDecrement|assignmentPlus|assignmentMinus|assignmentMultiplication|assignmentDivision)")
-          .l
-          .filter(c => {
-            val line = c.lineNumber.getOrElse(-1)
-            line < targetLine
-          })
-          .filter(c => {
-            val args = c.argument.code.l
-            args.exists(arg => arg == varName || arg.startsWith(varName + "[") || arg.startsWith(varName + "."))
-          })
-          .take(maxResults)
-
-        modifications.foreach { call =>
-          dependencies += Map(
-            "line" -> call.lineNumber.getOrElse(-1),
-            "code" -> escapeJson(call.code),
-            "type" -> "modification",
-            "filename" -> escapeJson(methodFile)
-          )
-        }
-
-        val funcCalls = method.call.l
-          .filter(c => {
-            val line = c.lineNumber.getOrElse(-1)
-            line < targetLine
-          })
-          .filter(c => {
-            val args = c.argument.code.l
-            args.exists(arg => arg.contains("&" + varName) || arg.contains(varName))
-          })
-          .take(maxResults)
-
-        funcCalls.foreach { call =>
-          dependencies += Map(
-            "line" -> call.lineNumber.getOrElse(-1),
-            "code" -> escapeJson(call.code),
-            "type" -> "function_call",
-            "filename" -> escapeJson(methodFile)
-          )
-        }
-      } else if (direction == "forward") {
-        val usages = method.call.l
-          .filter(c => {
-            val line = c.lineNumber.getOrElse(-1)
-            line > targetLine
-          })
-          .filter(c => {
-            val args = c.argument.code.l
-            args.exists(arg => arg.contains(varName))
-          })
-          .take(maxResults)
-
-        usages.foreach { call =>
-          dependencies += Map(
-            "line" -> call.lineNumber.getOrElse(-1),
-            "code" -> escapeJson(call.code),
-            "type" -> "usage",
-            "filename" -> escapeJson(methodFile)
-          )
-        }
-
-        val propagations = method.assignment.l
-          .filter(a => {
-            val line = a.lineNumber.getOrElse(-1)
-            line > targetLine
-          })
-          .filter(a => {
-            val sourceCode = a.source.code
-            sourceCode.contains(varName)
-          })
-          .take(maxResults)
-
-        propagations.foreach { assign =>
-          dependencies += Map(
-            "line" -> assign.lineNumber.getOrElse(-1),
-            "code" -> escapeJson(assign.code),
-            "type" -> "propagation",
-            "filename" -> escapeJson(methodFile)
-          )
-        }
-
-        val mods = method.call
-          .name("<operator>.(postIncrement|preIncrement|postDecrement|preDecrement|assignmentPlus|assignmentMinus)")
-          .l
-          .filter(c => {
-            val line = c.lineNumber.getOrElse(-1)
-            line > targetLine
-          })
-          .filter(c => {
-            val args = c.argument.code.l
-            args.exists(arg => arg == varName)
-          })
-          .take(maxResults)
-
-        mods.foreach { call =>
-          dependencies += Map(
-            "line" -> call.lineNumber.getOrElse(-1),
-            "code" -> escapeJson(call.code),
-            "type" -> "modification",
-            "filename" -> escapeJson(methodFile)
-          )
-        }
+      // Helper to match code against monitored variables
+      def isRelevant(code: String): Boolean = {
+        monitoredVars.exists(v => 
+          code == v || 
+          code.startsWith(v + ".") || 
+          code.startsWith(v + "[") || 
+          code.startsWith("*" + v) || 
+          code.startsWith(v + "->") ||
+          code == "&" + v
+        )
       }
 
-      val sortedDeps = dependencies.sortBy(d => d.getOrElse("line", -1).asInstanceOf[Int])
+      val dependencies = scala.collection.mutable.ListBuffer[(Int, String, String)]()
 
-      List(
-        Map(
-          "success" -> true,
-          "target" -> Map(
-            "file" -> methodFile,
-            "line" -> targetLine,
-            "variable" -> varName,
-            "method" -> methodName
-          ),
-          "direction" -> direction,
-          "dependencies" -> sortedDeps.toList,
-          "total" -> sortedDeps.size
-        )
-      )
+      if (direction == "backward") {
+        // 0. Parameters
+        method.parameter.nameExact(targetVar).l.foreach { param =>
+           dependencies += ((param.lineNumber.getOrElse(-1), s"${param.typeFullName} ${param.name}", "parameter"))
+        }
+
+        // 1. Initializations (Declarations)
+        method.local.nameExact(targetVar).l.foreach { local =>
+          dependencies += ((local.lineNumber.getOrElse(-1), s"${local.typeFullName} ${local.code}", "initialization"))
+        }
+
+        // 2. Assignments
+        method.assignment
+          .filter(_.lineNumber.getOrElse(-1) <= targetLine)
+          .filter(a => isRelevant(a.target.code) || a.target.code == targetVar) 
+          .take(maxResults)
+          .foreach { assign =>
+             dependencies += ((assign.lineNumber.getOrElse(-1), assign.code, "assignment"))
+          }
+
+        // 3. Modifications (Inc/Dec)
+        method.call
+          .name("<operator>.(postIncrement|preIncrement|postDecrement|preDecrement|assignmentPlus|assignmentMinus|assignmentMultiplication|assignmentDivision)")
+          .filter(_.lineNumber.getOrElse(-1) <= targetLine)
+          .filter(c => c.argument.code.l.exists(isRelevant))
+          .take(maxResults)
+          .foreach { call =>
+            dependencies += ((call.lineNumber.getOrElse(-1), call.code, "modification"))
+          }
+          
+        // 4. Function Calls (Any usage in args, potential pass-by-ref or logic dependency)
+        method.call
+          .filter(_.lineNumber.getOrElse(-1) <= targetLine)
+          .filter(c => c.argument.code.l.exists(arg => 
+             // Argument contains variable name (relaxed from just &varName)
+               monitoredVars.exists(v => arg.contains(v))
+          ))
+          .take(maxResults)
+          .foreach { call =>
+             dependencies += ((call.lineNumber.getOrElse(-1), call.code, "function_call"))
+          }
+
+      } else { // forward
+        // 1. Usages
+        method.call
+          .filter(_.lineNumber.getOrElse(-1) >= targetLine)
+          .filter(c => c.argument.code.l.exists(arg => isRelevant(arg) || arg.contains(targetVar)))
+          .take(maxResults)
+          .foreach { call =>
+             dependencies += ((call.lineNumber.getOrElse(-1), call.code, "usage"))
+          }
+
+        // 2. Propagations (assignments where source involves var)
+        method.assignment
+          .filter(_.lineNumber.getOrElse(-1) >= targetLine)
+          .filter(a => isRelevant(a.source.code) || a.source.code.contains(targetVar))
+          .take(maxResults)
+          .foreach { assign =>
+             dependencies += ((assign.lineNumber.getOrElse(-1), assign.code, "propagation"))
+          }
+          
+        // 3. Modifications (future)
+         method.call
+          .name("<operator>.(postIncrement|preIncrement|postDecrement|preDecrement|assignmentPlus|assignmentMinus|assignmentMultiplication|assignmentDivision)")
+          .filter(_.lineNumber.getOrElse(-1) >= targetLine)
+          .filter(c => c.argument.code.l.exists(isRelevant))
+          .take(maxResults)
+          .foreach { call =>
+            dependencies += ((call.lineNumber.getOrElse(-1), call.code, "modification"))
+          }
+      }
+
+      val sortedDeps = dependencies.sortBy(_._1)
+      if (sortedDeps.isEmpty) {
+        sb.append("(No dependencies found)\n")
+      } else {
+        // Deduplicate output based on line and code to clean up potential overlaps
+        val uniqueDeps = sortedDeps.distinct
+        uniqueDeps.foreach { case (line, code, typeName) =>
+          sb.append(f"[Line $line%4d] $code ($typeName)\n")
+        }
+      }
+      
+      sb.toString()
     }
     case None => {
-      List(
-        Map(
-          "success" -> false,
-          "error" -> Map(
-            "code" -> "METHOD_NOT_FOUND",
-            "message" -> s"No method found containing line $targetLine in file containing '$filename'"
-          )
-        )
-      )
+      s"Error: No method found containing line $targetLine in file '$filename'"
     }
   }
 
-  result.toJsonPretty
+  // Return list containing string to be compatible with parsing logic
+  List(result)
 }

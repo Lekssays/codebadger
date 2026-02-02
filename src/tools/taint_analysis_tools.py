@@ -727,7 +727,7 @@ Examples:
         description="""Analyze data dependencies for a variable at a specific location.
 
 Finds code locations that influence (backward) or are influenced by (forward)
-a variable.
+a variable, with support for pointer aliasing.
 
 Args:
     codebase_hash: The codebase hash.
@@ -736,19 +736,15 @@ Args:
     direction: "backward" (definitions) or "forward" (usages).
 
 Returns:
-    {
-        "success": true,
-        "target": { "file": "...", "line": 10, "variable": "x" },
-        "dependencies": [
-            {"line": 5, "code": "int x = 0;", "type": "initialization"}
-        ],
-        "direction": "backward"
-    }
+    Human-readable text showing:
+    - Target variable and method
+    - Aliases detected
+    - List of dependencies
 
 Notes:
-    - Backward: Finds initialization, assignment, and modification.
-    - Forward: Finds usage as argument and propagation to other vars.
-    - location filename should be relative to the project root (e.g., 'src/main.c:50').
+    - Backward: Finds initialization, assignment, modification, and pointer assignment.
+    - Forward: Finds usage, propagation, and modification.
+    - location filename should be relative to the project root.
 
 Examples:
     get_variable_flow(codebase_hash="abc", location="main.c:50", variable="len", direction="backward")"""
@@ -758,7 +754,7 @@ Examples:
         location: str,
         variable: str,
         direction: str = "backward",
-    ) -> Dict[str, Any]:
+    ) -> str:
         """Analyze variable data dependencies in backward or forward direction."""
         try:
             validate_codebase_hash(codebase_hash)
@@ -807,37 +803,20 @@ Examples:
             )
 
             if not result.success:
-                return {
-                    "success": False,
-                    "error": result.error,
-                }
+                return f"Error: {result.error}"
 
-            # Parse the JSON result (same as find_bounds_checks)
-            import json
-
-            if isinstance(result.data, list) and len(result.data) > 0:
-                result_data = result.data[0]
-
-                # Handle JSON string response
-                if isinstance(result_data, str):
-                    return json.loads(result_data)
-                else:
-                    return result_data
+            # Query returns human-readable text directly (wrapped in a list)
+            if isinstance(result.data, str):
+                return result.data.strip()
+            elif isinstance(result.data, list) and len(result.data) > 0:
+                output = result.data[0] if isinstance(result.data[0], str) else str(result.data[0])
+                return output.strip()
             else:
-                return {
-                    "success": False,
-                    "error": "Query returned no results",
-                }
+                 return f"Query returned unexpected format: {type(result.data)}"
 
         except ValidationError as e:
             logger.error(f"Error getting data dependencies: {e}")
-            return {
-                "success": False,
-                "error": str(e),
-            }
+            return f"Validation Error: {str(e)}"
         except Exception as e:
             logger.error(f"Unexpected error: {e}", exc_info=True)
-            return {
-                "success": False,
-                "error": str(e),
-            }
+            return f"Internal Error: {str(e)}"
