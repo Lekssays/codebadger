@@ -395,18 +395,27 @@ Args:
     direction: 'outgoing' (callees) or 'incoming' (callers).
 
 Returns:
-    {
-        "success": true,
-        "root_method": "authenticate",
-        "direction": "outgoing",
-        "calls": [
-            {"from": "authenticate", "to": "validate_password", "depth": 1},
-            {"from": "validate_password", "to": "hash_password", "depth": 2}
-        ]
-    }
+    A human-readable text summary:
+    
+    Call Graph for main (outgoing)
+    ============================================================
+    Root: main at main.c:10
+    
+    [DEPTH 1]
+      main → init (config.c:25)
+      main → process (core.c:50)
+    
+    [DEPTH 2]
+      init → load_config (config.c:100)
+      process → validate (core.c:120)
+    
+    Total: 4 edges
 
 Notes:
     - Essential for impact analysis and understanding code dependencies.
+    - Returns plain text.
+    - Includes file and line number for each call target.
+    - Line numbers refer to where the caller function starts, not the specific call site.
 
 Examples:
     get_call_graph(codebase_hash="abc", method_name="main", direction="outgoing")
@@ -417,7 +426,7 @@ Examples:
         method_name: Annotated[str, Field(description="Name of the method to analyze (can be regex)")],
         depth: Annotated[int, Field(description="How many levels deep to traverse (max recommended: 10)")] = 5,
         direction: Annotated[str, Field(description="Either 'outgoing' (callees) or 'incoming' (callers)")] = "outgoing",
-    ) -> Dict[str, Any]:
+    ) -> str:
         """Build the call graph showing callers or callees for a method."""
         try:
             validate_codebase_hash(codebase_hash)
@@ -453,55 +462,25 @@ Examples:
             )
 
             if not result.success:
-                return {
-                    "success": False,
-                    "error": result.error,
-                }
+                return f"Error: {result.error}"
 
-            # Parse the JSON result
-            import json
-
-            if isinstance(result.data, list) and len(result.data) > 0:
-                result_data = result.data[0]
-
-                # Handle JSON string response
-                if isinstance(result_data, str):
-                    result_obj = json.loads(result_data)
-                else:
-                    result_obj = result_data
-
-                # Extract calls and ensure proper structure
-                if result_obj.get("success"):
-                    return {
-                        "success": True,
-                        "root_method": result_obj.get("root_method", method_name),
-                        "direction": result_obj.get("direction", direction),
-                        "calls": result_obj.get("calls", []),
-                        "total": result_obj.get("total", 0),
-                    }
-                else:
-                    return {
-                        "success": False,
-                        "error": result_obj.get("error", "Unknown error"),
-                    }
+            # Query now returns human-readable text directly
+            if isinstance(result.data, str):
+                return result.data.strip()
+            elif isinstance(result.data, list) and len(result.data) > 0:
+                # Extract string from list wrapper
+                output = result.data[0] if isinstance(result.data[0], str) else str(result.data[0])
+                return output.strip()
             else:
-                return {
-                    "success": False,
-                    "error": "Query returned no results",
-                }
+                return f"Query returned unexpected format: {type(result.data)}"
 
         except ValidationError as e:
             logger.error(f"Error getting call graph: {e}")
-            return {
-                "success": False,
-                "error": str(e),
-            }
+            return f"Validation Error: {str(e)}"
         except Exception as e:
             logger.error(f"Unexpected error: {e}", exc_info=True)
-            return {
-                "success": False,
-                "error": str(e),
-            }
+            return f"Internal Error: {str(e)}"
+
 
     @mcp.tool(
         description="""List parameters of a specific method.

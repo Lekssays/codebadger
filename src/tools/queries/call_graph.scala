@@ -1,28 +1,35 @@
 {
-  def escapeJson(s: String): String = {
-    s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
-  }
-
   val methodName = "{{method_name}}"
   val maxDepth = {{depth}}
   val direction = "{{direction}}"
   val maxResults = 500
 
+  val output = new StringBuilder()
+  
   val rootMethodOpt = cpg.method.name(methodName).headOption
 
-  val result = rootMethodOpt match {
+  rootMethodOpt match {
     case Some(rootMethod) => {
       val rootName = rootMethod.name
-      val allCalls = scala.collection.mutable.ListBuffer[Map[String, Any]]()
+      val rootFile = rootMethod.file.name.headOption.getOrElse("unknown")
+      val rootLine = rootMethod.lineNumber.getOrElse(-1)
+      
+      // Header
+      output.append(s"Call Graph for $rootName ($direction)\n")
+      output.append("=" * 60 + "\n")
+      output.append(s"Root: $rootName at $rootFile:$rootLine\n")
       
       if (direction == "outgoing") {
+        // BFS for outgoing calls (callees)
         var toVisit = scala.collection.mutable.Queue[(io.shiftleft.codepropertygraph.generated.nodes.Method, Int)]()
         var visited = Set[String]()
         var edgesVisited = Set[(String, String, Int)]()
+        val edgesByDepth = scala.collection.mutable.Map[Int, scala.collection.mutable.ListBuffer[(String, String, String, Int)]]()
         
         toVisit.enqueue((rootMethod, 0))
+        var totalEdges = 0
         
-        while (toVisit.nonEmpty && allCalls.size < maxResults) {
+        while (toVisit.nonEmpty && totalEdges < maxResults) {
           val (current, currentDepth) = toVisit.dequeue()
           val currentName = current.name
           
@@ -35,55 +42,71 @@
             
             for (callee <- callees) {
               val calleeName = callee.name
-              val edgeKey = (currentName, calleeName, currentDepth + 1)
+              val calleeFile = callee.file.name.headOption.getOrElse("unknown")
+              val calleeLine = callee.lineNumber.getOrElse(-1)
+              val depth = currentDepth + 1
+              val edgeKey = (currentName, calleeName, depth)
               
               if (!edgesVisited.contains(edgeKey)) {
                 edgesVisited = edgesVisited + edgeKey
-                allCalls += Map(
-                  "from" -> currentName,
-                  "to" -> escapeJson(calleeName),
-                  "depth" -> (currentDepth + 1)
-                )
+                totalEdges += 1
                 
-                if (!visited.contains(calleeName) && currentDepth + 1 < maxDepth) {
-                  toVisit.enqueue((callee, currentDepth + 1))
+                // Store edge by depth
+                if (!edgesByDepth.contains(depth)) {
+                  edgesByDepth(depth) = scala.collection.mutable.ListBuffer()
+                }
+                edgesByDepth(depth) += ((currentName, calleeName, calleeFile, calleeLine))
+                
+                if (!visited.contains(calleeName) && depth < maxDepth) {
+                  toVisit.enqueue((callee, depth))
                 }
               }
             }
           }
         }
         
-        List(
-          Map(
-            "success" -> true,
-            "root_method" -> rootName,
-            "direction" -> direction,
-            "calls" -> allCalls.toList.sortBy(c => (c.getOrElse("depth", 0).asInstanceOf[Int], c.getOrElse("from", "").asInstanceOf[String])),
-            "total" -> allCalls.size
-          )
-        )
+        // Output edges grouped by depth
+        for (depth <- edgesByDepth.keys.toList.sorted) {
+          output.append(s"\n[DEPTH $depth]\n")
+          for ((from, to, file, line) <- edgesByDepth(depth)) {
+            val location = if (line > 0) s"$file:$line" else file
+            output.append(s"  $from → $to ($location)\n")
+          }
+        }
+        
+        output.append(s"\nTotal: $totalEdges edges\n")
+        
       } else if (direction == "incoming") {
+        // BFS for incoming calls (callers)
         var toVisit = scala.collection.mutable.Queue[(io.shiftleft.codepropertygraph.generated.nodes.Method, Int)]()
         var visited = Set[String]()
         var edgesVisited = Set[(String, String, Int)]()
+        val edgesByDepth = scala.collection.mutable.Map[Int, scala.collection.mutable.ListBuffer[(String, String, String, Int)]]()
         
+        // Initial: find direct callers of root method
         val directCallers = rootMethod.caller.l.filterNot(_.name.startsWith("<operator>"))
         for (caller <- directCallers) {
-          val edgeKey = (caller.name, rootName, 1)
+          val callerName = caller.name
+          val callerFile = caller.file.name.headOption.getOrElse("unknown")
+          val callerLine = caller.lineNumber.getOrElse(-1)
+          val edgeKey = (callerName, rootName, 1)
+          
           if (!edgesVisited.contains(edgeKey)) {
             edgesVisited = edgesVisited + edgeKey
-            allCalls += Map(
-              "from" -> escapeJson(caller.name),
-              "to" -> rootName,
-              "depth" -> 1
-            )
+            
+            if (!edgesByDepth.contains(1)) {
+              edgesByDepth(1) = scala.collection.mutable.ListBuffer()
+            }
+            edgesByDepth(1) += ((callerName, rootName, callerFile, callerLine))
+            
             toVisit.enqueue((caller, 1))
           }
         }
         
         visited = visited + rootName
+        var totalEdges = edgesVisited.size
         
-        while (toVisit.nonEmpty && allCalls.size < maxResults) {
+        while (toVisit.nonEmpty && totalEdges < maxResults) {
           val (current, currentDepth) = toVisit.dequeue()
           val currentName = current.name
           
@@ -96,57 +119,57 @@
             
             for (caller <- incomingCallers) {
               val callerName = caller.name
-              val edgeKey = (callerName, rootName, currentDepth + 1)
+              val callerFile = caller.file.name.headOption.getOrElse("unknown")
+              val callerLine = caller.lineNumber.getOrElse(-1)
+              val depth = currentDepth + 1
+              // FIX: Use currentName instead of rootName for correct traversal path
+              val edgeKey = (callerName, currentName, depth)
               
               if (!edgesVisited.contains(edgeKey)) {
                 edgesVisited = edgesVisited + edgeKey
-                allCalls += Map(
-                  "from" -> escapeJson(callerName),
-                  "to" -> rootName,
-                  "depth" -> (currentDepth + 1)
-                )
+                totalEdges += 1
                 
-                if (!visited.contains(callerName) && currentDepth + 1 < maxDepth) {
-                  toVisit.enqueue((caller, currentDepth + 1))
+                if (!edgesByDepth.contains(depth)) {
+                  edgesByDepth(depth) = scala.collection.mutable.ListBuffer()
+                }
+                // FIX: "to" field now correctly shows currentName (the node being called)
+                edgesByDepth(depth) += ((callerName, currentName, callerFile, callerLine))
+                
+                if (!visited.contains(callerName) && depth < maxDepth) {
+                  toVisit.enqueue((caller, depth))
                 }
               }
             }
           }
         }
         
-        List(
-          Map(
-            "success" -> true,
-            "root_method" -> rootName,
-            "direction" -> direction,
-            "calls" -> allCalls.toList.sortBy(c => (c.getOrElse("depth", 0).asInstanceOf[Int], c.getOrElse("from", "").asInstanceOf[String])),
-            "total" -> allCalls.size
-          )
-        )
+        // Output edges grouped by depth
+        for (depth <- edgesByDepth.keys.toList.sorted) {
+          output.append(s"\n[DEPTH $depth]\n")
+          for ((from, to, file, line) <- edgesByDepth(depth)) {
+            val location = if (line > 0) s"$file:$line" else file
+            output.append(s"  $from → $to ($location)\n")
+          }
+        }
+        
+        output.append(s"\nTotal: $totalEdges edges\n")
+        
       } else {
-        List(
-          Map(
-            "success" -> false,
-            "error" -> Map(
-              "code" -> "INVALID_DIRECTION",
-              "message" -> s"Direction must be 'outgoing' or 'incoming', got: '$direction'"
-            )
-          )
-        )
+        output.append(s"ERROR: Direction must be 'outgoing' or 'incoming', got: '$direction'\n")
       }
     }
     case None => {
-      List(
-        Map(
-          "success" -> false,
-          "error" -> Map(
-            "code" -> "METHOD_NOT_FOUND",
-            "message" -> s"Method not found: $methodName"
-          )
-        )
-      )
+      output.append(s"ERROR: Method not found: $methodName\n")
+      
+      // Show similar method names as suggestions
+      val similar = cpg.method.name(s".*$methodName.*").name.l.distinct.take(10)
+      if (similar.nonEmpty) {
+        output.append(s"\nDid you mean one of these?\n")
+        similar.foreach(m => output.append(s"  - $m\n"))
+      }
     }
   }
-
-  result.toJsonPretty
+  
+  // Return with markers for easy extraction
+  "<codebadger_result>\n" + output.toString() + "</codebadger_result>"
 }
