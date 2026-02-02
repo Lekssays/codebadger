@@ -96,7 +96,7 @@ Args:
     codebase_hash: The codebase hash.
     local_path: Optional relative path to list from.
     page: Page number (default 1).
-    page_size: Number of files per page (default 500).
+    page_size: Number of files per page (default 100).
 
 Returns:
     A text-based tree representation of the file structure:
@@ -124,7 +124,7 @@ Examples:
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
         local_path: Annotated[Optional[str], Field(description="Optional path inside the codebase to list (relative to source root or absolute).")] = None,
         page: Annotated[int, Field(description="Page number (1-indexed)")] = 1,
-        page_size: Annotated[int, Field(description="Number of files per page (default 500)")] = 500,
+        page_size: Annotated[int, Field(description="Number of files per page (default 100)")] = 100,
     ) -> str:
         """Get all source files as a tree structure with pagination.
         
