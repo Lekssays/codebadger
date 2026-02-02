@@ -172,14 +172,29 @@ async def test_find_taint_sinks_with_filename_filter(fake_services):
 
 @pytest.mark.asyncio
 async def test_find_taint_flows_success(fake_services):
-    # Setup mock for flow query with both source and sink locations
+    # Setup mock for flow query with text output
     services = fake_services
 
-    # The refactored API treats source+sink as forward mode, returning flows array
+    # The refactored API returns human-readable text
     flow_result = QueryResult(
         success=True,
         data=[
-            '[{"source": {"code": "getenv(\\"FOO\\")", "file": "core.c", "line": 10}, "sink": {"code": "system(cmd)", "file": "core.c", "line": 42}, "path_length": 1}]'
+            """Taint Flow Analysis
+============================================================
+Sources: pattern 'getenv' (1 found)
+Sinks: pattern 'system' (1 found)
+
+Found 1 taint flow(s):
+
+--- Flow 1 ---
+Source: getenv("FOO")
+  Location: core.c:10 in main()
+
+Sink: system(cmd)
+  Location: core.c:42 in main()
+
+Path length: 2 nodes
+"""
         ],
         row_count=1,
     )
@@ -199,7 +214,7 @@ async def test_find_taint_flows_success(fake_services):
     register_tools(mcp, services)
 
     async with Client(mcp) as client:
-        res_json = await client.call_tool(
+        res_text = await client.call_tool(
             "find_taint_flows",
             {
                 "codebase_hash": services["codebase_hash"],
@@ -208,30 +223,44 @@ async def test_find_taint_flows_success(fake_services):
                 "timeout": 10,
             }
         )
-        import json
-        res = json.loads(res_json.content[0].text)
+        result = res_text.content[0].text
 
-        assert res.get("success") is True
-        assert res.get("mode") == "forward"
-        assert "flows" in res
-        assert isinstance(res["flows"], list)
-        assert len(res["flows"]) >= 1
-        # Check first flow
-        flow = res["flows"][0]
-        assert flow["source"]["code"] == 'getenv("FOO")'
-        assert flow["sink"]["code"] == "system(cmd)"
+        # Check text output contains expected information
+        assert "Taint Flow Analysis" in result
+        assert "getenv" in result
+        assert "system" in result
+        assert "core.c" in result
 
 
 @pytest.mark.asyncio
-async def test_find_taint_flows_source_only(fake_services):
-    # Setup mock for forward flow query (source -> sinks)
+async def test_find_taint_flows_with_node_ids(fake_services):
+    """Test that node_id based queries work"""
     services = fake_services
 
-    # The new API uses source_location (file:line format) for forward analysis
+    # The refactored API returns human-readable text
     flow_result = QueryResult(
         success=True,
         data=[
-            '[{"source": {"code": "getenv(\\"FOO\\")", "file": "core.c", "line": 10}, "sink": {"code": "system(cmd)", "file": "core.c", "line": 42}, "variable": "cmd", "path_length": 2}]'
+            """Taint Flow Analysis
+============================================================
+Source: getenv("FOO")
+  Location: core.c:10
+  Node ID: 30064771934
+Sink: system(cmd)
+  Location: core.c:42
+  Node ID: 30064780656
+
+Found 1 taint flow(s):
+
+--- Flow 1 ---
+Source: getenv("FOO")
+  Location: core.c:10 in main()
+
+Sink: system(cmd)
+  Location: core.c:42 in main()
+
+Path length: 2 nodes
+"""
         ],
         row_count=1,
     )
@@ -251,38 +280,28 @@ async def test_find_taint_flows_source_only(fake_services):
     register_tools(mcp, services)
 
     async with Client(mcp) as client:
-        res_json = await client.call_tool(
+        res_text = await client.call_tool(
             "find_taint_flows",
             {
                 "codebase_hash": services["codebase_hash"],
-                "source_location": "core.c:10",
+                "source_node_id": 30064771934,
+                "sink_node_id": 30064780656,
                 "timeout": 10,
             }
         )
-        import json
-        res = json.loads(res_json.content[0].text)
+        result = res_text.content[0].text
 
-        assert res.get("success") is True
-        assert res.get("mode") == "forward"
-        assert "flows" in res
-        assert isinstance(res["flows"], list)
-        assert res["total"] == 1
+        # Check text output contains expected information
+        assert "Taint Flow Analysis" in result
+        assert "getenv" in result
+        assert "system" in result
+
 
 @pytest.mark.asyncio
-async def test_find_taint_flows_sink_only_backward(fake_services):
-    """Test that sink-only queries work for backward analysis"""
+async def test_find_taint_flows_validation_error(fake_services):
+    """Test that missing source returns validation error"""
     services = fake_services
 
-    # The new API uses sink_location (file:line format) for backward analysis
-    flow_result = QueryResult(
-        success=True,
-        data=[
-            '[{"source": {"code": "getenv(\\"FOO\\")", "file": "core.c", "line": 10}, "sink": {"code": "system(cmd)", "file": "core.c", "line": 42}, "variable": "cmd", "path_length": 2}]'
-        ],
-        row_count=1,
-    )
-
-    services["query_executor"].execute_query = MagicMock(return_value=flow_result)
     services["codebase_tracker"].get_codebase.return_value = CodebaseInfo(
         codebase_hash=services["codebase_hash"],
         source_type="local",
@@ -297,7 +316,8 @@ async def test_find_taint_flows_sink_only_backward(fake_services):
     register_tools(mcp, services)
 
     async with Client(mcp) as client:
-        res_json = await client.call_tool(
+        # Test with only sink (missing source)
+        res_text = await client.call_tool(
             "find_taint_flows",
             {
                 "codebase_hash": services["codebase_hash"],
@@ -305,12 +325,9 @@ async def test_find_taint_flows_sink_only_backward(fake_services):
                 "timeout": 10,
             }
         )
-        import json
-        res = json.loads(res_json.content[0].text)
+        result = res_text.content[0].text
 
-        assert res.get("success") is True
-        assert res.get("mode") == "backward"
-        assert "flows" in res
-        assert isinstance(res["flows"], list)
-        assert res["total"] == 1
+        # Should return validation error about missing source
+        assert "Validation Error" in result
+        assert "source" in result.lower()
 
