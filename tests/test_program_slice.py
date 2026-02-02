@@ -49,14 +49,14 @@ Arguments: &ret[0], prefix, lenp
 [BACKWARD SLICE] (3 data dependencies)
 
   Data Dependencies:
-    [L189] ret: ret = xmlMalloc(lenn + lenp + 2)
+    [tree.c:189] ret: ret = xmlMalloc(lenn + lenp + 2)
       <- depends on: lenn, lenp
-    [L184] lenp: lenp = strlen((char *) prefix)
+    [tree.c:184] lenp: lenp = strlen((char *) prefix)
       <- depends on: prefix
 
   Control Dependencies:
-    [L174] IF: (ncname == NULL) || (len < 0)
-    [L188] IF: (memory == NULL) || ((size_t) len < lenn + lenp + 2)
+    [tree.c:174] IF: (ncname == NULL) || (len < 0)
+    [tree.c:188] IF: (memory == NULL) || ((size_t) len < lenn + lenp + 2)
 
   Parameters: prefix (xmlChar*)
 """
@@ -116,13 +116,13 @@ Arguments: fd, buffer, len
   Result stored in: bytes
 
   Propagations:
-    [L798] usage (bytes): bytes < 0
-    [L809] propagation (bytes): ret += bytes
-    [L810] propagation (bytes): buffer += bytes
+    [xmlIO.c:798] usage (bytes): bytes < 0
+    [xmlIO.c:809] propagation (bytes): ret += bytes
+    [xmlIO.c:810] propagation (bytes): buffer += bytes
 
   Control Flow Affected:
-    [L798] IF: bytes < 0
-    [L807] IF: bytes == 0
+    [xmlIO.c:798] IF: bytes < 0
+    [xmlIO.c:807] IF: bytes == 0
 """
         return QueryResult(
             success=True,
@@ -202,8 +202,8 @@ async def test_get_program_slice_data_dependencies(fake_services_slice):
         })).content[0].text
 
         assert "Data Dependencies:" in res_text
-        assert "[L189] ret: ret = xmlMalloc" in res_text
-        assert "[L184] lenp: lenp = strlen" in res_text
+        assert "[tree.c:189] ret: ret = xmlMalloc" in res_text
+        assert "[tree.c:184] lenp: lenp = strlen" in res_text
 
 
 @pytest.mark.asyncio
@@ -220,7 +220,7 @@ async def test_get_program_slice_control_dependencies(fake_services_slice):
         })).content[0].text
 
         assert "Control Dependencies:" in res_text
-        assert "[L174] IF: (ncname == NULL) || (len < 0)" in res_text
+        assert "[tree.c:174] IF: (ncname == NULL) || (len < 0)" in res_text
 
 
 @pytest.mark.asyncio
@@ -274,3 +274,4 @@ async def test_get_program_slice_invalid_location_format(fake_services_slice):
 
         assert "Validation Error" in res_text
         assert "location must be" in res_text
+

@@ -61,7 +61,7 @@
           // === BACKWARD SLICE ===
           if (includeBackward) {
             val visited = mutable.Set[String]()
-            val dataDepsList = mutable.ListBuffer[(Int, String, String, List[String])]()
+            val dataDepsList = mutable.ListBuffer[(Int, String, String, String, List[String])]()
             
             def backwardTrace(varName: String, beforeLine: Int, depth: Int): Unit = {
               if (depth <= 0 || visited.contains(s"$varName:$beforeLine")) return
@@ -73,22 +73,23 @@
                 .l
                 .foreach { assign =>
                   val rhsVars = assign.source.ast.isIdentifier.name.l.distinct.filter(_ != varName)
-                  dataDepsList += ((assign.lineNumber.getOrElse(-1), varName, assign.code, rhsVars))
+                  val assignFile = assign.file.name.headOption.getOrElse("unknown")
+                  dataDepsList += ((assign.lineNumber.getOrElse(-1), assignFile, varName, assign.code, rhsVars))
                   rhsVars.foreach(v => backwardTrace(v, assign.lineNumber.getOrElse(0), depth - 1))
                 }
             }
             
             argVars.foreach(v => backwardTrace(v, targetLine, maxDepth))
             
-            val sortedDeps = dataDepsList.toList.sortBy(_._1)
+            val sortedDeps = dataDepsList.toList.distinct.sortBy(_._1)
             val backwardCount = sortedDeps.size
             
             output.append(s"\n[BACKWARD SLICE] (${backwardCount} data dependencies)\n")
             
             if (sortedDeps.nonEmpty) {
               output.append("\n  Data Dependencies:\n")
-              sortedDeps.foreach { case (line, varName, code, deps) =>
-                val lineInfo = if (line != -1) s"[L$line]" else "[Local]"
+              sortedDeps.foreach { case (line, file, varName, code, deps) =>
+                val lineInfo = if (line != -1) s"[$file:$line]" else "[Local]"
                 output.append(s"    $lineInfo $varName: $code\n")
                 if (deps.nonEmpty) output.append(s"      <- depends on: ${deps.mkString(", ")}\n")
               }
@@ -98,13 +99,13 @@
             if (includeControlFlow) {
               val controlDeps = method.controlStructure
                 .filter(c => c.lineNumber.getOrElse(0) > 0 && c.lineNumber.getOrElse(0) < targetLine)
-                .map(ctrl => (ctrl.lineNumber.getOrElse(-1), ctrl.controlStructureType, ctrl.condition.code.headOption.getOrElse(ctrl.code.take(60))))
-                .l.take(30)
+                .map(ctrl => (ctrl.lineNumber.getOrElse(-1), ctrl.file.name.headOption.getOrElse("unknown"), ctrl.controlStructureType, ctrl.condition.code.headOption.getOrElse(ctrl.code.take(60))))
+                .l.distinct.take(30)
               
               if (controlDeps.nonEmpty) {
                 output.append("\n  Control Dependencies:\n")
-                controlDeps.foreach { case (line, ctrlType, cond) =>
-                  output.append(s"    [L$line] $ctrlType: $cond\n")
+                controlDeps.foreach { case (line, file, ctrlType, cond) =>
+                  output.append(s"    [$file:$line] $ctrlType: $cond\n")
                 }
               }
             }
@@ -125,7 +126,7 @@
               .target.code.l.distinct
             
             val forwardVisited = mutable.Set[String]()
-            val propagationsList = mutable.ListBuffer[(Int, String, String, String)]()
+            val propagationsList = mutable.ListBuffer[(Int, String, String, String, String)]()
             
             def forwardTrace(varName: String, afterLine: Int, depth: Int): Unit = {
               if (depth <= 0 || forwardVisited.contains(s"$varName:$afterLine")) return
@@ -136,7 +137,8 @@
                 .filter(c => c.argument.code.l.exists(_.contains(varName)))
                 .l.take(15)
                 .foreach { call =>
-                  propagationsList += ((call.lineNumber.getOrElse(-1), "usage", varName, call.code))
+                  val callFile = call.file.name.headOption.getOrElse("unknown")
+                  propagationsList += ((call.lineNumber.getOrElse(-1), callFile, "usage", varName, call.code))
                 }
               
               method.assignment
@@ -145,14 +147,15 @@
                 .l.take(15)
                 .foreach { assign =>
                   val targetVar = assign.target.code
-                  propagationsList += ((assign.lineNumber.getOrElse(-1), "propagation", varName, assign.code))
+                  val assignFile = assign.file.name.headOption.getOrElse("unknown")
+                  propagationsList += ((assign.lineNumber.getOrElse(-1), assignFile, "propagation", varName, assign.code))
                   if (targetVar != varName) forwardTrace(targetVar, assign.lineNumber.getOrElse(0), depth - 1)
                 }
             }
             
             resultVars.foreach(v => forwardTrace(v, targetLine, maxDepth))
             
-            val sortedProps = propagationsList.toList.sortBy(_._1).distinct
+            val sortedProps = propagationsList.toList.distinct.sortBy(_._1)
             val forwardCount = sortedProps.size
             
             output.append(s"\n[FORWARD SLICE] (${forwardCount} propagations)\n")
@@ -163,8 +166,9 @@
             
             if (sortedProps.nonEmpty) {
               output.append("\n  Propagations:\n")
-              sortedProps.foreach { case (line, propType, varName, code) =>
-                output.append(s"    [L$line] $propType ($varName): $code\n")
+              sortedProps.foreach { case (line, file, propType, varName, code) =>
+                val lineInfo = s"[$file:$line]"
+                output.append(s"    $lineInfo $propType ($varName): $code\n")
               }
             }
             
@@ -173,13 +177,13 @@
               val controlAffected = method.controlStructure
                 .filter(c => c.lineNumber.getOrElse(0) > targetLine)
                 .filter(c => resultVars.exists(v => c.condition.code.headOption.getOrElse("").contains(v)))
-                .map(ctrl => (ctrl.lineNumber.getOrElse(-1), ctrl.controlStructureType, ctrl.condition.code.headOption.getOrElse("")))
-                .l.take(20)
+                .map(ctrl => (ctrl.lineNumber.getOrElse(-1), ctrl.file.name.headOption.getOrElse("unknown"), ctrl.controlStructureType, ctrl.condition.code.headOption.getOrElse("")))
+                .l.distinct.take(20)
               
               if (controlAffected.nonEmpty) {
                 output.append("\n  Control Flow Affected:\n")
-                controlAffected.foreach { case (line, ctrlType, cond) =>
-                  output.append(s"    [L$line] $ctrlType: $cond\n")
+                controlAffected.foreach { case (line, file, ctrlType, cond) =>
+                  output.append(s"    [$file:$line] $ctrlType: $cond\n")
                 }
               }
             }
@@ -230,3 +234,4 @@
   // Return with markers for easy extraction
   "<codebadger_result>\n" + output.toString() + "</codebadger_result>"
 }
+
