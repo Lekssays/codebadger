@@ -464,20 +464,20 @@ class TestMCPTools:
         """Test getting CFG for a method successfully"""
         from src.tools.code_browsing_tools import register_code_browsing_tools
         
-        # Mock query result with CFG nodes AND edges (new structure)
+        # Mock query result with CFG as text
+        expected_output = """Control Flow Graph for test_func
+============================================================
+Nodes:
+  [1001] ControlStructure: if (x > 0)
+  [1002] Return: return x
+
+Edges:
+  [1001] -> [1002] [Label: TRUE]
+"""
+        
         mock_services["query_executor"].execute_query.return_value = QueryResult(
             success=True,
-            data=[
-                {
-                    "nodes": [
-                        {"_1": 1001, "_2": "if (x > 0)", "_3": "ControlStructure"},
-                        {"_1": 1002, "_2": "return x", "_3": "Return"},
-                    ],
-                    "edges": [
-                        {"_1": 1001, "_2": 1002},
-                    ]
-                }
-            ],
+            data=[expected_output],
             row_count=1
         )
 
@@ -489,17 +489,15 @@ class TestMCPTools:
                 "codebase_hash": "553642871dd4251d",
                 "method_name": "test_func"
             })
-            import json
-            result_dict = json.loads(result.content[0].text)
-
-            assert result_dict["success"] is True
-            assert "nodes" in result_dict
-            assert "edges" in result_dict
-            assert len(result_dict["nodes"]) == 2
-            assert len(result_dict["edges"]) == 1
-            assert result_dict["nodes"][0]["type"] == "ControlStructure"
-            assert result_dict["edges"][0]["from"] == 1001
-            assert result_dict["edges"][0]["to"] == 1002
+            
+            # Result is now a plain text string
+            text_result = result.content[0].text
+            
+            assert "Control Flow Graph for test_func" in text_result
+            assert "Nodes:" in text_result
+            assert "[1001] ControlStructure: if (x > 0)" in text_result
+            assert "Edges:" in text_result
+            assert "[1001] -> [1002] [Label: TRUE]" in text_result
 
     @pytest.mark.asyncio
     async def test_get_type_definition_success(self, mock_services):

@@ -1168,7 +1168,7 @@ Examples:
     @mcp.tool(
         description="""Get control flow graph (CFG) for a method.
 
-Returns nodes and edges representing control flow.
+Understand the control flow of a method with a human-readable graph.
 
 Args:
     codebase_hash: The codebase hash.
@@ -1176,17 +1176,20 @@ Args:
     max_nodes: Limit nodes returned (default 100).
 
 Returns:
-    {
-        "success": true,
-        "method_name": "main",
-        "cfg": {
-            "nodes": [{"id": "1", "code": "if (x)", "type": "ControlStructure"}],
-            "edges": [{"from": "1", "to": "2", "label": "TRUE"}]
-        }
-    }
+    A human-readable text graph:
+    
+    Control Flow Graph for main
+    ============================================================
+    Nodes:
+      [1001] ControlStructure: if (x > 0)
+      [1002] Return: return x
+    
+    Edges:
+      [1001] -> [1002] [Label: TRUE]
 
 Notes:
     - Essential for understanding loops, conditions, and execution paths.
+    - Returns plain text.
 
 Examples:
     get_cfg(codebase_hash="abc", method_name="main")"""
@@ -1195,7 +1198,7 @@ Examples:
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
         method_name: Annotated[str, Field(description="Name of the method (can be regex pattern)")],
         max_nodes: Annotated[int, Field(description="Maximum CFG nodes to return (for large methods)")] = 100,
-    ) -> Dict[str, Any]:
+    ) -> str:
         """Get nodes and edges representing control flow in a method."""
         try:
             validate_codebase_hash(codebase_hash)
@@ -1222,56 +1225,24 @@ Examples:
             )
 
             if not result.success:
-                return {
-                    "success": False,
-                    "error": result.error,
-                }
+                return f"Error: {result.error}"
 
-            nodes = []
-            edges = []
-            if result.data:
-                # Result is a single map with "nodes" and "edges"
-                data = result.data[0] if result.data else {}
-                if isinstance(data, dict):
-                    raw_nodes = data.get("nodes", [])
-                    raw_edges = data.get("edges", [])
-                    for item in raw_nodes:
-                        if isinstance(item, dict):
-                            nodes.append({
-                                "id": item.get("_1"),
-                                "code": item.get("_2"),
-                                "type": item.get("_3"),
-                            })
-                    for item in raw_edges:
-                        if isinstance(item, dict):
-                            edges.append({
-                                "from": item.get("_1"),
-                                "to": item.get("_2"),
-                            })
-
-            return {
-                "success": True,
-                "method_name": method_name,
-                "nodes": nodes,
-                "edges": edges,
-                "total_nodes": len(nodes),
-                "total_edges": len(edges),
-                "max_nodes": max_nodes,
-                "truncated": len(nodes) >= max_nodes,
-            }
+            # Query now returns human-readable text directly
+            if isinstance(result.data, str):
+                return result.data.strip()
+            elif isinstance(result.data, list) and len(result.data) > 0:
+                # Extract string from list wrapper
+                output = result.data[0] if isinstance(result.data[0], str) else str(result.data[0])
+                return output.strip()
+            else:
+                return f"Query returned unexpected format: {type(result.data)}"
 
         except ValidationError as e:
             logger.error(f"Error getting CFG: {e}")
-            return {
-                "success": False,
-                "error": str(e),
-            }
+            return f"Validation Error: {str(e)}"
         except Exception as e:
             logger.error(f"Unexpected error getting CFG: {e}", exc_info=True)
-            return {
-                "success": False,
-                "error": str(e),
-            }
+            return f"Internal Error: {str(e)}"
 
 
     @mcp.tool(
