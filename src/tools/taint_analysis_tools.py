@@ -480,84 +480,50 @@ Examples:
             }
 
     @mcp.tool(
-        description="""Build a bidirectional program slice from a specific call node.
+        description="""Build a program slice from a specific call location.
 
-Creates a program slice showing all code that affects (backward) and is affected by (forward)
+Creates a program slice showing code that affects (backward) or is affected by (forward)
 a specific call, including dataflow and control dependencies. Optimized for static code analysis.
 
 Args:
     codebase_hash: The codebase hash from generate_cpg.
     location: 'filename:line' or 'filename:line:call_name' (file relative to project root).
-    node_id: Alternative: Direct CPG node ID of the target call.
-    direction: 'backward' (what affects), 'forward' (what is affected), or 'both' (default).
+    direction: 'backward' (default, what affects the call) or 'forward' (what is affected by the call).
     max_depth: Depth limit for recursive dependency tracking (default 5).
     include_control_flow: Include control dependencies like if/while conditions (default True).
     timeout: Maximum execution time in seconds (default 60).
 
 Returns:
-    {
-        "success": true,
-        "target": {
-            "node_id": "12345",
-            "name": "memcpy",
-            "code": "memcpy(&ret[0], prefix, lenp)",
-            "file": "tree.c",
-            "line": 195,
-            "method": "xmlBuildQName",
-            "arguments": ["&ret[0]", "prefix", "lenp"]  
-        },
-        "backward_slice": {
-            "data_dependencies": [
-                {"variable": "ret", "line": 189, "code": "ret = xmlMalloc(...)", "depends_on": ["lenn", "lenp"]}
-            ],
-            "control_dependencies": [
-                {"line": 174, "type": "IF", "condition": "(ncname == NULL) || (len < 0)"}
-            ],
-            "parameters": [{"name": "prefix", "type": "xmlChar*", "position": 2}],
-            "locals": [{"name": "ret", "type": "xmlChar*", "line": 172}]
-        },
-        "forward_slice": {
-            "result_variable": "bytes",
-            "propagations": [
-                {"line": 809, "code": "ret += bytes", "type": "usage"}
-            ],
-            "control_affected": [
-                {"line": 798, "type": "IF", "condition": "bytes < 0"}
-            ]
-        },
-        "summary": {"backward_nodes": 5, "forward_nodes": 3, "direction": "both"}
-    }
+    Human-readable text summary showing:
+    - Target call info (name, code, location)
+    - Backward slice: data dependencies, control dependencies, parameters
+    - Forward slice: propagations, affected control flow
 
 Notes:
-    - Use 'both' direction for complete vulnerability context analysis.
     - Backward slice shows data origins and control conditions.
     - Forward slice shows how results propagate and affect control flow.
-    - Depth limits prevent excessive traversal in complex code.
+    - Use relative file paths like 'libxslt/numbers.c' not absolute paths.
 
 Examples:
-    get_program_slice(codebase_hash="abc", location="main.c:42", direction="both")
+    get_program_slice(codebase_hash="abc", location="main.c:42")
     get_program_slice(codebase_hash="abc", location="parser.c:500:memcpy", direction="backward", max_depth=3)
-    get_program_slice(codebase_hash="abc", node_id="100234", direction="forward")"""
+    get_program_slice(codebase_hash="abc", location="module/file.c:100", direction="forward")"""
     )
     def get_program_slice(
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
-        location: Annotated[Optional[str], Field(description="'filename:line' or 'filename:line:call_name'. Example: 'main.c:42' or 'main.c:42:memcpy'")] = None,
-        node_id: Annotated[Optional[str], Field(description="Direct CPG node ID of the target call. Example: '12345'")] = None,
-        direction: Annotated[str, Field(description="Slice direction: 'backward', 'forward', or 'both'")] = "both",
+        location: Annotated[str, Field(description="'filename:line' or 'filename:line:call_name'. Example: 'main.c:42' or 'main.c:42:memcpy'")],
+        direction: Annotated[str, Field(description="Slice direction: 'backward' or 'forward'")] = "backward",
         max_depth: Annotated[int, Field(description="Maximum depth for recursive dependency tracking")] = 5,
         include_control_flow: Annotated[bool, Field(description="Include control dependencies (if/while conditions)")] = True,
         timeout: Annotated[int, Field(description="Maximum execution time in seconds")] = 60,
-    ) -> Dict[str, Any]:
-        """Get bidirectional program slice showing code affecting and affected by a specific call."""
+    ) -> str:
+        """Get program slice showing code affecting (backward) or affected by (forward) a specific call."""
         try:
             validate_codebase_hash(codebase_hash)
 
             # Validate inputs
-            if not node_id and not location:
-                raise ValidationError("Either node_id or location must be provided")
-            
-            if direction not in ["backward", "forward", "both"]:
-                raise ValidationError("direction must be 'backward', 'forward', or 'both'")
+            if direction not in ["backward", "forward"]:
+                raise ValidationError("direction must be 'backward' or 'forward'")
 
             codebase_tracker = services["codebase_tracker"]
             query_executor = services["query_executor"]
@@ -567,33 +533,28 @@ Examples:
             if not codebase_info or not codebase_info.cpg_path:
                 raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
 
-            # Parse location if provided
-            filename = ""
-            line_num = 0
-            call_name = ""
-            
-            if location:
-                parts = location.split(":")
-                if len(parts) < 2:
-                    raise ValidationError("location must be 'filename:line' or 'filename:line:callname'")
-                filename = parts[0]
-                try:
-                    line_num = int(parts[1])
-                except ValueError:
-                    raise ValidationError(f"Invalid line number in location: {parts[1]}")
-                call_name = parts[2] if len(parts) > 2 else ""
+            # Parse location
+            parts = location.split(":")
+            if len(parts) < 2:
+                raise ValidationError("location must be 'filename:line' or 'filename:line:callname'")
+            filename = parts[0]
+            try:
+                line_num = int(parts[1])
+            except ValueError:
+                raise ValidationError(f"Invalid line number in location: {parts[1]}")
+            call_name = parts[2] if len(parts) > 2 else ""
 
-            # Build comprehensive Scala query for bidirectional slicing
-            include_backward = direction in ["backward", "both"]
-            include_forward = direction in ["forward", "both"]
+            # Build comprehensive Scala query
+            include_backward = direction == "backward"
+            include_forward = direction == "forward"
             
             # Load query from external file
             query = QueryLoader.load(
                 "program_slice",
                 filename=filename,
                 line_num=line_num,
-                use_node_id=str(node_id is not None).lower(),
-                node_id=node_id if node_id else "",
+                use_node_id="false",
+                node_id="",
                 call_name=call_name,
                 max_depth=max_depth,
                 include_backward=str(include_backward).lower(),
@@ -611,37 +572,24 @@ Examples:
             )
 
             if not result.success:
-                return {
-                    "success": False,
-                    "error": result.error,
-                }
+                return f"Error: {result.error}"
 
-            # Parse JSON result
-            import json
-
-            if isinstance(result.data, list) and len(result.data) > 0:
-                result_data = result.data[0]
-                if isinstance(result_data, str):
-                    return json.loads(result_data)
-                return result_data
-            
-            return {
-                "success": False,
-                "error": "Query returned no results",
-            }
+            # Query now returns human-readable text directly
+            if isinstance(result.data, str):
+                return result.data.strip()
+            elif isinstance(result.data, list) and len(result.data) > 0:
+                # Extract string from list wrapper
+                output = result.data[0] if isinstance(result.data[0], str) else str(result.data[0])
+                return output.strip()
+            else:
+                return f"Query returned unexpected format: {type(result.data)}"
 
         except ValidationError as e:
             logger.error(f"Error getting program slice: {e}")
-            return {
-                "success": False,
-                "error": str(e),
-            }
+            return f"Validation Error: {str(e)}"
         except Exception as e:
             logger.error(f"Unexpected error getting program slice: {e}", exc_info=True)
-            return {
-                "success": False,
-                "error": str(e),
-            }
+            return f"Internal Error: {str(e)}"
 
 
     @mcp.tool(

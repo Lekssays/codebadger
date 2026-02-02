@@ -1,12 +1,11 @@
 """
-Tests for the refactored get_program_slice function with bidirectional slicing support.
+Tests for the get_program_slice function with simplified input/output.
 """
 
 import asyncio
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 import uuid
-import json
 
 import pytest
 
@@ -40,44 +39,30 @@ def fake_services_slice():
         elif len(args) > 2:
             query_executor.last_query = args[2]
 
-        # Return realistic bidirectional slice result
+        # Return realistic text output (backward slice)
+        text_output = """Program Slice for memcpy at tree.c:195
+============================================================
+Code: memcpy(&ret[0], prefix, lenp)
+Method: xmlBuildQName
+Arguments: &ret[0], prefix, lenp
+
+[BACKWARD SLICE] (3 data dependencies)
+
+  Data Dependencies:
+    [L189] ret: ret = xmlMalloc(lenn + lenp + 2)
+      <- depends on: lenn, lenp
+    [L184] lenp: lenp = strlen((char *) prefix)
+      <- depends on: prefix
+
+  Control Dependencies:
+    [L174] IF: (ncname == NULL) || (len < 0)
+    [L188] IF: (memory == NULL) || ((size_t) len < lenn + lenp + 2)
+
+  Parameters: prefix (xmlChar*)
+"""
         return QueryResult(
             success=True,
-            data=[json.dumps({
-                "success": True,
-                "target": {
-                    "node_id": "12345678",
-                    "name": "memcpy",
-                    "code": "memcpy(&ret[0], prefix, lenp)",
-                    "file": "tree.c",
-                    "line": 195,
-                    "method": "xmlBuildQName",
-                    "arguments": ["&ret[0]", "prefix", "lenp"]
-                },
-                "backward_slice": {
-                    "data_dependencies": [
-                        {"variable": "ret", "line": 189, "code": "ret = xmlMalloc(lenn + lenp + 2)", "depends_on": ["lenn", "lenp"]},
-                        {"variable": "lenp", "line": 184, "code": "lenp = strlen((char *) prefix)", "depends_on": ["prefix"]}
-                    ],
-                    "control_dependencies": [
-                        {"line": 174, "type": "IF", "condition": "(ncname == NULL) || (len < 0)"},
-                        {"line": 188, "type": "IF", "condition": "(memory == NULL) || ((size_t) len < lenn + lenp + 2)"}
-                    ],
-                    "parameters": [{"name": "prefix", "type": "xmlChar*", "position": 2}],
-                    "locals": [{"name": "ret", "type": "xmlChar*", "line": 172}]
-                },
-                "forward_slice": {
-                    "result_variable": "",
-                    "propagations": [],
-                    "control_affected": []
-                },
-                "summary": {
-                    "direction": "both",
-                    "max_depth": 5,
-                    "backward_nodes": 4,
-                    "forward_nodes": 0
-                }
-            })],
+            data=[text_output],
             row_count=1,
         )
 
@@ -121,39 +106,27 @@ def fake_services_forward():
         elif len(args) > 2:
             query_executor.last_query = args[2]
 
+        text_output = """Program Slice for read at xmlIO.c:797
+============================================================
+Code: read(fd, buffer, len)
+Method: xmlFdRead
+Arguments: fd, buffer, len
+
+[FORWARD SLICE] (5 propagations)
+  Result stored in: bytes
+
+  Propagations:
+    [L798] usage (bytes): bytes < 0
+    [L809] propagation (bytes): ret += bytes
+    [L810] propagation (bytes): buffer += bytes
+
+  Control Flow Affected:
+    [L798] IF: bytes < 0
+    [L807] IF: bytes == 0
+"""
         return QueryResult(
             success=True,
-            data=[json.dumps({
-                "success": True,
-                "target": {
-                    "node_id": "87654321",
-                    "name": "read",
-                    "code": "read(fd, buffer, len)",
-                    "file": "xmlIO.c",
-                    "line": 797,
-                    "method": "xmlFdRead",
-                    "arguments": ["fd", "buffer", "len"]
-                },
-                "backward_slice": {},
-                "forward_slice": {
-                    "result_variable": "bytes",
-                    "propagations": [
-                        {"line": 798, "code": "bytes < 0", "type": "usage", "variable": "bytes"},
-                        {"line": 809, "code": "ret += bytes", "type": "propagation", "variable": "bytes", "propagates_to": "ret"},
-                        {"line": 810, "code": "buffer += bytes", "type": "propagation", "variable": "bytes", "propagates_to": "buffer"}
-                    ],
-                    "control_affected": [
-                        {"line": 798, "type": "IF", "condition": "bytes < 0"},
-                        {"line": 807, "type": "IF", "condition": "bytes == 0"}
-                    ]
-                },
-                "summary": {
-                    "direction": "forward",
-                    "max_depth": 5,
-                    "backward_nodes": 0,
-                    "forward_nodes": 5
-                }
-            })],
+            data=[text_output],
             row_count=1,
         )
 
@@ -177,19 +150,20 @@ async def test_get_program_slice_backward(fake_services_slice):
     register_tools(mcp, fake_services_slice)
 
     async with Client(mcp) as client:
-        res_json = await client.call_tool("get_program_slice", {
+        res_text = (await client.call_tool("get_program_slice", {
             "codebase_hash": fake_services_slice["codebase_hash"],
             "location": "tree.c:195:memcpy",
             "direction": "backward",
             "max_depth": 5
-        })
-        res = json.loads(res_json.content[0].text)
-
-        assert res.get("success") is True
-        assert "target" in res
-        assert res["target"]["name"] == "memcpy"
-        assert res["target"]["line"] == 195
-        assert "backward_slice" in res
+        })).content[0].text
+        
+        # Check text output contains key information
+        assert "Program Slice for memcpy" in res_text
+        assert "at tree.c:195" in res_text
+        assert "[BACKWARD SLICE]" in res_text
+        assert "Data Dependencies:" in res_text
+        assert "ret =" in res_text
+        assert "depends on: lenn, lenp" in res_text
 
 
 @pytest.mark.asyncio
@@ -199,59 +173,19 @@ async def test_get_program_slice_forward(fake_services_forward):
     register_tools(mcp, fake_services_forward)
 
     async with Client(mcp) as client:
-        res_json = await client.call_tool("get_program_slice", {
+        res_text = (await client.call_tool("get_program_slice", {
             "codebase_hash": fake_services_forward["codebase_hash"],
             "location": "xmlIO.c:797:read",
             "direction": "forward",
             "max_depth": 5
-        })
-        res = json.loads(res_json.content[0].text)
+        })).content[0].text
 
-        assert res.get("success") is True
-        assert "target" in res
-        assert res["target"]["name"] == "read"
-        assert "forward_slice" in res
-        assert res["forward_slice"]["result_variable"] == "bytes"
-        assert len(res["forward_slice"]["propagations"]) > 0
-
-
-@pytest.mark.asyncio
-async def test_get_program_slice_bidirectional(fake_services_slice):
-    """Test bidirectional (both) slicing mode."""
-    mcp = FastMCP("TestServer")
-    register_tools(mcp, fake_services_slice)
-
-    async with Client(mcp) as client:
-        res_json = await client.call_tool("get_program_slice", {
-            "codebase_hash": fake_services_slice["codebase_hash"],
-            "location": "tree.c:195",
-            "direction": "both"
-        })
-        res = json.loads(res_json.content[0].text)
-
-        assert res.get("success") is True
-        assert "backward_slice" in res
-        assert "forward_slice" in res
-        assert "summary" in res
-        assert res["summary"]["direction"] == "both"
-
-
-@pytest.mark.asyncio
-async def test_get_program_slice_with_node_id(fake_services_slice):
-    """Test slicing using direct node ID."""
-    mcp = FastMCP("TestServer")
-    register_tools(mcp, fake_services_slice)
-
-    async with Client(mcp) as client:
-        res_json = await client.call_tool("get_program_slice", {
-            "codebase_hash": fake_services_slice["codebase_hash"],
-            "node_id": "12345678",
-            "direction": "backward"
-        })
-        res = json.loads(res_json.content[0].text)
-
-        assert res.get("success") is True
-        assert res["target"]["node_id"] == "12345678"
+        assert "Program Slice for read" in res_text
+        assert "[FORWARD SLICE]" in res_text
+        assert "Result stored in: bytes" in res_text
+        assert "Propagations:" in res_text
+        assert "bytes < 0" in res_text
+        assert "Control Flow Affected:" in res_text
 
 
 @pytest.mark.asyncio
@@ -261,25 +195,15 @@ async def test_get_program_slice_data_dependencies(fake_services_slice):
     register_tools(mcp, fake_services_slice)
 
     async with Client(mcp) as client:
-        res_json = await client.call_tool("get_program_slice", {
+        res_text = (await client.call_tool("get_program_slice", {
             "codebase_hash": fake_services_slice["codebase_hash"],
             "location": "tree.c:195:memcpy",
             "direction": "backward"
-        })
-        res = json.loads(res_json.content[0].text)
+        })).content[0].text
 
-        assert res.get("success") is True
-        deps = res["backward_slice"]["data_dependencies"]
-        
-        # Check we have dependencies
-        assert len(deps) >= 2
-        
-        # Check dependency structure
-        for dep in deps:
-            assert "variable" in dep
-            assert "line" in dep
-            assert "code" in dep
-            assert "depends_on" in dep
+        assert "Data Dependencies:" in res_text
+        assert "[L189] ret: ret = xmlMalloc" in res_text
+        assert "[L184] lenp: lenp = strlen" in res_text
 
 
 @pytest.mark.asyncio
@@ -289,24 +213,14 @@ async def test_get_program_slice_control_dependencies(fake_services_slice):
     register_tools(mcp, fake_services_slice)
 
     async with Client(mcp) as client:
-        res_json = await client.call_tool("get_program_slice", {
+        res_text = (await client.call_tool("get_program_slice", {
             "codebase_hash": fake_services_slice["codebase_hash"],
             "location": "tree.c:195:memcpy",
             "direction": "backward"
-        })
-        res = json.loads(res_json.content[0].text)
+        })).content[0].text
 
-        assert res.get("success") is True
-        ctrl_deps = res["backward_slice"]["control_dependencies"]
-        
-        # Should have control deps
-        assert len(ctrl_deps) >= 1
-        
-        # Check structure
-        for ctrl in ctrl_deps:
-            assert "line" in ctrl
-            assert "type" in ctrl
-            assert "condition" in ctrl
+        assert "Control Dependencies:" in res_text
+        assert "[L174] IF: (ncname == NULL) || (len < 0)" in res_text
 
 
 @pytest.mark.asyncio
@@ -319,7 +233,7 @@ async def test_get_program_slice_depth_limiting(fake_services_slice):
         await client.call_tool("get_program_slice", {
             "codebase_hash": fake_services_slice["codebase_hash"],
             "location": "tree.c:195:memcpy",
-            "direction": "both",
+            "direction": "backward",
             "max_depth": 3
         })
         
@@ -335,53 +249,28 @@ async def test_get_program_slice_invalid_direction(fake_services_slice):
     register_tools(mcp, fake_services_slice)
 
     async with Client(mcp) as client:
-        res_json = await client.call_tool("get_program_slice", {
+        res_text = (await client.call_tool("get_program_slice", {
             "codebase_hash": fake_services_slice["codebase_hash"],
             "location": "tree.c:195",
-            "direction": "invalid"
-        })
-        res = json.loads(res_json.content[0].text)
+            "direction": "both"
+        })).content[0].text
 
-        assert res.get("success") is False
-        assert "direction" in res["error"].lower()
+        assert "Validation Error" in res_text
+        assert "direction" in res_text
 
 
 @pytest.mark.asyncio
-async def test_get_program_slice_missing_required_params(fake_services_slice):
-    """Test that missing location and node_id is rejected."""
+async def test_get_program_slice_invalid_location_format(fake_services_slice):
+    """Test that invalid location format is rejected."""
     mcp = FastMCP("TestServer")
     register_tools(mcp, fake_services_slice)
 
     async with Client(mcp) as client:
-        res_json = await client.call_tool("get_program_slice", {
+        res_text = (await client.call_tool("get_program_slice", {
             "codebase_hash": fake_services_slice["codebase_hash"],
-            "direction": "both"
-        })
-        res = json.loads(res_json.content[0].text)
+            "location": "invalid_format",
+            "direction": "backward"
+        })).content[0].text
 
-        assert res.get("success") is False
-        assert "node_id" in res["error"] or "location" in res["error"]
-
-
-@pytest.mark.asyncio
-async def test_get_program_slice_summary_counts(fake_services_slice):
-    """Test that summary contains correct node counts."""
-    mcp = FastMCP("TestServer")
-    register_tools(mcp, fake_services_slice)
-
-    async with Client(mcp) as client:
-        res_json = await client.call_tool("get_program_slice", {
-            "codebase_hash": fake_services_slice["codebase_hash"],
-            "location": "tree.c:195:memcpy",
-            "direction": "both"
-        })
-        res = json.loads(res_json.content[0].text)
-
-        assert res.get("success") is True
-        summary = res["summary"]
-        
-        assert "backward_nodes" in summary
-        assert "forward_nodes" in summary
-        assert "max_depth" in summary
-        assert isinstance(summary["backward_nodes"], int)
-        assert isinstance(summary["forward_nodes"], int)
+        assert "Validation Error" in res_text
+        assert "location must be" in res_text

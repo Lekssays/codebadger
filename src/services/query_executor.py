@@ -71,15 +71,19 @@ class QueryExecutor:
             )
 
     def _normalize_query(self, query: str, limit: Optional[int] = None) -> str:
-        """Normalize query to ensure JSON output"""
+        """Normalize query to ensure proper output format"""
         query = query.strip()
 
-        # Check if this is a block query that already produces JSON output
+        # Check if this is a block query that already produces its own output
         # Block queries start with { and end with }
         if query.startswith('{') and query.endswith('}'):
-            # Check if the block contains .toJsonPretty or .toJson inside
+            # Check if the block contains JSON output methods
             if '.toJsonPretty' in query or '.toJson' in query:
                 # Block already produces JSON, don't modify
+                return query
+            # Check if the block returns a string (.toString() at the end)
+            if '.toString()' in query[-50:]:
+                # Block returns a string, don't add JSON conversion
                 return query
 
         # Remove existing output modifiers from the end
@@ -145,6 +149,12 @@ class QueryExecutor:
         import re
         ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
         output = ansi_escape.sub('', output)
+
+        # First, check for codebadger_result markers (for text output queries)
+        marker_match = re.search(r'<codebadger_result>\s*(.*?)\s*</codebadger_result>', output, re.DOTALL)
+        if marker_match:
+            # Return the extracted content as a string in a list
+            return [marker_match.group(1).strip()]
 
         # Try to extract JSON from Scala REPL output
         # Look for JSON within triple quotes
