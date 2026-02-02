@@ -939,13 +939,7 @@ Args:
     buffer_access_location: 'filename:line' of the access (e.g., 'buf[i] = x').
 
 Returns:
-    {
-        "success": true,
-        "buffer_access": {...},
-        "bounds_checks": [...],
-        "check_before_access": true,
-        "check_after_access": false
-    }
+    A human-readable text summary of the bounds check analysis.
 
 Notes:
     - Helps identify potential buffer overflow vulnerabilities.
@@ -958,7 +952,7 @@ Examples:
     def find_bounds_checks(
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
         buffer_access_location: Annotated[str, Field(description="Location of buffer access in format 'filename:line' (e.g., 'parser.c:3393')")],
-    ) -> Dict[str, Any]:
+    ) -> str:
         """Check if buffer accesses have proper bounds validation."""
         try:
             validate_codebase_hash(codebase_hash)
@@ -997,57 +991,20 @@ Examples:
                 timeout=30,
             )
 
-            if not result.success:
-                return {
-                    "success": False,
-                    "error": result.error,
-                }
-
-            # Parse the JSON result - the query now uses Map().toJsonPretty
-            import json
-
-            if isinstance(result.data, list) and len(result.data) > 0:
-                # The result should be a parsed JSON object already
-                result_data = result.data[0]
-                
-                # If it's already a dict, return it directly
-                if isinstance(result_data, dict):
-                    return result_data
-                
-                # Otherwise try to parse as string
-                elif isinstance(result_data, str):
-                    try:
-                        return json.loads(result_data)
-                    except json.JSONDecodeError as e:
-                        logger.error(f"Failed to parse bounds check JSON: {e}, raw: {result_data[:200]}")
-                        return {
-                            "success": False,
-                            "error": f"Failed to parse result: {str(e)}",
-                        }
-                else:
-                    logger.error(f"Unexpected result_data type: {type(result_data)}, value: {result_data}")
-                    return {
-                        "success": False,
-                        "error": "Unexpected response format",
-                    }
+            if result.success and result.data:
+                # result.data is typically a list of results from the query
+                # for text queries, it's a list containing the text with <codebadger_result> tags
+                output = result.data[0] if isinstance(result.data, list) else str(result.data)
+                return output.strip()
             else:
-                return {
-                    "success": False,
-                    "error": "Query returned no results",
-                }
+                return f"Error: {result.error if not result.success else 'No data returned'}"
 
         except ValidationError as e:
             logger.error(f"Error finding bounds checks: {e}")
-            return {
-                "success": False,
-                "error": str(e),
-            }
+            return f"Validation Error: {str(e)}"
         except Exception as e:
             logger.error(f"Unexpected error: {e}", exc_info=True)
-            return {
-                "success": False,
-                "error": str(e),
-            }
+            return f"Internal Error: {str(e)}"
 
     @mcp.tool(
         description="""Get comprehensive CPGQL syntax help and examples.
