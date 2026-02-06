@@ -263,7 +263,19 @@ Examples:
                 # Get the full source code using file reading logic
                 if method_filename and line_number > 0 and line_number_end > 0:
                     try:
-                        file_path = os.path.join(source_dir, method_filename)
+                        # Prevent path traversal
+                        file_path = os.path.realpath(os.path.join(source_dir, method_filename))
+                        real_source_dir = os.path.realpath(source_dir)
+                        if not file_path.startswith(real_source_dir + os.sep):
+                            full_code = f"// Path traversal denied: {method_filename}"
+                            methods.append({
+                                "name": method_name_result,
+                                "filename": method_filename,
+                                "lineNumber": line_number,
+                                "lineNumberEnd": line_number_end,
+                                "code": full_code,
+                            })
+                            continue
 
                         if os.path.exists(file_path) and os.path.isfile(file_path):
                             with open(
@@ -759,8 +771,13 @@ Examples:
                     source_path = os.path.abspath(source_path)
                 source_dir = source_path
 
-            # Construct full file path
-            file_path = os.path.join(source_dir, filename)
+            # Construct full file path and prevent path traversal
+            file_path = os.path.realpath(os.path.join(source_dir, filename))
+            real_source_dir = os.path.realpath(source_dir)
+            if not file_path.startswith(real_source_dir + os.sep):
+                raise ValidationError(
+                    f"Path traversal denied: '{filename}' resolves outside source directory"
+                )
 
             # Check if file exists
             if not os.path.exists(file_path):
