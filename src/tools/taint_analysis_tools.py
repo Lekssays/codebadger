@@ -5,7 +5,7 @@ Security-focused tools for analyzing data flows and vulnerabilities
 
 import logging
 import re
-from typing import Any, Dict, Optional, Annotated
+from typing import Any, Callable, Dict, Optional, Union, Annotated
 from pydantic import Field
 
 from ..exceptions import (
@@ -169,6 +169,50 @@ def _build_joern_name_pattern(patterns: list) -> str:
     return "|".join(re.escape(name) for name in unique)
 
 
+def _cached_taint_query(
+    services: dict,
+    tool_name: str,
+    codebase_hash: str,
+    cache_params: Dict[str, Any],
+    query_func: Callable[[], Union[Dict[str, Any], str]],
+) -> Union[Dict[str, Any], str]:
+    """Check cache, execute query on miss, cache successful results.
+
+    Works for both dict-returning tools (sources/sinks) and
+    str-returning tools (taint flows, slices, variable flow).
+    """
+    db_manager = services.get("db_manager")
+
+    # Try cache first
+    if db_manager:
+        try:
+            cached = db_manager.get_cached_tool_output(tool_name, codebase_hash, cache_params)
+            if cached is not None:
+                logger.debug(f"Cache hit for {tool_name}")
+                return cached
+        except Exception:
+            pass  # cache lookup failure is non-fatal
+
+    # Cache miss — execute the query
+    result = query_func()
+
+    # Cache successful results
+    if db_manager:
+        try:
+            should_cache = False
+            if isinstance(result, dict) and result.get("success", False):
+                should_cache = True
+            elif isinstance(result, str) and not result.startswith(("Error:", "Validation Error:", "Internal Error:")):
+                should_cache = True
+
+            if should_cache:
+                db_manager.cache_tool_output(tool_name, codebase_hash, cache_params, result)
+        except Exception:
+            pass  # cache write failure is non-fatal
+
+    return result
+
+
 def register_taint_analysis_tools(mcp, services: dict):
     """Register taint analysis MCP tools with the FastMCP server"""
 
@@ -241,49 +285,48 @@ Examples:
             # Build Joern .name() regex from patterns, extracting short names
             # from qualified patterns (e.g., 'os.system' -> 'system')
             joined = _build_joern_name_pattern(patterns)
-            
-            # Build query with optional file filter
-            if filename:
-                # Use regex to match filename - handles both full and partial matches
-                query = f'cpg.call.name("{joined}").where(_.file.name(".*{filename}.*")).map(c => (c.id, c.name, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take({limit})'
-            else:
-                query = f'cpg.call.name("{joined}").map(c => (c.id, c.name, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take({limit})'
 
-            result = query_executor.execute_query(
-                codebase_hash=codebase_hash,
-                cpg_path=codebase_info.cpg_path,
-                query=query,
-                timeout=30,
-                limit=limit,
-            )
+            cache_params = {"lang": lang, "patterns": sorted(set(patterns)), "filename": filename, "limit": limit}
 
-            if not result.success:
-                return {
-                    "success": False,
-                    "error": result.error,
-                }
+            def _execute():
+                # Build query with optional file filter
+                if filename:
+                    query = f'cpg.call.name("{joined}").where(_.file.name(".*{filename}.*")).map(c => (c.id, c.name, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take({limit})'
+                else:
+                    query = f'cpg.call.name("{joined}").map(c => (c.id, c.name, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take({limit})'
 
-            sources = []
-            for item in result.data:
-                if isinstance(item, dict):
-                    sources.append(
-                        {
+                result = query_executor.execute_query(
+                    codebase_hash=codebase_hash,
+                    cpg_path=codebase_info.cpg_path,
+                    query=query,
+                    timeout=30,
+                    limit=limit,
+                )
+
+                if not result.success:
+                    return {"success": False, "error": result.error}
+
+                sources = []
+                for item in result.data:
+                    if isinstance(item, dict):
+                        sources.append({
                             "node_id": item.get("_1"),
                             "name": item.get("_2"),
                             "code": item.get("_3"),
                             "filename": item.get("_4"),
                             "lineNumber": item.get("_5"),
                             "method": item.get("_6"),
-                        }
-                    )
+                        })
 
-            return {
-                "success": True,
-                "sources": sources,
-                "total": len(sources),
-                "limit": limit,
-                "has_more": len(sources) >= limit,
-            }
+                return {
+                    "success": True,
+                    "sources": sources,
+                    "total": len(sources),
+                    "limit": limit,
+                    "has_more": len(sources) >= limit,
+                }
+
+            return _cached_taint_query(services, "find_taint_sources", codebase_hash, cache_params, _execute)
 
         except ValidationError as e:
             logger.error(f"Error finding taint sources: {e}")
@@ -366,49 +409,48 @@ Examples:
             # Build Joern .name() regex from patterns, extracting short names
             # from qualified patterns (e.g., 'os.system' -> 'system')
             joined = _build_joern_name_pattern(patterns)
-            
-            # Build query with optional file filter
-            if filename:
-                # Use regex to match filename - handles both full and partial matches
-                query = f'cpg.call.name("{joined}").where(_.file.name(".*{filename}.*")).map(c => (c.id, c.name, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take({limit})'
-            else:
-                query = f'cpg.call.name("{joined}").map(c => (c.id, c.name, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take({limit})'
 
-            result = query_executor.execute_query(
-                codebase_hash=codebase_hash,
-                cpg_path=codebase_info.cpg_path,
-                query=query,
-                timeout=30,
-                limit=limit,
-            )
+            cache_params = {"lang": lang, "patterns": sorted(set(patterns)), "filename": filename, "limit": limit}
 
-            if not result.success:
-                return {
-                    "success": False,
-                    "error": result.error,
-                }
+            def _execute():
+                # Build query with optional file filter
+                if filename:
+                    query = f'cpg.call.name("{joined}").where(_.file.name(".*{filename}.*")).map(c => (c.id, c.name, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take({limit})'
+                else:
+                    query = f'cpg.call.name("{joined}").map(c => (c.id, c.name, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take({limit})'
 
-            sinks = []
-            for item in result.data:
-                if isinstance(item, dict):
-                    sinks.append(
-                        {
+                result = query_executor.execute_query(
+                    codebase_hash=codebase_hash,
+                    cpg_path=codebase_info.cpg_path,
+                    query=query,
+                    timeout=30,
+                    limit=limit,
+                )
+
+                if not result.success:
+                    return {"success": False, "error": result.error}
+
+                sinks = []
+                for item in result.data:
+                    if isinstance(item, dict):
+                        sinks.append({
                             "node_id": item.get("_1"),
                             "name": item.get("_2"),
                             "code": item.get("_3"),
                             "filename": item.get("_4"),
                             "lineNumber": item.get("_5"),
                             "method": item.get("_6"),
-                        }
-                    )
+                        })
 
-            return {
-                "success": True,
-                "sinks": sinks,
-                "total": len(sinks),
-                "limit": limit,
-                "has_more": len(sinks) >= limit,
-            }
+                return {
+                    "success": True,
+                    "sinks": sinks,
+                    "total": len(sinks),
+                    "limit": limit,
+                    "has_more": len(sinks) >= limit,
+                }
+
+            return _cached_taint_query(services, "find_taint_sinks", codebase_hash, cache_params, _execute)
 
         except ValidationError as e:
             logger.error(f"Error finding taint sinks: {e}")
@@ -595,37 +637,45 @@ Examples:
                 except ValueError:
                     raise ValidationError(f"Invalid line number in sink_location: {sink_location}")
 
-            # Build query
-            query = QueryLoader.load(
-                "taint_flows",
-                source_file=source_file,
-                source_line=source_line,
-                sink_file=sink_file,
-                sink_line=sink_line,
-                source_node_id=source_node_id if has_source_id else -1,
-                sink_node_id=sink_node_id if has_sink_id else -1,
-                max_results=max_results,
-            )
+            cache_params = {
+                "source_location": source_location,
+                "sink_location": sink_location,
+                "source_node_id": source_node_id if has_source_id else None,
+                "sink_node_id": sink_node_id if has_sink_id else None,
+                "max_results": max_results,
+            }
 
-            # Execute query
-            result = query_executor.execute_query(
-                codebase_hash=codebase_hash,
-                cpg_path=codebase_info.cpg_path,
-                query=query,
-                timeout=timeout,
-            )
+            def _execute():
+                query = QueryLoader.load(
+                    "taint_flows",
+                    source_file=source_file,
+                    source_line=source_line,
+                    sink_file=sink_file,
+                    sink_line=sink_line,
+                    source_node_id=source_node_id if has_source_id else -1,
+                    sink_node_id=sink_node_id if has_sink_id else -1,
+                    max_results=max_results,
+                )
 
-            if not result.success:
-                return f"Error: {result.error}"
+                result = query_executor.execute_query(
+                    codebase_hash=codebase_hash,
+                    cpg_path=codebase_info.cpg_path,
+                    query=query,
+                    timeout=timeout,
+                )
 
-            # Query returns human-readable text directly
-            if isinstance(result.data, str):
-                return result.data.strip()
-            elif isinstance(result.data, list) and len(result.data) > 0:
-                output = result.data[0] if isinstance(result.data[0], str) else str(result.data[0])
-                return output.strip()
-            else:
-                return f"Query returned unexpected format: {type(result.data)}"
+                if not result.success:
+                    return f"Error: {result.error}"
+
+                if isinstance(result.data, str):
+                    return result.data.strip()
+                elif isinstance(result.data, list) and len(result.data) > 0:
+                    output = result.data[0] if isinstance(result.data[0], str) else str(result.data[0])
+                    return output.strip()
+                else:
+                    return f"Query returned unexpected format: {type(result.data)}"
+
+            return _cached_taint_query(services, "find_taint_flows", codebase_hash, cache_params, _execute)
 
         except ValidationError as e:
             logger.error(f"Error finding taint flows: {e}")
@@ -699,45 +749,50 @@ Examples:
                 raise ValidationError(f"Invalid line number in location: {parts[1]}")
             call_name = parts[2] if len(parts) > 2 else ""
 
-            # Build comprehensive Scala query
             include_backward = direction == "backward"
             include_forward = direction == "forward"
-            
-            # Load query from external file
-            query = QueryLoader.load(
-                "program_slice",
-                filename=filename,
-                line_num=line_num,
-                use_node_id="false",
-                node_id="",
-                call_name=call_name,
-                max_depth=max_depth,
-                include_backward=str(include_backward).lower(),
-                include_forward=str(include_forward).lower(),
-                include_control_flow=str(include_control_flow).lower(),
-                direction=direction
-            )
 
-            # Execute query
-            result = query_executor.execute_query(
-                codebase_hash=codebase_hash,
-                cpg_path=codebase_info.cpg_path,
-                query=query,
-                timeout=timeout,
-            )
+            cache_params = {
+                "location": location,
+                "direction": direction,
+                "max_depth": max_depth,
+                "include_control_flow": include_control_flow,
+            }
 
-            if not result.success:
-                return f"Error: {result.error}"
+            def _execute():
+                query = QueryLoader.load(
+                    "program_slice",
+                    filename=filename,
+                    line_num=line_num,
+                    use_node_id="false",
+                    node_id="",
+                    call_name=call_name,
+                    max_depth=max_depth,
+                    include_backward=str(include_backward).lower(),
+                    include_forward=str(include_forward).lower(),
+                    include_control_flow=str(include_control_flow).lower(),
+                    direction=direction
+                )
 
-            # Query now returns human-readable text directly
-            if isinstance(result.data, str):
-                return result.data.strip()
-            elif isinstance(result.data, list) and len(result.data) > 0:
-                # Extract string from list wrapper
-                output = result.data[0] if isinstance(result.data[0], str) else str(result.data[0])
-                return output.strip()
-            else:
-                return f"Query returned unexpected format: {type(result.data)}"
+                result = query_executor.execute_query(
+                    codebase_hash=codebase_hash,
+                    cpg_path=codebase_info.cpg_path,
+                    query=query,
+                    timeout=timeout,
+                )
+
+                if not result.success:
+                    return f"Error: {result.error}"
+
+                if isinstance(result.data, str):
+                    return result.data.strip()
+                elif isinstance(result.data, list) and len(result.data) > 0:
+                    output = result.data[0] if isinstance(result.data[0], str) else str(result.data[0])
+                    return output.strip()
+                else:
+                    return f"Query returned unexpected format: {type(result.data)}"
+
+            return _cached_taint_query(services, "get_program_slice", codebase_hash, cache_params, _execute)
 
         except ValidationError as e:
             logger.error(f"Error getting program slice: {e}")
@@ -809,34 +864,40 @@ Examples:
             if not codebase_info or not codebase_info.cpg_path:
                 raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
 
-            # Load query from external file
-            query = QueryLoader.load(
-                "variable_flow",
-                filename=filename,
-                line_num=line_num,
-                variable=variable,
-                direction=direction
-            )
+            cache_params = {
+                "location": location,
+                "variable": variable,
+                "direction": direction,
+            }
 
-            # Execute the query
-            result = query_executor.execute_query(
-                codebase_hash=codebase_hash,
-                cpg_path=codebase_info.cpg_path,
-                query=query,
-                timeout=60,
-            )
+            def _execute():
+                query = QueryLoader.load(
+                    "variable_flow",
+                    filename=filename,
+                    line_num=line_num,
+                    variable=variable,
+                    direction=direction
+                )
 
-            if not result.success:
-                return f"Error: {result.error}"
+                result = query_executor.execute_query(
+                    codebase_hash=codebase_hash,
+                    cpg_path=codebase_info.cpg_path,
+                    query=query,
+                    timeout=60,
+                )
 
-            # Query returns human-readable text directly (wrapped in a list)
-            if isinstance(result.data, str):
-                return result.data.strip()
-            elif isinstance(result.data, list) and len(result.data) > 0:
-                output = result.data[0] if isinstance(result.data[0], str) else str(result.data[0])
-                return output.strip()
-            else:
-                 return f"Query returned unexpected format: {type(result.data)}"
+                if not result.success:
+                    return f"Error: {result.error}"
+
+                if isinstance(result.data, str):
+                    return result.data.strip()
+                elif isinstance(result.data, list) and len(result.data) > 0:
+                    output = result.data[0] if isinstance(result.data[0], str) else str(result.data[0])
+                    return output.strip()
+                else:
+                    return f"Query returned unexpected format: {type(result.data)}"
+
+            return _cached_taint_query(services, "get_variable_flow", codebase_hash, cache_params, _execute)
 
         except ValidationError as e:
             logger.error(f"Error getting data dependencies: {e}")
