@@ -61,7 +61,7 @@
     } else if (sinkFile.nonEmpty && sinkLine > 0) {
       cpg.call.where(_.file.name(".*" + sinkFile + "$")).lineNumber(sinkLine).l ++
       cpg.identifier.where(_.file.name(".*" + sinkFile + "$")).lineNumber(sinkLine).l ++
-      cpg.literal.where(_.file.name(".*" + sinkFile + "$")).lineNumber(sourceLine).l
+      cpg.literal.where(_.file.name(".*" + sinkFile + "$")).lineNumber(sinkLine).l
     } else {
       List()
     }
