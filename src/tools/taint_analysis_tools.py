@@ -144,6 +144,31 @@ DEFAULT_SINKS = {
 
 
 
+def _build_joern_name_pattern(patterns: list) -> str:
+    """Build a Joern .name() regex pattern from a list of function names.
+
+    Handles qualified names (e.g., 'os.system' -> 'system') since Joern's
+    .name() matches short function names, not fully qualified names.
+    """
+    short_names = []
+    for p in patterns:
+        p = p.rstrip("(")
+        # Extract short name from qualified patterns
+        # e.g., 'os.system' -> 'system', 'net/http.Request.FormValue' -> 'FormValue'
+        if "." in p:
+            short_names.append(p.rsplit(".", 1)[-1])
+        else:
+            short_names.append(p)
+    # Deduplicate while preserving order
+    seen = set()
+    unique = []
+    for name in short_names:
+        if name not in seen:
+            seen.add(name)
+            unique.append(name)
+    return "|".join(re.escape(name) for name in unique)
+
+
 def register_taint_analysis_tools(mcp, services: dict):
     """Register taint analysis MCP tools with the FastMCP server"""
 
@@ -213,10 +238,9 @@ Examples:
             if not patterns:
                 return {"success": True, "sources": [], "total": 0, "message": f"No taint sources configured for language {lang}. Supported: {', '.join(DEFAULT_SOURCES.keys())}"}
 
-            # Build Joern query searching for call names matching any pattern
-            # Remove trailing parens from patterns for proper regex matching
-            cleaned_patterns = [p.rstrip("(") for p in patterns]
-            joined = "|".join([re.escape(p) for p in cleaned_patterns])
+            # Build Joern .name() regex from patterns, extracting short names
+            # from qualified patterns (e.g., 'os.system' -> 'system')
+            joined = _build_joern_name_pattern(patterns)
             
             # Build query with optional file filter
             if filename:
@@ -339,9 +363,9 @@ Examples:
             if not patterns:
                 return {"success": True, "sinks": [], "total": 0, "message": f"No taint sinks configured for language {lang}. Supported: {', '.join(DEFAULT_SINKS.keys())}"}
 
-            # Remove trailing parens from patterns for proper regex matching
-            cleaned_patterns = [p.rstrip("(") for p in patterns]
-            joined = "|".join([re.escape(p) for p in cleaned_patterns])
+            # Build Joern .name() regex from patterns, extracting short names
+            # from qualified patterns (e.g., 'os.system' -> 'system')
+            joined = _build_joern_name_pattern(patterns)
             
             # Build query with optional file filter
             if filename:
