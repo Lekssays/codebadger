@@ -58,8 +58,20 @@
             val callLine = call.lineNumber.getOrElse(-1)
             if (callLine > freeLine && !call.name.matches("free|cfree|g_free|xmlFree|xsltFree.*")) {
               val reassignedBefore = reassignmentLines.exists(rl => rl > freeLine && rl < callLine)
-              if (!reassignedBefore) {
-                val argsContainPtr = call.argument.code.l.exists { argCode =>
+              
+              // Check for early return between free and usage
+              val hasEarlyReturn = method.call.name("return").l.exists { ret =>
+                val retLine = ret.lineNumber.getOrElse(-1)
+                retLine > freeLine && retLine < callLine
+              }
+              
+              if (!reassignedBefore && !hasEarlyReturn) {
+                val relevantArgs = call.argument.l.filterNot { arg =>
+                  call.name == "<operator>.assignment" && arg.argumentIndex == 1 && arg.code == freedPtr
+                }
+
+                val argsContainPtr = relevantArgs.exists { arg =>
+                  val argCode = arg.code
                   argCode == freedPtr || 
                   argCode.startsWith(freedPtr + "->") ||
                   argCode.startsWith(freedPtr + "[") ||
@@ -142,16 +154,17 @@
                       case _ => "?"
                     }
                     
-                    // Only add cross-function flows
-                    if (sinkMethod != methodName || sinkFile != freeFile) {
-                      val pathMethods = elements.flatMap { elem =>
+                    val pathMethods = elements.flatMap { elem =>
                         elem match {
                           case c: Call => Some(c.method.name)
                           case i: Identifier => Some(i.method.name)
                           case _ => None
                         }
                       }.distinct.take(4)
-                      
+
+                    // Only add cross-function flows that don't enter the deallocator itself
+                    val calledMethodName = freeCall.name
+                    if ((sinkMethod != methodName || sinkFile != freeFile) && !pathMethods.contains(calledMethodName)) {
                       val flowType = if (pathMethods.size > 2) "deep-interproc" else "interproc"
                       val pathStr = pathMethods.mkString(" -> ")
                       
@@ -200,9 +213,9 @@
             case other if other.startsWith("alias") => s" [$other]"
             case _ => ""
           }
-          output.append(s"  [L$line] $codeSnippet$flowTag\n")
-          if (usageMethod != methodName || file != freeFile) {
-            output.append(s"           in $usageMethod() at $file\n")
+          output.append(s"  [$file:$line] $codeSnippet$flowTag\n")
+          if (usageMethod != methodName) {
+            output.append(s"           in $usageMethod()\n")
           }
         }
         
