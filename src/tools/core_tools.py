@@ -27,9 +27,33 @@ from ..utils.validators import (
 logger = logging.getLogger(__name__)
 
 
-def get_cpg_cache_key(source_type: str, source_path: str, language: str) -> str:
+def _get_git_commit_hash(path: str) -> Optional[str]:
     """
-    Generate a deterministic CPG cache key based on source type, path, and language.
+    Get the current git commit hash for a path if it's in a git repo.
+    """
+    try:
+        import subprocess
+        # Check if it is a git repo
+        if not os.path.exists(os.path.join(path, ".git")):
+             # It might be a subdirectory of a git repo
+             pass
+
+        # Run git rev-parse HEAD
+        process = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=path,
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        commit_hash = process.stdout.strip()
+        return commit_hash
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return None
+
+def get_cpg_cache_key(source_type: str, source_path: str, language: str, commit_hash: Optional[str] = None) -> str:
+    """
+    Generate a deterministic CPG cache key based on source type, path, language, and optional commit hash.
     """
     if source_type == "github":
         # Extract owner/repo from GitHub URL
@@ -47,6 +71,9 @@ def get_cpg_cache_key(source_type: str, source_path: str, language: str) -> str:
         # For local paths, use absolute path
         source_path = os.path.abspath(source_path)
         identifier = f"local:{source_path}:{language}"
+
+    if commit_hash:
+        identifier += f":{commit_hash}"
 
     hash_digest = hashlib.sha256(identifier.encode()).hexdigest()[:16]
     return hash_digest
@@ -293,8 +320,19 @@ Examples:
 
             codebase_tracker = services["codebase_tracker"]
 
+            # Try to get git commit hash for local repos
+            commit_hash = None
+            if source_type == "local":
+                 try:
+                     RESOLVED_PATH = resolve_host_path(source_path)
+                     commit_hash = _get_git_commit_hash(RESOLVED_PATH)
+                     if commit_hash:
+                         logger.info(f"Detected git commit hash: {commit_hash}")
+                 except Exception as e:
+                     logger.warning(f"Failed to get git commit hash: {e}")
+
             # Generate CPG cache key (codebase_hash)
-            codebase_hash = get_cpg_cache_key(source_type, source_path, language)
+            codebase_hash = get_cpg_cache_key(source_type, source_path, language, commit_hash)
             logger.info(f"Processing codebase with hash: {codebase_hash}")
 
             # Check if codebase already exists in DB
