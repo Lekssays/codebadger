@@ -63,11 +63,20 @@
             val visited = mutable.Set[String]()
             val dataDepsList = mutable.ListBuffer[(Int, String, String, String, List[String])]()
             
-            def backwardTrace(varName: String, beforeLine: Int, depth: Int): Unit = {
-              if (depth <= 0 || visited.contains(s"$varName:$beforeLine")) return
-              visited.add(s"$varName:$beforeLine")
+            // Define recursive function with explicit method context
+            def backwardTrace(currMethod: io.shiftleft.codepropertygraph.generated.nodes.Method, 
+                              varName: String, 
+                              beforeLine: Int, 
+                              depth: Int): Unit = {
+                              
+              val methodId = currMethod.fullName
+              val uniqueId = s"$methodId:$varName:$beforeLine"
               
-              method.assignment
+              if (depth <= 0 || visited.contains(uniqueId)) return
+              visited.add(uniqueId)
+              
+              // 1. Local Assignments in current method
+              currMethod.assignment
                 .filter(a => a.lineNumber.getOrElse(0) > 0 && a.lineNumber.getOrElse(0) < beforeLine)
                 .filter(a => a.target.code == varName || a.target.code.startsWith(varName + "[") || a.target.code.startsWith(varName + "->"))
                 .l
@@ -75,11 +84,33 @@
                   val rhsVars = assign.source.ast.isIdentifier.name.l.distinct.filter(_ != varName)
                   val assignFile = assign.file.name.headOption.getOrElse("unknown")
                   dataDepsList += ((assign.lineNumber.getOrElse(-1), assignFile, varName, assign.code, rhsVars))
-                  rhsVars.foreach(v => backwardTrace(v, assign.lineNumber.getOrElse(0), depth - 1))
+                  rhsVars.foreach(v => backwardTrace(currMethod, v, assign.lineNumber.getOrElse(0), depth - 1))
                 }
+                
+              // 2. Inter-procedural: If varName is a parameter, trace to Callers
+              val params = currMethod.parameter.filter(_.name == varName).l
+              if (params.nonEmpty) {
+                params.foreach { param =>
+                  // Check all calls to this method
+                  currMethod.callIn.foreach { call =>
+                     val callerMethod = call.method
+                     // Find argument at the same index
+                     call.argument.filter(_.argumentIndex == param.order).foreach { arg =>
+                       val argVars = arg.ast.isIdentifier.name.l.distinct
+                       if (argVars.nonEmpty) {
+                         val callFile = call.file.name.headOption.getOrElse("unknown")
+                         val callLine = call.lineNumber.getOrElse(-1)
+                         dataDepsList += ((callLine, callFile, varName, s"Passed as arg to ${currMethod.name}", argVars))
+                         // Recurse into caller
+                         argVars.foreach(v => backwardTrace(callerMethod, v, callLine, depth - 1))
+                       }
+                     }
+                  }
+                }
+              }
             }
             
-            argVars.foreach(v => backwardTrace(v, targetLine, maxDepth))
+            argVars.foreach(v => backwardTrace(method, v, targetLine, maxDepth))
             
             val sortedDeps = dataDepsList.toList.distinct.sortBy(_._1)
             val backwardCount = sortedDeps.size
@@ -88,22 +119,27 @@
             
             if (sortedDeps.nonEmpty) {
               output.append("\n  Data Dependencies:\n")
-              sortedDeps.foreach { case (line, file, varName, code, deps) =>
-                val lineInfo = if (line != -1) s"[$file:$line]" else "[Local]"
-                output.append(s"    $lineInfo $varName: $code\n")
-                if (deps.nonEmpty) output.append(s"      <- depends on: ${deps.mkString(", ")}\n")
+              // Group by file for better readability
+              sortedDeps.groupBy(_._2).foreach { case (file, deps) =>
+                 output.append(s"  File: $file\n")
+                 deps.sortBy(_._1).foreach { case (line, _, varName, code, deps) =>
+                   val lineInfo = if (line != -1) s"[$line]" else "[Local]"
+                   output.append(s"    $lineInfo $varName: $code\n")
+                   if (deps.nonEmpty) output.append(s"      <- depends on: ${deps.mkString(", ")}\n")
+                 }
               }
             }
             
-            // Control dependencies
+            // Control dependencies (Local only for now to avoid explosion, or could trace back)
             if (includeControlFlow) {
+               // We only show control deps for the target method to keep it readable
               val controlDeps = method.controlStructure
                 .filter(c => c.lineNumber.getOrElse(0) > 0 && c.lineNumber.getOrElse(0) < targetLine)
                 .map(ctrl => (ctrl.lineNumber.getOrElse(-1), ctrl.file.name.headOption.getOrElse("unknown"), ctrl.controlStructureType, ctrl.condition.code.headOption.getOrElse(ctrl.code.take(60))))
                 .l.distinct.take(30)
               
               if (controlDeps.nonEmpty) {
-                output.append("\n  Control Dependencies:\n")
+                output.append("\n  Control Dependencies (Target Method):\n")
                 controlDeps.foreach { case (line, file, ctrlType, cond) =>
                   output.append(s"    [$file:$line] $ctrlType: $cond\n")
                 }
@@ -128,20 +164,42 @@
             val forwardVisited = mutable.Set[String]()
             val propagationsList = mutable.ListBuffer[(Int, String, String, String, String)]()
             
-            def forwardTrace(varName: String, afterLine: Int, depth: Int): Unit = {
-              if (depth <= 0 || forwardVisited.contains(s"$varName:$afterLine")) return
-              forwardVisited.add(s"$varName:$afterLine")
+            def forwardTrace(currMethod: io.shiftleft.codepropertygraph.generated.nodes.Method, 
+                             varName: String, 
+                             afterLine: Int, 
+                             depth: Int): Unit = {
+                             
+              val methodId = currMethod.fullName
+              val uniqueId = s"$methodId:$varName:$afterLine"
               
-              method.call
+              if (depth <= 0 || forwardVisited.contains(uniqueId)) return
+              forwardVisited.add(uniqueId)
+              
+              // 1. Local Usage & Propagation
+              // usages in calls
+              currMethod.call
                 .filter(c => c.lineNumber.getOrElse(0) > afterLine)
                 .filter(c => c.argument.code.l.exists(_.contains(varName)))
                 .l.take(15)
                 .foreach { call =>
                   val callFile = call.file.name.headOption.getOrElse("unknown")
                   propagationsList += ((call.lineNumber.getOrElse(-1), callFile, "usage", varName, call.code))
+                  
+                  // 2. Inter-procedural: If passed to a call, trace into Callee
+                  call.argument.filter(_.code.contains(varName)).foreach { arg =>
+                     call.callee.foreach { calleeMethod =>
+                        // partial match on index
+                        calleeMethod.parameter.filter(_.order == arg.argumentIndex).foreach { param =>
+                            val paramName = param.name
+                            propagationsList += ((calleeMethod.lineNumber.getOrElse(-1), calleeMethod.file.name.headOption.getOrElse("unknown"), "passed_to_func", varName, s"Passed to ${calleeMethod.name} as $paramName"))
+                            forwardTrace(calleeMethod, paramName, calleeMethod.lineNumber.getOrElse(0), depth - 1)
+                        }
+                     }
+                  }
                 }
               
-              method.assignment
+              // assignments
+              currMethod.assignment
                 .filter(a => a.lineNumber.getOrElse(0) > afterLine)
                 .filter(a => a.source.code.contains(varName))
                 .l.take(15)
@@ -149,11 +207,11 @@
                   val targetVar = assign.target.code
                   val assignFile = assign.file.name.headOption.getOrElse("unknown")
                   propagationsList += ((assign.lineNumber.getOrElse(-1), assignFile, "propagation", varName, assign.code))
-                  if (targetVar != varName) forwardTrace(targetVar, assign.lineNumber.getOrElse(0), depth - 1)
+                  if (targetVar != varName) forwardTrace(currMethod, targetVar, assign.lineNumber.getOrElse(0), depth - 1)
                 }
             }
             
-            resultVars.foreach(v => forwardTrace(v, targetLine, maxDepth))
+            resultVars.foreach(v => forwardTrace(method, v, targetLine, maxDepth))
             
             val sortedProps = propagationsList.toList.distinct.sortBy(_._1)
             val forwardCount = sortedProps.size
@@ -166,13 +224,15 @@
             
             if (sortedProps.nonEmpty) {
               output.append("\n  Propagations:\n")
-              sortedProps.foreach { case (line, file, propType, varName, code) =>
-                val lineInfo = s"[$file:$line]"
-                output.append(s"    $lineInfo $propType ($varName): $code\n")
-              }
+               sortedProps.groupBy(_._2).foreach { case (file, props) =>
+                 output.append(s"  File: $file\n")
+                 props.sortBy(_._1).foreach { case (line, _, propType, varName, code) =>
+                   output.append(s"    [$line] $propType ($varName): $code\n")
+                 }
+               }
             }
             
-            // Control flow affected
+            // Control flow affected (Target Method only)
             if (includeControlFlow) {
               val controlAffected = method.controlStructure
                 .filter(c => c.lineNumber.getOrElse(0) > targetLine)
@@ -181,7 +241,7 @@
                 .l.distinct.take(20)
               
               if (controlAffected.nonEmpty) {
-                output.append("\n  Control Flow Affected:\n")
+                output.append("\n  Control Flow Affected (Target Method):\n")
                 controlAffected.foreach { case (line, file, ctrlType, cond) =>
                   output.append(s"    [$file:$line] $ctrlType: $cond\n")
                 }
