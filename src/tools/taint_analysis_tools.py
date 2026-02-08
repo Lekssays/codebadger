@@ -1028,3 +1028,94 @@ Examples:
         except Exception as e:
             logger.error(f"Unexpected error: {e}", exc_info=True)
             return f"Internal Error: {str(e)}"
+
+    @mcp.tool(
+        description="""Detect Use-After-Free vulnerabilities by finding free(ptr) calls where ptr is used afterward.
+
+Analyzes the codebase for potential UAF issues using three-phase detection:
+1. **Intraprocedural**: Finds usages of freed pointers within the same function
+2. **Pointer Aliasing**: Tracks p2 = ptr; free(ptr); use(p2) patterns
+3. **Deep Interprocedural**: Uses Joern's reachableByFlows() to track freed pointers
+   across MULTIPLE function call levels (e.g., main -> func1 -> func2 -> usage)
+
+Supports free() variants: free, cfree, g_free, xmlFree, xsltFree*
+
+Args:
+    codebase_hash: The codebase hash from generate_cpg.
+    filename: Optional filename regex to filter results (e.g., 'runtest.c').
+    limit: Maximum results to return (default 100).
+    timeout: Query timeout in seconds (default 180, higher due to dataflow analysis).
+
+Returns:
+    Human-readable text showing:
+    - Each potential UAF issue with free site location
+    - The freed pointer name
+    - List of post-free usages with line numbers and flow type tags
+    - For interprocedural flows: the call path (e.g., "main -> func1 -> func2")
+
+Notes:
+    - Uses line-number ordering for intraprocedural analysis rather than full
+      control-flow dominator analysis. This may cause FALSE POSITIVES when:
+      * free() and usage are in different conditional branches
+        (e.g., error path free vs normal path usage)
+      * The free() is in a return path that exits before the usage
+    - Deep interprocedural analysis can be slow (~2 min for large codebases).
+    - Use get_program_slice to understand control flow around specific locations.
+    - Use find_taint_flows for alternative dataflow analysis approach."""
+    )
+    def find_use_after_free(
+        codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
+        filename: Annotated[Optional[str], Field(description="Optional filename regex to filter results")] = None,
+        limit: Annotated[int, Field(description="Maximum results to return")] = 100,
+        timeout: Annotated[int, Field(description="Query timeout in seconds")] = 120,
+    ) -> str:
+        """Detect potential Use-After-Free vulnerabilities in the codebase."""
+        try:
+            validate_codebase_hash(codebase_hash)
+
+            codebase_tracker = services["codebase_tracker"]
+            query_executor = services["query_executor"]
+
+            # Verify CPG exists
+            codebase_info = codebase_tracker.get_codebase(codebase_hash)
+            if not codebase_info or not codebase_info.cpg_path:
+                raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
+
+            cache_params = {
+                "filename": filename,
+                "limit": limit,
+            }
+
+            def _execute():
+                query = QueryLoader.load(
+                    "use_after_free",
+                    filename=filename or "",
+                    limit=limit,
+                )
+
+                result = query_executor.execute_query(
+                    codebase_hash=codebase_hash,
+                    cpg_path=codebase_info.cpg_path,
+                    query=query,
+                    timeout=timeout,
+                )
+
+                if not result.success:
+                    return f"Error: {result.error}"
+
+                if isinstance(result.data, str):
+                    return result.data.strip()
+                elif isinstance(result.data, list) and len(result.data) > 0:
+                    output = result.data[0] if isinstance(result.data[0], str) else str(result.data[0])
+                    return output.strip()
+                else:
+                    return f"Query returned unexpected format: {type(result.data)}"
+
+            return _cached_taint_query(services, "find_use_after_free", codebase_hash, cache_params, _execute)
+
+        except ValidationError as e:
+            logger.error(f"Error detecting use-after-free: {e}")
+            return f"Validation Error: {str(e)}"
+        except Exception as e:
+            logger.error(f"Unexpected error detecting use-after-free: {e}", exc_info=True)
+            return f"Internal Error: {str(e)}"
