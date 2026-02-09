@@ -1205,3 +1205,94 @@ Returns:
         except Exception as e:
             logger.error(f"Unexpected error detecting double-free: {e}", exc_info=True)
             return f"Internal Error: {str(e)}"
+
+    @mcp.tool(
+        description="""Detect Null Pointer Dereference vulnerabilities (CWE-476) by finding unchecked return values from allocation functions.
+
+Analyzes the codebase for cases where:
+1. **Unchecked malloc/calloc/realloc**: ptr = malloc(n); ptr->field = value; without NULL check
+2. **Unchecked fopen/strdup/mmap**: Functions that can return NULL on failure
+3. **Missing NULL guards**: Pointer dereference without prior if(ptr != NULL) check
+
+Filters out false positives:
+- Dereferences guarded by if(ptr != NULL) or if(!ptr) checks
+- Dereferences after early return/exit/abort on NULL
+- Pointer reassignments between allocation and use
+- Safe wrapper allocators (xmalloc, g_malloc, etc.) that guarantee non-NULL
+
+Allocation functions checked: malloc, calloc, realloc, strdup, strndup, aligned_alloc,
+reallocarray, fopen, fdopen, freopen, tmpfile, popen, dlopen, mmap,
+xmlMalloc, xmlMallocAtomic, xmlRealloc, xmlStrdup, xmlStrndup
+
+Args:
+    codebase_hash: The codebase hash from generate_cpg.
+    filename: Optional filename regex to filter results (e.g., 'parser.c').
+    limit: Maximum results to return (default 100).
+    timeout: Query timeout in seconds (default 120).
+
+Returns:
+    Human-readable text showing:
+    - Each potential null pointer dereference with allocation site [file:line]
+    - The assigned pointer name
+    - List of unchecked dereferences with [file:line] and type tags
+
+Notes:
+    - Focuses on intraprocedural analysis for accuracy.
+    - Use get_program_slice for deeper control-flow context around specific locations."""
+    )
+    def find_null_pointer_deref(
+        codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
+        filename: Annotated[Optional[str], Field(description="Optional filename regex to filter results")] = None,
+        limit: Annotated[int, Field(description="Maximum results to return")] = 100,
+        timeout: Annotated[int, Field(description="Query timeout in seconds")] = 120,
+    ) -> str:
+        """Detect potential Null Pointer Dereference vulnerabilities in the codebase."""
+        try:
+            validate_codebase_hash(codebase_hash)
+
+            codebase_tracker = services["codebase_tracker"]
+            query_executor = services["query_executor"]
+
+            # Verify CPG exists
+            codebase_info = codebase_tracker.get_codebase(codebase_hash)
+            if not codebase_info or not codebase_info.cpg_path:
+                raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
+
+            cache_params = {
+                "filename": filename,
+                "limit": limit,
+            }
+
+            def _execute():
+                query = QueryLoader.load(
+                    "null_pointer_deref",
+                    filename=filename or "",
+                    limit=limit,
+                )
+
+                result = query_executor.execute_query(
+                    codebase_hash=codebase_hash,
+                    cpg_path=codebase_info.cpg_path,
+                    query=query,
+                    timeout=timeout,
+                )
+
+                if not result.success:
+                    return f"Error: {result.error}"
+
+                if isinstance(result.data, str):
+                    return result.data.strip()
+                elif isinstance(result.data, list) and len(result.data) > 0:
+                    output = result.data[0] if isinstance(result.data[0], str) else str(result.data[0])
+                    return output.strip()
+                else:
+                    return f"Query returned unexpected format: {type(result.data)}"
+
+            return _cached_taint_query(services, "find_null_pointer_deref", codebase_hash, cache_params, _execute)
+
+        except ValidationError as e:
+            logger.error(f"Error detecting null pointer dereference: {e}")
+            return f"Validation Error: {str(e)}"
+        except Exception as e:
+            logger.error(f"Unexpected error detecting null pointer dereference: {e}", exc_info=True)
+            return f"Internal Error: {str(e)}"

@@ -28,6 +28,7 @@ CWE_MAP = {
     "use_after_free": 416,
     "double_free": 415,
     "buffer_overflow": 120,
+    "null_pointer_deref": 476,
 }
 
 # Severity ordering for filtering
@@ -234,6 +235,69 @@ class FindingsParser:
 
             except (ValueError, AttributeError) as e:
                 logger.debug(f"Failed to parse double-free issue: {e}")
+                continue
+
+        return findings
+
+    @staticmethod
+    def parse_null_pointer_deref_text(text: str, codebase_hash: str) -> List[Dict[str, Any]]:
+        """Parse null pointer dereference analysis output.
+
+        Args:
+            text: Raw text output from find_null_pointer_deref
+            codebase_hash: The codebase hash
+
+        Returns:
+            List of finding dictionaries
+        """
+        findings = []
+
+        # Split by issue markers
+        issue_pattern = r"--- Issue (\d+) ---"
+        issue_blocks = re.split(issue_pattern, text)
+
+        for i in range(1, len(issue_blocks), 2):
+            issue_text = issue_blocks[i + 1] if i + 1 < len(issue_blocks) else ""
+
+            try:
+                # Extract allocation site location
+                alloc_match = re.search(r"Allocation Site:.*?\n.*?Location: ([^:]+):(\d+)", issue_text)
+                if not alloc_match:
+                    continue
+
+                alloc_file = alloc_match.group(1)
+                alloc_line = int(alloc_match.group(2))
+
+                # Extract first dereference location
+                deref_match = re.search(r"Unchecked Dereference.*?\n\s*\[([^:]+):(\d+)\]", issue_text)
+                if not deref_match:
+                    deref_file = alloc_file
+                    deref_line = alloc_line + 1
+                else:
+                    deref_file = deref_match.group(1)
+                    deref_line = int(deref_match.group(2))
+
+                # Create finding
+                finding = {
+                    "codebase_hash": codebase_hash,
+                    "finding_type": "null_pointer_deref",
+                    "severity": "high",
+                    "confidence": "high",
+                    "filename": deref_file,
+                    "line_number": deref_line,
+                    "message": f"Null pointer dereference: allocated at {alloc_file}:{alloc_line}, dereferenced unchecked at {deref_file}:{deref_line}",
+                    "description": f"Pointer from allocation at {alloc_file}:{alloc_line} is dereferenced without NULL check",
+                    "cwe_id": CWE_MAP["null_pointer_deref"],
+                    "rule_id": "null_pointer_deref",
+                    "flow_data": {
+                        "allocation_location": {"file": alloc_file, "line": alloc_line},
+                        "dereference_location": {"file": deref_file, "line": deref_line},
+                    },
+                }
+                findings.append(finding)
+
+            except (ValueError, AttributeError) as e:
+                logger.debug(f"Failed to parse null pointer deref issue: {e}")
                 continue
 
         return findings
@@ -505,6 +569,7 @@ class SARIFBuilder:
             "use_after_free": "Ensure memory is not accessed after being freed. Use memory-safe patterns and tools.",
             "double_free": "Track object lifetimes carefully. Use smart pointers and RAII patterns to prevent double-free.",
             "buffer_overflow": "Use bounds-checking functions and safe string operations. Avoid strcpy, sprintf, etc.",
+            "null_pointer_deref": "Always check return values of malloc/calloc/realloc/fopen for NULL before dereferencing. Use wrapper functions that abort on allocation failure, or handle the error path explicitly.",
         }
         return remediation_map.get(rule_id, "Review and fix the identified security issue.")
 
@@ -516,7 +581,7 @@ def register_export_tools(mcp, services: dict):
         description="""Parse and store vulnerability findings in database.
 
 Parses raw output from CodeBadger analysis tools (find_taint_flows,
-find_use_after_free, find_double_free) and stores structured findings
+find_use_after_free, find_double_free, find_null_pointer_deref) and stores structured findings
 in the database for later export or querying.
 
 Args:
@@ -525,7 +590,8 @@ Args:
                    Format: {
                        "taint_flows": "<text from find_taint_flows>",
                        "use_after_free": "<text from find_use_after_free>",
-                       "double_free": "<text from find_double_free>"
+                       "double_free": "<text from find_double_free>",
+                       "null_pointer_deref": "<text from find_null_pointer_deref>"
                    }
     replace_existing: If true, delete existing findings for this codebase first.
                       Default: false (append mode)
@@ -616,6 +682,18 @@ Notes:
                 except Exception as e:
                     errors.append(f"Double-free parsing error: {str(e)}")
                     logger.error(f"Error parsing double-free: {e}")
+
+            # Parse null pointer dereferences
+            if findings_data.get("null_pointer_deref"):
+                try:
+                    npd = FindingsParser.parse_null_pointer_deref_text(
+                        findings_data["null_pointer_deref"], codebase_hash
+                    )
+                    findings_to_store.extend(npd)
+                    logger.info(f"Parsed {len(npd)} null pointer dereference findings")
+                except Exception as e:
+                    errors.append(f"Null pointer deref parsing error: {str(e)}")
+                    logger.error(f"Error parsing null pointer deref: {e}")
 
             # Save findings to database
             if findings_to_store:
