@@ -264,8 +264,8 @@ async def _generate_cpg_async(
                 codebase_hash=codebase_hash,
                 metadata={"status": "failed", "error": str(e)}
             )
-        except:
-            pass
+        except Exception as tracker_error:
+            logger.error(f"Failed to update codebase status in error handler: {tracker_error}")
 
 
 def register_core_tools(mcp, services: dict):

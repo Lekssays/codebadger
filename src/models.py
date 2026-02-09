@@ -55,12 +55,15 @@ class CodebaseInfo:
     def from_dict(cls, data: Dict[str, Any]) -> "CodebaseInfo":
         """Create codebase info from dictionary"""
         import json
+        import logging
+        logger = logging.getLogger(__name__)
         # Parse metadata if it's a JSON string
         metadata = data.get("metadata", {})
         if isinstance(metadata, str):
             try:
                 metadata = json.loads(metadata)
-            except:
+            except json.JSONDecodeError as e:
+                logger.warning(f"Failed to parse metadata JSON: {e}. Using empty dict.")
                 metadata = {}
         
         return cls(

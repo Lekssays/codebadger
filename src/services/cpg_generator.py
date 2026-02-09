@@ -244,22 +244,6 @@ class CPGGenerator:
         
         return host_path
 
-    def _exec_command_async(self, cmd_args: list, env: dict) -> str:
-        """Execute command synchronously using subprocess"""
-        def _exec_sync():
-            result = subprocess.run(
-                cmd_args,
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=self.config.cpg.generation_timeout
-            )
-            # Combine stdout and stderr
-            output = result.stdout + result.stderr
-            return output
-
-        return _exec_sync()
-
     def _exec_command_sync(self, cmd_args: list, env: dict, timeout: int) -> str:
         """Execute command synchronously INSIDE Docker container with timeout"""
         # Get the container name from environment or use default
@@ -304,34 +288,6 @@ class CPGGenerator:
         except Exception as e:
             logger.error(f"Error executing docker exec: {e}")
             raise
-
-    def _validate_cpg_async(self, cpg_path: str) -> bool:
-        """Validate that CPG file was created successfully and is not empty"""
-        try:
-            # Check if file exists
-            if not os.path.exists(cpg_path):
-                logger.error(f"CPG file not found: {cpg_path}")
-                return False
-
-            # Check file size
-            file_size = os.path.getsize(cpg_path)
-            min_cpg_size = 1024  # 1KB minimum
-
-            if file_size < min_cpg_size:
-                logger.error(
-                    f"CPG file is too small ({file_size} bytes), likely empty or corrupted. "
-                    f"Minimum expected size: {min_cpg_size} bytes"
-                )
-                return False
-
-            logger.info(
-                f"CPG file created successfully: {cpg_path} (size: {file_size} bytes)"
-            )
-            return True
-
-        except Exception as e:
-            logger.error(f"CPG validation failed: {e}")
-            return False
 
     def _validate_cpg(self, cpg_path: str) -> bool:
         """Validate that CPG file was created successfully and is not empty"""

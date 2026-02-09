@@ -250,7 +250,7 @@ class JoernServerManager:
     def terminate_all_servers(self) -> None:
         """Terminate all running Joern servers"""
         logger.info("Terminating all Joern servers")
-        codebases = list(self._processes.keys())
+        codebases = list(self._exec_ids.keys())
         for codebase_hash in codebases:
             self.terminate_server(codebase_hash)
         logger.info("All Joern servers terminated")

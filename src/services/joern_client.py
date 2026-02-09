@@ -160,8 +160,8 @@ class JoernServerClient:
                         if verify_result.get("success"):
                             logger.info("CPG verification successful - CPG was loaded despite connection error")
                             return True
-                    except:
-                        pass
+                    except Exception as verify_error:
+                        logger.warning(f"CPG verification failed after connection error: {verify_error}")
                 
                 logger.error(f"Failed to load CPG from {cpg_path}: {error_msg}")
                 return False
@@ -175,8 +175,8 @@ class JoernServerClient:
                 if verify_result.get("success"):
                     logger.info("CPG verification successful - CPG was loaded despite exception")
                     return True
-            except:
-                pass
+            except Exception as verify_error:
+                logger.warning(f"CPG verification failed after exception: {verify_error}")
             return False
 
 
