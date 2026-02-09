@@ -216,7 +216,8 @@ class JoernServerManager:
             result = sock.connect_ex(('localhost', port))
             sock.close()
             return result == 0
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Failed to check server status for {codebase_hash} on port {port}: {e}")
             return False
 
     def terminate_server(self, codebase_hash: str) -> bool:
@@ -301,11 +302,9 @@ class JoernServerManager:
                             return True
                     except Exception as e:
                         logger.debug(f"HTTP check failed: {e}")
-                        pass
 
             except Exception as e:
                 logger.debug(f"Connection check failed: {e}")
-                pass
 
             time.sleep(1)
 

@@ -76,3 +76,12 @@ class PortManager:
         """Get the count of available ports"""
         with self._lock:
             return len(self._available_ports)
+
+    def release_all_ports(self) -> None:
+        """Release all allocated ports - used during graceful shutdown"""
+        with self._lock:
+            released_count = len(self._session_to_port)
+            self._available_ports.update(self._session_to_port.values())
+            self._session_to_port.clear()
+            self._port_to_session.clear()
+            logger.info(f"Released all {released_count} allocated ports")

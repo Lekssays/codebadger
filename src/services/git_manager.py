@@ -61,7 +61,7 @@ class GitManager:
         self.repos_dir = os.path.join(workspace_root, "repos")
         os.makedirs(self.repos_dir, exist_ok=True)
 
-    def clone_repository(
+    async def clone_repository(
         self,
         repo_url: str,
         target_path: str,
@@ -86,7 +86,7 @@ class GitManager:
 
             # Clone in a thread pool (git operations are blocking)
             loop = asyncio.get_event_loop()
-            loop.run_in_executor(
+            await loop.run_in_executor(
                 None, self._do_clone, auth_url, source_path, branch
             )
 
