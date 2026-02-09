@@ -584,3 +584,132 @@ Edges:
             assert result_dict["calls"][0]["is_macro"] is True
             # printf should not be a macro
             assert result_dict["calls"][1]["is_macro"] is False
+
+    @pytest.mark.asyncio
+    async def test_discover_fixed_vulnerabilities_success(self, mock_services, tmp_path):
+        """Test discovering vulnerability fixes from git history"""
+        from src.tools.code_browsing_tools import register_code_browsing_tools
+        from src.models import CodebaseInfo
+        import subprocess
+
+        # Create a temporary git repo with security-related commits
+        repo_dir = tmp_path / "test_repo"
+        repo_dir.mkdir()
+
+        # Initialize git repo
+        subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_dir, check=True, capture_output=True)
+
+        # Create files and commit with security-related message
+        (repo_dir / "parser.c").write_text("int parse() { return 0; }")
+        subprocess.run(["git", "add", "."], cwd=repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "Fix buffer overflow in parser"], cwd=repo_dir, check=True, capture_output=True)
+
+        # Another security commit
+        (repo_dir / "auth.c").write_text("int auth() { return 1; }")
+        subprocess.run(["git", "add", "."], cwd=repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "CVE-2023-1234: Patch SQL injection"], cwd=repo_dir, check=True, capture_output=True)
+
+        # Non-security commit
+        (repo_dir / "README.md").write_text("# Test")
+        subprocess.run(["git", "add", "."], cwd=repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "Update documentation"], cwd=repo_dir, check=True, capture_output=True)
+
+        # Configure codebase tracker
+        mock_services["codebase_tracker"].get_codebase.return_value = CodebaseInfo(
+            codebase_hash="553642871dd4251d",
+            source_type="local",
+            source_path=str(repo_dir),
+            language="c",
+            cpg_path="/tmp/test.cpg",
+        )
+
+        mcp = FastMCP("TestServer")
+        register_code_browsing_tools(mcp, mock_services)
+
+        async with Client(mcp) as client:
+            result = await client.call_tool("discover_fixed_vulnerabilities", {
+                "codebase_hash": "553642871dd4251d",
+                "limit": 100
+            })
+            text_result = result.content[0].text
+
+            # Should find security-related commits
+            assert "Discovered Vulnerability Fixes" in text_result
+            assert "buffer overflow" in text_result.lower()
+            assert "CVE-2023-1234" in text_result
+            # Should not include the documentation commit
+            assert "Update documentation" not in text_result
+            # Should show affected files
+            assert "parser.c" in text_result or "auth.c" in text_result
+
+    @pytest.mark.asyncio
+    async def test_discover_fixed_vulnerabilities_no_matches(self, mock_services, tmp_path):
+        """Test when no security commits are found"""
+        from src.tools.code_browsing_tools import register_code_browsing_tools
+        from src.models import CodebaseInfo
+        import subprocess
+
+        # Create a temporary git repo without security-related commits
+        repo_dir = tmp_path / "clean_repo"
+        repo_dir.mkdir()
+
+        subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_dir, check=True, capture_output=True)
+
+        (repo_dir / "main.c").write_text("int main() { return 0; }")
+        subprocess.run(["git", "add", "."], cwd=repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=repo_dir, check=True, capture_output=True)
+
+        mock_services["codebase_tracker"].get_codebase.return_value = CodebaseInfo(
+            codebase_hash="553642871dd4251e",
+            source_type="local",
+            source_path=str(repo_dir),
+            language="c",
+            cpg_path="/tmp/test.cpg",
+        )
+
+        mcp = FastMCP("TestServer")
+        register_code_browsing_tools(mcp, mock_services)
+
+        async with Client(mcp) as client:
+            result = await client.call_tool("discover_fixed_vulnerabilities", {
+                "codebase_hash": "553642871dd4251e"
+            })
+            text_result = result.content[0].text
+
+            assert "No commits matching vulnerability patterns were found" in text_result
+            assert "CPG-based tools for comprehensive security analysis" in text_result
+
+    @pytest.mark.asyncio
+    async def test_discover_fixed_vulnerabilities_no_git_repo(self, mock_services, tmp_path):
+        """Test error handling when source is not a git repository"""
+        from src.tools.code_browsing_tools import register_code_browsing_tools
+        from src.models import CodebaseInfo
+
+        # Create a directory without git
+        source_dir = tmp_path / "no_git"
+        source_dir.mkdir()
+        (source_dir / "main.c").write_text("int main() { return 0; }")
+
+        mock_services["codebase_tracker"].get_codebase.return_value = CodebaseInfo(
+            codebase_hash="553642871dd4251f",
+            source_type="local",
+            source_path=str(source_dir),
+            language="c",
+            cpg_path="/tmp/test.cpg",
+        )
+
+        mcp = FastMCP("TestServer")
+        register_code_browsing_tools(mcp, mock_services)
+
+        async with Client(mcp) as client:
+            result = await client.call_tool("discover_fixed_vulnerabilities", {
+                "codebase_hash": "553642871dd4251f"
+            })
+            text_result = result.content[0].text
+
+            assert "Error" in text_result
+            assert "not a git repository" in text_result

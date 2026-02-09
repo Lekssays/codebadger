@@ -1430,3 +1430,202 @@ Examples:
                 "success": False,
                 "error": str(e),
             }
+
+    # Default vulnerability patterns for commit message analysis
+    DEFAULT_VULN_PATTERNS = [
+        r"CVE-\d{4}-\d+",  # CVE identifiers
+        r"\bfix(ed|es|ing)?\b.*\b(vuln|secur|overflow|injection|xss|csrf|sqli|leak|exploit)\b",
+        r"\b(buffer|heap|stack|integer)\s*(overflow|underflow)\b",
+        r"\buse[- ]?after[- ]?free\b",
+        r"\bdouble[- ]?free\b",
+        r"\b(format\s*)?string\s*vuln",
+        r"\bpatch(ed|es|ing)?\b.*\b(vuln|secur|bug)\b",
+        r"\bsecurity\s*(fix|patch|update|issue)\b",
+        r"\bmemory\s*(corrupt|leak|safety)\b",
+        r"\bout[- ]?of[- ]?bounds\b",
+        r"\bnull[- ]?pointer\b",
+        r"\brace\s*condition\b",
+        r"\bdenial[- ]?of[- ]?service\b",
+        r"\bdos\s*(attack|vuln)\b",
+    ]
+
+    @mcp.tool(
+        description="""Discover potential vulnerability fixes from git commit history.
+
+OPTIONAL reconnaissance tool to identify commits that may have fixed security issues.
+Use this to discover attack surface hints based on past vulnerability patterns.
+
+Args:
+    codebase_hash: The codebase hash.
+    limit: Maximum commits to analyze (default 500).
+    patterns: Optional custom regex patterns to match (uses defaults if not provided).
+
+Returns:
+    Human-readable text summarizing discovered vulnerability-related commits:
+    
+    Discovered Vulnerability Fixes
+    ============================================================
+    Found 3 commits mentioning security fixes
+    
+    [1] abc1234 - Fix buffer overflow in parse_input
+        Matched: buffer overflow
+        Files: src/parser.c, include/parser.h
+    
+    [2] def5678 - CVE-2023-1234: Patch XSS in template
+        Matched: CVE-2023-1234
+        Files: templates/render.py
+
+Notes:
+    - This is a DISCOVERY tool, not a vulnerability scanner.
+    - Results are hints for further investigation, not confirmed vulnerabilities.
+    - Works on git repositories only.
+    - For comprehensive security analysis, use taint analysis and other CPG tools.
+
+Examples:
+    discover_fixed_vulnerabilities(codebase_hash="abc")
+    discover_fixed_vulnerabilities(codebase_hash="abc", limit=100)"""
+    )
+    def discover_fixed_vulnerabilities(
+        codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
+        limit: Annotated[int, Field(description="Maximum number of commits to analyze")] = 500,
+        patterns: Annotated[Optional[list], Field(description="Optional list of custom regex patterns to match")] = None,
+    ) -> str:
+        """Discover vulnerability-related commits from git history."""
+        try:
+            import git
+
+            validate_codebase_hash(codebase_hash)
+
+            codebase_tracker = services["codebase_tracker"]
+
+            # Verify CPG exists for this codebase
+            codebase_info = codebase_tracker.get_codebase(codebase_hash)
+            if not codebase_info:
+                raise ValidationError(f"Codebase {codebase_hash} not found. Generate it first using generate_cpg.")
+
+            # Get source directory
+            playground_path = os.path.abspath(
+                os.path.join(os.path.dirname(__file__), "..", "..", "playground")
+            )
+
+            if codebase_info.source_type == "github":
+                from .core_tools import get_cpg_cache_key
+                cpg_cache_key = get_cpg_cache_key(
+                    codebase_info.source_type, codebase_info.source_path, codebase_info.language
+                )
+                source_dir = os.path.join(playground_path, "codebases", cpg_cache_key)
+            else:
+                source_path = codebase_info.source_path
+                if not os.path.isabs(source_path):
+                    source_path = os.path.abspath(source_path)
+                source_dir = source_path
+
+            # Check if it's a git repository
+            git_dir = os.path.join(source_dir, ".git")
+            if not os.path.exists(git_dir):
+                return "Error: Source directory is not a git repository. This tool requires git history."
+
+            # Open the repository
+            try:
+                repo = git.Repo(source_dir)
+            except git.InvalidGitRepositoryError:
+                return "Error: Invalid git repository. Cannot analyze commit history."
+
+            # Use provided patterns or defaults
+            vuln_patterns = patterns if patterns else DEFAULT_VULN_PATTERNS
+            compiled_patterns = []
+            for pattern in vuln_patterns:
+                try:
+                    compiled_patterns.append((pattern, re.compile(pattern, re.IGNORECASE)))
+                except re.error as e:
+                    logger.warning(f"Invalid regex pattern '{pattern}': {e}")
+
+            if not compiled_patterns:
+                return "Error: No valid regex patterns to match against."
+
+            # Analyze commits
+            discoveries = []
+            commits_analyzed = 0
+
+            try:
+                for commit in repo.iter_commits(max_count=limit):
+                    commits_analyzed += 1
+                    message = commit.message.strip()
+                    
+                    # Check each pattern
+                    matched_patterns = []
+                    for pattern_str, pattern_re in compiled_patterns:
+                        match = pattern_re.search(message)
+                        if match:
+                            matched_patterns.append(match.group(0))
+
+                    if matched_patterns:
+                        # Get files changed in this commit
+                        try:
+                            if commit.parents:
+                                diff = commit.parents[0].diff(commit)
+                                files_changed = list(set(
+                                    d.a_path if d.a_path else d.b_path 
+                                    for d in diff 
+                                    if d.a_path or d.b_path
+                                ))
+                            else:
+                                # Initial commit - list all files
+                                files_changed = [item.path for item in commit.tree.traverse() if item.type == 'blob']
+                        except Exception as e:
+                            logger.debug(f"Could not get diff for commit {commit.hexsha[:7]}: {e}")
+                            files_changed = []
+
+                        # Get first line of commit message for display
+                        first_line = message.split('\n')[0][:80]
+                        if len(message.split('\n')[0]) > 80:
+                            first_line += "..."
+
+                        discoveries.append({
+                            "sha": commit.hexsha[:7],
+                            "message": first_line,
+                            "matched": matched_patterns,
+                            "files": files_changed[:20],  # Limit files shown
+                            "total_files": len(files_changed),
+                        })
+
+            except Exception as e:
+                logger.error(f"Error iterating commits: {e}")
+                return f"Error: Failed to analyze git history: {str(e)}"
+
+            # Build output
+            output_lines = [
+                "Discovered Vulnerability Fixes",
+                "=" * 60,
+                f"Analyzed {commits_analyzed} commits, found {len(discoveries)} with security-related messages",
+                "",
+            ]
+
+            if not discoveries:
+                output_lines.append("No commits matching vulnerability patterns were found.")
+                output_lines.append("")
+                output_lines.append("This does not mean the code is vulnerability-free.")
+                output_lines.append("Use CPG-based tools for comprehensive security analysis.")
+            else:
+                for i, disc in enumerate(discoveries, 1):
+                    output_lines.append(f"[{i}] {disc['sha']} - {disc['message']}")
+                    output_lines.append(f"    Matched: {', '.join(disc['matched'])}")
+                    if disc['files']:
+                        files_str = ", ".join(disc['files'][:5])
+                        if disc['total_files'] > 5:
+                            files_str += f" (+{disc['total_files'] - 5} more)"
+                        output_lines.append(f"    Files: {files_str}")
+                    output_lines.append("")
+
+                output_lines.append("-" * 60)
+                output_lines.append("NOTE: These are hints for investigation, not confirmed vulnerabilities.")
+                output_lines.append("Use find_taint_flows, find_use_after_free, etc. to analyze specific locations.")
+
+            return "\n".join(output_lines)
+
+        except ValidationError as e:
+            logger.error(f"Validation error in discover_fixed_vulnerabilities: {e}")
+            return f"Validation Error: {str(e)}"
+        except Exception as e:
+            logger.error(f"Unexpected error in discover_fixed_vulnerabilities: {e}", exc_info=True)
+            return f"Internal Error: {str(e)}"
