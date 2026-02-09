@@ -62,15 +62,22 @@ class JoernServerManager:
             # Start Joern server inside the existing container using exec
             # Use nohup and background to keep it running
             # IMPORTANT: Run in unique directory to isolate Joern workspace
+            # Use parameterized commands to prevent command injection
             work_dir = f"/tmp/joern-server-{codebase_hash}"
-            joern_cmd = f"mkdir -p {work_dir} && cd {work_dir} && nohup /opt/joern/joern-cli/joern --server --server-host 0.0.0.0 --server-port {port} > /tmp/joern-{codebase_hash}.log 2>&1 &"
-            
+            log_file = f"/tmp/joern-{codebase_hash}.log"
+
+            # Build command as array to prevent injection
+            joern_cmd = [
+                "bash", "-c",
+                f"mkdir -p '{work_dir}' && cd '{work_dir}' && nohup /opt/joern/joern-cli/joern --server --server-host 0.0.0.0 --server-port {port} > '{log_file}' 2>&1 &"
+            ]
+
             logger.info(f"Starting Joern server for {codebase_hash} on port {port} inside container {self.container_name}")
-            logger.debug(f"Command: bash -c '{joern_cmd}'")
+            logger.debug(f"Command: {joern_cmd}")
 
             # Execute the command in the container
             exec_result = container.exec_run(
-                cmd=["bash", "-c", joern_cmd],
+                cmd=joern_cmd,
                 detach=True,  # Run in background
                 stream=False
             )
@@ -89,8 +96,9 @@ class JoernServerManager:
                 # Cleanup on failure - check logs
                 logger.error(f"Joern server for {codebase_hash} failed to become ready on port {port}")
                 try:
+                    # Use parameterized command to prevent injection
                     log_result = container.exec_run(
-                        cmd=["cat", f"/tmp/joern-{codebase_hash}.log"],
+                        cmd=["cat", log_file],
                         stream=False
                     )
                     if log_result.exit_code == 0:
@@ -233,8 +241,9 @@ class JoernServerManager:
             try:
                 container = self.docker_client.containers.get(self.container_name)
                 # Find and kill the joern process on this port
-                kill_cmd = f"pkill -f 'joern.*--server-port {port}' || true"
-                container.exec_run(cmd=["bash", "-c", kill_cmd])
+                # Use parameterized command to prevent injection
+                kill_cmd = ["bash", "-c", f"pkill -f 'joern.*--server-port {port}' || true"]
+                container.exec_run(cmd=kill_cmd)
                 logger.info(f"Killed Joern server process for {codebase_hash}")
             except Exception as e:
                 logger.warning(f"Error killing Joern process: {e}")

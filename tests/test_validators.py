@@ -245,15 +245,15 @@ class TestSanitizePath:
     """Test path sanitization"""
 
     def test_sanitize_path_safe(self):
-        """Test sanitizing safe paths"""
+        """Test sanitizing safe paths without root constraint"""
         safe_paths = ["/safe/path", "/another/safe/path", "safe/path"]
 
         for path in safe_paths:
             result = sanitize_path(path)
             assert result == path
 
-    def test_sanitize_path_traversal(self):
-        """Test sanitizing paths with traversal attempts"""
+    def test_sanitize_path_traversal_no_root(self):
+        """Test sanitizing paths with traversal attempts (no root constraint)"""
         dangerous_paths = [
             "../../../etc/passwd",
             "../../../../root",
@@ -263,6 +263,57 @@ class TestSanitizePath:
         for path in dangerous_paths:
             result = sanitize_path(path)
             assert ".." not in result
+
+    def test_sanitize_path_with_root_safe(self):
+        """Test sanitizing safe paths with root constraint"""
+        import tempfile
+        import os
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create a subdirectory
+            subdir = os.path.join(tmpdir, "subdir")
+            os.makedirs(subdir, exist_ok=True)
+
+            # Test that paths within root are accepted
+            safe_path = os.path.join(subdir, "file.txt")
+            result = sanitize_path(safe_path, allowed_root=tmpdir)
+            assert result == os.path.realpath(safe_path)
+
+            # Test relative path within root
+            result = sanitize_path("subdir/file.txt", allowed_root=tmpdir)
+            assert result == os.path.realpath(safe_path)
+
+    def test_sanitize_path_with_root_traversal(self):
+        """Test that path traversal is blocked with root constraint"""
+        import tempfile
+        import os
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Try to escape the root directory
+            with pytest.raises(ValidationError, match="Path traversal attempt detected"):
+                sanitize_path("../../../etc/passwd", allowed_root=tmpdir)
+
+            # Try using absolute path outside root
+            with pytest.raises(ValidationError, match="Path traversal attempt detected"):
+                sanitize_path("/etc/passwd", allowed_root=tmpdir)
+
+    def test_sanitize_path_canonicalization(self):
+        """Test that paths are properly canonicalized"""
+        import tempfile
+        import os
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create nested directories
+            nested = os.path.join(tmpdir, "a", "b", "c")
+            os.makedirs(nested, exist_ok=True)
+
+            # Path with .. that stays within root
+            result = sanitize_path(
+                os.path.join(tmpdir, "a", "b", "c", "..", "file.txt"),
+                allowed_root=tmpdir
+            )
+            expected = os.path.realpath(os.path.join(tmpdir, "a", "b", "file.txt"))
+            assert result == expected
 
 
 class TestValidateTimeout:

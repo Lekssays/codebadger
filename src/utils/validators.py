@@ -130,10 +130,74 @@ def hash_query(query: str) -> str:
     return hashlib.sha256(query.encode()).hexdigest()
 
 
-def sanitize_path(path: str) -> str:
-    """Sanitize file path"""
-    # Remove any .. or other path traversal attempts
-    path = re.sub(r"\.\.+", "", path)
+def sanitize_path(path: str, allowed_root: Optional[str] = None) -> str:
+    """
+    Sanitize file path by resolving it to an absolute canonical path
+    and optionally validating it's within an allowed root directory.
+
+    This prevents path traversal attacks by:
+    1. Resolving all symbolic links and relative path components
+    2. Converting to absolute canonical path
+    3. Validating against allowed root (if provided)
+
+    Args:
+        path: File path to sanitize
+        allowed_root: Optional root directory to validate against.
+                     If provided, the path must be within this directory.
+
+    Returns:
+        Sanitized absolute path
+
+    Raises:
+        ValidationError: If path traversal is detected or path is outside allowed_root
+
+    Examples:
+        >>> sanitize_path("../etc/passwd", "/home/user")
+        ValidationError: Path traversal attempt detected
+
+        >>> sanitize_path("/home/user/data/../file.txt", "/home/user")
+        "/home/user/file.txt"
+    """
+    import os
+
+    # Detect obvious path traversal attempts before resolution
+    if ".." in path:
+        if allowed_root is None:
+            # Without a root constraint, just remove .. patterns
+            path = re.sub(r"\.\.+/?", "", path)
+            return path
+        else:
+            # With a root constraint, we'll validate after canonicalization
+            pass
+
+    # For paths with allowed_root, canonicalize and validate
+    if allowed_root is not None:
+        # Canonicalize both paths (resolve symlinks, relative components)
+        canonical_root = os.path.realpath(os.path.abspath(allowed_root))
+
+        # Join with root if path is relative
+        if not os.path.isabs(path):
+            path = os.path.join(canonical_root, path)
+
+        canonical_path = os.path.realpath(os.path.abspath(path))
+
+        # Validate that canonical path is within allowed root
+        # Use os.path.commonpath to check if they share a common prefix
+        try:
+            common = os.path.commonpath([canonical_root, canonical_path])
+            if common != canonical_root:
+                raise ValidationError(
+                    f"Path traversal attempt detected: {path} is outside allowed root {allowed_root}"
+                )
+        except ValueError:
+            # Different drives on Windows
+            raise ValidationError(
+                f"Path traversal attempt detected: {path} is outside allowed root {allowed_root}"
+            )
+
+        return canonical_path
+
+    # Without allowed_root, just return the path (already cleaned above if it had ..)
     return path
 
 

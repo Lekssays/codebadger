@@ -5,6 +5,7 @@ Git repository manager for cloning and managing GitHub repositories
 import asyncio
 import logging
 import os
+import re
 import shutil
 from typing import Dict, Optional
 from urllib.parse import urlparse
@@ -15,6 +16,41 @@ from ..exceptions import GitOperationError, ValidationError
 from ..utils.validators import validate_github_url
 
 logger = logging.getLogger(__name__)
+
+
+def _mask_token_in_url(url: str) -> str:
+    """
+    Mask authentication tokens in URLs for safe logging.
+
+    Args:
+        url: URL that may contain a token
+
+    Returns:
+        URL with token replaced by '***'
+    """
+    # Pattern to match tokens in URLs: scheme://token@host/path
+    return re.sub(
+        r"(https?://)[^@\s]+@",
+        r"\1***@",
+        url
+    )
+
+
+def _mask_token_in_text(text: str) -> str:
+    """
+    Mask authentication tokens in error messages or logs.
+
+    Args:
+        text: Text that may contain tokens in URLs
+
+    Returns:
+        Text with tokens masked
+    """
+    return re.sub(
+        r"(https?://)[^@\s]+@",
+        r"\1***@",
+        text
+    )
 
 
 class GitManager:
@@ -60,8 +96,10 @@ class GitManager:
         except ValidationError:
             raise
         except Exception as e:
-            logger.error(f"Failed to clone repository: {e}")
-            raise GitOperationError(f"Failed to clone repository: {str(e)}")
+            # Mask tokens in error messages before logging
+            safe_error = _mask_token_in_text(str(e))
+            logger.error(f"Failed to clone repository: {safe_error}")
+            raise GitOperationError(f"Failed to clone repository: {safe_error}")
 
     def _do_clone(self, url: str, target: str, branch: Optional[str]):
         """Blocking clone operation"""
@@ -71,7 +109,9 @@ class GitManager:
             else:
                 git.Repo.clone_from(url, target, depth=1)
         except Exception as e:
-            raise GitOperationError(f"Git clone failed: {str(e)}")
+            # Mask tokens in error messages
+            safe_error = _mask_token_in_text(str(e))
+            raise GitOperationError(f"Git clone failed: {safe_error}")
 
     def validate_repository(self, repo_url: str) -> bool:
         """Validate that repository exists and is accessible"""
