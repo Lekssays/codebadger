@@ -1213,12 +1213,15 @@ Analyzes the codebase for cases where:
 1. **Unchecked malloc/calloc/realloc**: ptr = malloc(n); ptr->field = value; without NULL check
 2. **Unchecked fopen/strdup/mmap**: Functions that can return NULL on failure
 3. **Missing NULL guards**: Pointer dereference without prior if(ptr != NULL) check
+4. **Deep Interprocedural**: Uses Joern's reachableByFlows() to track allocated pointers
+   across MULTIPLE function call levels (e.g., main -> func1 -> func2 -> dereference)
 
 Filters out false positives:
 - Dereferences guarded by if(ptr != NULL) or if(!ptr) checks
 - Dereferences after early return/exit/abort on NULL
 - Pointer reassignments between allocation and use
 - Safe wrapper allocators (xmalloc, g_malloc, etc.) that guarantee non-NULL
+- Cross-function dereferences with NULL checks in callee
 
 Allocation functions checked: malloc, calloc, realloc, strdup, strndup, aligned_alloc,
 reallocarray, fopen, fdopen, freopen, tmpfile, popen, dlopen, mmap,
@@ -1235,10 +1238,12 @@ Returns:
     - Each potential null pointer dereference with allocation site [file:line]
     - The assigned pointer name
     - List of unchecked dereferences with [file:line] and type tags
+    - For interprocedural flows: the call path (e.g., "main -> func1 -> func2")
 
 Notes:
-    - Focuses on intraprocedural analysis for accuracy.
-    - Use get_program_slice for deeper control-flow context around specific locations."""
+    - Includes deep interprocedural analysis using Joern's dataflow engine.
+    - Use get_program_slice for deeper control-flow context around specific locations.
+    - Use find_taint_flows to check if allocation arguments come from external input."""
     )
     def find_null_pointer_deref(
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],

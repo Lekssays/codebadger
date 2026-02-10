@@ -41,10 +41,10 @@ def npd_services():
         return QueryResult(
             success=True,
             data=[
-                """Null Pointer Dereference Analysis
+                """Null Pointer Dereference Analysis (Deep Interprocedural)
 ============================================================
 
-Found 15 allocation site(s). Analyzing for unchecked null dereferences...
+Found 15 allocation site(s). Analyzing with deep interprocedural flow...
 
 Found 2 potential null pointer dereference issue(s):
 
@@ -72,6 +72,10 @@ Dereference Types:
   - [DEREF]: Explicit pointer dereference via *
   - [INDEX]: Array-style access via []
   - [FUNC-ARG]: Pointer passed to function (potential dereference inside)
+  - [CROSS-FUNC]: Dereference in directly called function
+  - [DEEP]: Dereference across multiple function call levels
+
+CWE: CWE-476 (NULL Pointer Dereference)
 """
             ],
             row_count=1,
@@ -106,7 +110,7 @@ async def test_find_null_pointer_deref_success(npd_services):
         result = res.content[0].text
 
         # Check output format
-        assert "Null Pointer Dereference Analysis" in result
+        assert "Null Pointer Dereference Analysis (Deep Interprocedural)" in result
         assert "Allocation Site:" in result
         assert "Assigned To:" in result
         assert "Unchecked Dereference(s):" in result
@@ -204,23 +208,25 @@ async def test_find_null_pointer_deref_no_issues_found(npd_services):
     no_npd_result = QueryResult(
         success=True,
         data=[
-            """Null Pointer Dereference Analysis
+            """Null Pointer Dereference Analysis (Deep Interprocedural)
 ============================================================
 
-Found 10 allocation site(s). Analyzing for unchecked null dereferences...
+Found 10 allocation site(s). Analyzing with deep interprocedural flow...
 
 No potential Null Pointer Dereference issues detected.
 
-Note: This analysis checks for:
-  - Unchecked malloc/calloc/realloc return values
+Note: This analysis includes:
+  - Intraprocedural unchecked allocation return values
   - Unchecked fopen/strdup/mmap return values
   - Dereferences without prior NULL checks
+  - Deep interprocedural flow (multi-level call chains)
 
 Filtered out:
   - Dereferences guarded by if(ptr != NULL) checks
   - Dereferences after early return/exit on NULL
   - Pointer reassignments between allocation and use
   - Safe wrapper allocators (xmalloc, g_malloc, etc.)
+  - Cross-function dereferences with NULL checks in callee
 """
         ],
         row_count=1,
@@ -238,7 +244,7 @@ Filtered out:
         result = res.content[0].text
 
         assert "No potential Null Pointer Dereference issues detected" in result
-        assert "Unchecked malloc" in result
+        assert "Intraprocedural unchecked allocation" in result
         assert "Filtered out:" in result
 
 
@@ -251,7 +257,7 @@ async def test_find_null_pointer_deref_no_alloc_calls(npd_services):
     no_alloc_result = QueryResult(
         success=True,
         data=[
-            """Null Pointer Dereference Analysis
+            """Null Pointer Dereference Analysis (Deep Interprocedural)
 ============================================================
 
 No allocation calls found in the codebase.
@@ -311,10 +317,10 @@ async def test_find_null_pointer_deref_detects_alloc_variants(npd_services):
     variants_result = QueryResult(
         success=True,
         data=[
-            """Null Pointer Dereference Analysis
+            """Null Pointer Dereference Analysis (Deep Interprocedural)
 ============================================================
 
-Found 8 allocation site(s). Analyzing for unchecked null dereferences...
+Found 8 allocation site(s). Analyzing with deep interprocedural flow...
 
 Found 3 potential null pointer dereference issue(s):
 
@@ -363,3 +369,179 @@ Total: 3 potential null pointer dereference issue(s) found
         assert "malloc(" in result
         assert "fopen(" in result
         assert "strdup(" in result
+
+
+@pytest.mark.asyncio
+async def test_find_null_pointer_deref_cross_function(npd_services):
+    """Test that interprocedural null pointer deref detection works correctly."""
+    services = npd_services
+
+    # Mock result showing cross-function dereferences
+    cross_func_result = QueryResult(
+        success=True,
+        data=[
+            """Null Pointer Dereference Analysis (Deep Interprocedural)
+============================================================
+
+Found 12 allocation site(s). Analyzing with deep interprocedural flow...
+
+Found 2 potential null pointer dereference issue(s):
+
+--- Issue 1 ---
+Allocation Site: malloc(sizeof(struct node))
+  Location: main.c:42 in create_node()
+  Assigned To: node
+
+Unchecked Dereference(s):
+  [main.c:50] node->value = 42
+  [utils.c:15] data->next = NULL [CROSS-FUNC]
+           in process_node()
+
+--- Issue 2 ---
+Allocation Site: malloc(size)
+  Location: parser.c:100 in parse_input()
+  Assigned To: buf
+
+Unchecked Dereference(s):
+  [parser.c:110] buf[0] = header [INDEX]
+  [transform.c:55] ptr->len = 0 [via: parse_input -> transform -> set_len] [DEEP]
+           in set_len()
+
+Total: 2 potential null pointer dereference issue(s) found
+
+Dereference Types:
+  - (no tag): Member access via ->
+  - [DEREF]: Explicit pointer dereference via *
+  - [INDEX]: Array-style access via []
+  - [FUNC-ARG]: Pointer passed to function (potential dereference inside)
+  - [CROSS-FUNC]: Dereference in directly called function
+  - [DEEP]: Dereference across multiple function call levels
+
+CWE: CWE-476 (NULL Pointer Dereference)
+"""
+        ],
+        row_count=1,
+    )
+    services["query_executor"].execute_query = MagicMock(return_value=cross_func_result)
+
+    mcp = FastMCP("TestServer")
+    register_tools(mcp, services)
+
+    async with Client(mcp) as client:
+        res = await client.call_tool(
+            "find_null_pointer_deref",
+            {"codebase_hash": services["codebase_hash"]}
+        )
+        result = res.content[0].text
+
+        # Check interprocedural output format
+        assert "Deep Interprocedural" in result
+        assert "[CROSS-FUNC]" in result
+        assert "[DEEP]" in result
+        assert "via:" in result
+        assert "->" in result
+        assert "CWE-476" in result
+
+
+@pytest.mark.asyncio
+async def test_find_null_pointer_deref_shows_callee_method(npd_services):
+    """Test that cross-function dereferences show the callee method name."""
+    services = npd_services
+
+    cross_func_result = QueryResult(
+        success=True,
+        data=[
+            """Null Pointer Dereference Analysis (Deep Interprocedural)
+============================================================
+
+Found 5 allocation site(s). Analyzing with deep interprocedural flow...
+
+Found 1 potential null pointer dereference issue(s):
+
+--- Issue 1 ---
+Allocation Site: malloc(len)
+  Location: main.c:20 in init()
+  Assigned To: ptr
+
+Unchecked Dereference(s):
+  [helper.c:10] param->field = 1 [via: init -> helper_func] [CROSS-FUNC]
+           in helper_func()
+
+Total: 1 potential null pointer dereference issue(s) found
+
+Dereference Types:
+  - (no tag): Member access via ->
+  - [DEREF]: Explicit pointer dereference via *
+  - [INDEX]: Array-style access via []
+  - [FUNC-ARG]: Pointer passed to function (potential dereference inside)
+  - [CROSS-FUNC]: Dereference in directly called function
+  - [DEEP]: Dereference across multiple function call levels
+
+CWE: CWE-476 (NULL Pointer Dereference)
+"""
+        ],
+        row_count=1,
+    )
+    services["query_executor"].execute_query = MagicMock(return_value=cross_func_result)
+
+    mcp = FastMCP("TestServer")
+    register_tools(mcp, services)
+
+    async with Client(mcp) as client:
+        res = await client.call_tool(
+            "find_null_pointer_deref",
+            {"codebase_hash": services["codebase_hash"]}
+        )
+        result = res.content[0].text
+
+        # Check that callee method is shown
+        assert "in helper_func()" in result
+        assert "helper.c:10" in result
+
+
+@pytest.mark.asyncio
+async def test_find_null_pointer_deref_no_issues_interproc(npd_services):
+    """Test output when no issues found includes interprocedural note."""
+    services = npd_services
+
+    no_issues_result = QueryResult(
+        success=True,
+        data=[
+            """Null Pointer Dereference Analysis (Deep Interprocedural)
+============================================================
+
+Found 10 allocation site(s). Analyzing with deep interprocedural flow...
+
+No potential Null Pointer Dereference issues detected.
+
+Note: This analysis includes:
+  - Intraprocedural unchecked allocation return values
+  - Unchecked fopen/strdup/mmap return values
+  - Dereferences without prior NULL checks
+  - Deep interprocedural flow (multi-level call chains)
+
+Filtered out:
+  - Dereferences guarded by if(ptr != NULL) checks
+  - Dereferences after early return/exit on NULL
+  - Pointer reassignments between allocation and use
+  - Safe wrapper allocators (xmalloc, g_malloc, etc.)
+  - Cross-function dereferences with NULL checks in callee
+"""
+        ],
+        row_count=1,
+    )
+    services["query_executor"].execute_query = MagicMock(return_value=no_issues_result)
+
+    mcp = FastMCP("TestServer")
+    register_tools(mcp, services)
+
+    async with Client(mcp) as client:
+        res = await client.call_tool(
+            "find_null_pointer_deref",
+            {"codebase_hash": services["codebase_hash"]}
+        )
+        result = res.content[0].text
+
+        assert "No potential Null Pointer Dereference issues detected" in result
+        assert "Deep interprocedural flow" in result
+        assert "Cross-function dereferences with NULL checks in callee" in result
