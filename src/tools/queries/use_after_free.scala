@@ -5,9 +5,65 @@
   
   val fileFilter = "{{filename}}"
   val maxResults = {{limit}}
-  
+
   val output = new StringBuilder()
+
+  /** Check if two line numbers are in mutually exclusive branches of the same IF.
+    * Returns true if lineA is inside the THEN block and lineB inside ELSE (or vice versa),
+    * meaning they cannot both execute in the same control flow path.
+    */
+  def areInMutuallyExclusiveBranches(method: Method, lineA: Int, lineB: Int): Boolean = {
+    method.controlStructure.filter(_.controlStructureType == "IF").l.exists { ifStmt =>
+      val children = ifStmt.astChildren.l
+      if (children.size >= 3) {
+        val thenLines = children(1).ast.lineNumber.l
+        val elseLines = children(2).ast.lineNumber.l
+        (thenLines.contains(lineA) && elseLines.contains(lineB)) ||
+        (elseLines.contains(lineA) && thenLines.contains(lineB))
+      } else false
+    }
+  }
   
+  // Known external input functions for reachability analysis
+  val externalInputFunctions = Set(
+    "getenv", "fgets", "scanf", "read", "recv", "fread", "gets", "getchar",
+    "fscanf", "recvfrom", "recvmsg", "getopt", "fopen", "getline",
+    "getaddrinfo", "gethostbyname", "accept", "socket", "getpass",
+    "realpath", "popen", "fdopen", "tmpfile", "dlopen"
+  )
+
+  /** Check if a method is transitively reachable from external input.
+    * BFS-walks callers up to maxDepth levels.
+    * Returns Some(entry_function_name) if reachable, None otherwise.
+    */
+  def findEntryPoint(methodName: String, maxDepth: Int = 10): Option[String] = {
+    var visited = Set[String]()
+    var frontier = List(methodName)
+    var depth = 0
+
+    while (depth < maxDepth && frontier.nonEmpty) {
+      val nextFrontier = mutable.ListBuffer[String]()
+      frontier.foreach { current =>
+        if (!visited.contains(current)) {
+          visited += current
+          val hasExtInput = cpg.method.name(current).l.exists { m =>
+            m.call.l.exists(c => externalInputFunctions.contains(c.name))
+          }
+          if (hasExtInput) return Some(current)
+          val callers = cpg.method.name(current).l
+            .flatMap(_.callIn.l)
+            .map(_.method.name)
+            .distinct
+            .filterNot(visited.contains)
+          nextFrontier ++= callers
+        }
+      }
+      frontier = nextFrontier.toList
+      depth += 1
+    }
+    None
+  }
+
   output.append("Use-After-Free Analysis (Deep Interprocedural)\n")
   output.append("=" * 60 + "\n\n")
   
@@ -60,12 +116,16 @@
               val reassignedBefore = reassignmentLines.exists(rl => rl > freeLine && rl < callLine)
               
               // Check for early return between free and usage
-              val hasEarlyReturn = method.call.name("return").l.exists { ret =>
+              // Note: return statements are Return nodes in Joern's CPG, not Call nodes
+              val hasEarlyReturn = method.ast.isReturn.l.exists { ret =>
                 val retLine = ret.lineNumber.getOrElse(-1)
                 retLine > freeLine && retLine < callLine
               }
               
-              if (!reassignedBefore && !hasEarlyReturn) {
+              // Check if free and usage are in mutually exclusive if/else branches
+              val inDifferentBranches = areInMutuallyExclusiveBranches(method, freeLine, callLine)
+
+              if (!reassignedBefore && !hasEarlyReturn && !inDifferentBranches) {
                 val relevantArgs = call.argument.l.filterNot { arg =>
                   call.name == "<operator>.assignment" && arg.argumentIndex == 1 && arg.code == freedPtr
                 }
@@ -198,12 +258,26 @@
       output.append(s"Found ${uafIssues.size} potential UAF issue(s):\n\n")
       
       uafIssues.take(maxResults).zipWithIndex.foreach { case ((freeFile, freeLine, freeCode, freedPtr, methodName, usages), idx) =>
+        // Compute confidence based on flow types present
+        val hasDirectDeref = usages.exists(u => u._5 == "direct")
+        val hasConfirmedInterproc = usages.exists(u => u._5 == "interproc" || u._5 == "deep-interproc")
+        val hasAliasOnly = usages.forall(u => u._5.startsWith("alias"))
+        val baseConfidence = if (hasDirectDeref || hasConfirmedInterproc) "HIGH"
+                             else if (hasAliasOnly) "MEDIUM"
+                             else "MEDIUM"
+
+        // Check reachability from external input
+        val entryPoint = findEntryPoint(methodName)
+        val reachable = entryPoint.isDefined
+        val confidence = if (reachable && baseConfidence == "MEDIUM") "HIGH" else baseConfidence
+
         output.append(s"--- Issue ${idx + 1} ---\n")
+        output.append(s"Confidence: $confidence\n")
         output.append(s"Free Site: $freeCode\n")
         output.append(s"  Location: $freeFile:$freeLine in $methodName()\n")
         output.append(s"  Freed Pointer: $freedPtr\n")
         output.append("\nPost-Free Usage(s):\n")
-        
+
         usages.take(10).foreach { case (line, code, file, usageMethod, flowType) =>
           val codeSnippet = if (code.length > 60) code.take(57) + "..." else code
           val flowTag = flowType match {
@@ -218,11 +292,29 @@
             output.append(s"           in $usageMethod()\n")
           }
         }
-        
+
         if (usages.size > 10) {
           output.append(s"  ... and ${usages.size - 10} more usage(s)\n")
         }
-        
+
+        // Validation context
+        output.append("\nContext:\n")
+        val method = cpg.method.name(methodName).l.headOption
+        method.foreach { m =>
+          val params = m.parameter.l.map(p => s"${p.typeFullName} ${p.name}").mkString(", ")
+          val returnType = m.methodReturn.typeFullName
+          output.append(s"  Function: $returnType $methodName($params)\n")
+        }
+        output.append(s"  File: $freeFile\n")
+        val callers = cpg.method.name(methodName).l.flatMap(_.callIn.l).map(_.method.name).distinct.take(5)
+        if (callers.nonEmpty) {
+          output.append(s"  Called By: ${callers.mkString(", ")}\n")
+        }
+        entryPoint match {
+          case Some(entry) => output.append(s"  Reachable From: $entry() (external input)\n")
+          case None => output.append(s"  Reachable From: Not directly reachable from external input (depth 10)\n")
+        }
+
         output.append("\n")
       }
       

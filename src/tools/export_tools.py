@@ -135,6 +135,10 @@ class FindingsParser:
             issue_text = issue_blocks[i + 1] if i + 1 < len(issue_blocks) else ""
 
             try:
+                # Extract confidence level
+                confidence_match = re.search(r"Confidence:\s*(HIGH|MEDIUM|LOW)", issue_text, re.IGNORECASE)
+                confidence = confidence_match.group(1).lower() if confidence_match else "high"
+
                 # Extract free site location
                 free_match = re.search(r"Free Site:.*?\n.*?Location: ([^:]+):(\d+)", issue_text)
                 if not free_match:
@@ -152,12 +156,15 @@ class FindingsParser:
                     use_file = use_match.group(1)
                     use_line = int(use_match.group(2))
 
+                # Extract context information
+                context = FindingsParser._extract_context(issue_text)
+
                 # Create finding
                 finding = {
                     "codebase_hash": codebase_hash,
                     "finding_type": "use_after_free",
                     "severity": "high",
-                    "confidence": "high",  # UAF findings are high confidence
+                    "confidence": confidence,
                     "filename": use_file,
                     "line_number": use_line,
                     "message": f"Use-after-free: pointer freed at {free_file}:{free_line}, used at {use_file}:{use_line}",
@@ -167,6 +174,7 @@ class FindingsParser:
                     "flow_data": {
                         "free_location": {"file": free_file, "line": free_line},
                         "use_location": {"file": use_file, "line": use_line},
+                        **context,
                     },
                 }
                 findings.append(finding)
@@ -198,6 +206,10 @@ class FindingsParser:
             issue_text = issue_blocks[i + 1] if i + 1 < len(issue_blocks) else ""
 
             try:
+                # Extract confidence level
+                confidence_match = re.search(r"Confidence:\s*(HIGH|MEDIUM|LOW)", issue_text, re.IGNORECASE)
+                confidence = confidence_match.group(1).lower() if confidence_match else "high"
+
                 # Extract first free location
                 first_free_match = re.search(r"First Free:\s*\[([^:]+):(\d+)\]", issue_text)
                 if not first_free_match:
@@ -215,12 +227,15 @@ class FindingsParser:
                     second_file = second_free_match.group(1)
                     second_line = int(second_free_match.group(2))
 
+                # Extract context information
+                context = FindingsParser._extract_context(issue_text)
+
                 # Create finding
                 finding = {
                     "codebase_hash": codebase_hash,
                     "finding_type": "double_free",
                     "severity": "high",
-                    "confidence": "high",  # Double-free findings are high confidence
+                    "confidence": confidence,
                     "filename": second_file,
                     "line_number": second_line,
                     "message": f"Double-free: freed at {first_file}:{first_line}, freed again at {second_file}:{second_line}",
@@ -230,6 +245,7 @@ class FindingsParser:
                     "flow_data": {
                         "first_free": {"file": first_file, "line": first_line},
                         "second_free": {"file": second_file, "line": second_line},
+                        **context,
                     },
                 }
                 findings.append(finding)
@@ -261,6 +277,10 @@ class FindingsParser:
             issue_text = issue_blocks[i + 1] if i + 1 < len(issue_blocks) else ""
 
             try:
+                # Extract confidence level
+                confidence_match = re.search(r"Confidence:\s*(HIGH|MEDIUM|LOW)", issue_text, re.IGNORECASE)
+                confidence = confidence_match.group(1).lower() if confidence_match else "high"
+
                 # Extract allocation site location
                 alloc_match = re.search(r"Allocation Site:.*?\n.*?Location: ([^:]+):(\d+)", issue_text)
                 if not alloc_match:
@@ -278,12 +298,15 @@ class FindingsParser:
                     deref_file = deref_match.group(1)
                     deref_line = int(deref_match.group(2))
 
+                # Extract context information
+                context = FindingsParser._extract_context(issue_text)
+
                 # Create finding
                 finding = {
                     "codebase_hash": codebase_hash,
                     "finding_type": "null_pointer_deref",
                     "severity": "high",
-                    "confidence": "high",
+                    "confidence": confidence,
                     "filename": deref_file,
                     "line_number": deref_line,
                     "message": f"Null pointer dereference: allocated at {alloc_file}:{alloc_line}, dereferenced unchecked at {deref_file}:{deref_line}",
@@ -293,6 +316,7 @@ class FindingsParser:
                     "flow_data": {
                         "allocation_location": {"file": alloc_file, "line": alloc_line},
                         "dereference_location": {"file": deref_file, "line": deref_line},
+                        **context,
                     },
                 }
                 findings.append(finding)
@@ -324,6 +348,10 @@ class FindingsParser:
             issue_text = issue_blocks[i + 1] if i + 1 < len(issue_blocks) else ""
 
             try:
+                # Extract confidence level
+                confidence_match = re.search(r"Confidence:\s*(HIGH|MEDIUM|LOW)", issue_text, re.IGNORECASE)
+                confidence = confidence_match.group(1).lower() if confidence_match else "high"
+
                 # Extract location
                 loc_match = re.search(r"Location: ([^:]+):(\d+)", issue_text)
                 if not loc_match:
@@ -354,12 +382,15 @@ class FindingsParser:
                 # Detect cross-function flow
                 is_cross_func = "[CROSS-FUNC]" in issue_text
 
+                # Extract context information
+                context = FindingsParser._extract_context(issue_text)
+
                 # Create finding
                 finding = {
                     "codebase_hash": codebase_hash,
                     "finding_type": "integer_overflow",
                     "severity": severity,
-                    "confidence": "high",
+                    "confidence": confidence,
                     "filename": issue_file,
                     "line_number": issue_line,
                     "message": f"Integer overflow: {arith_expr} at {issue_file}:{issue_line} ({issue_type})",
@@ -372,6 +403,7 @@ class FindingsParser:
                         "code": code_expr,
                         "risk_level": risk,
                         "cross_function": is_cross_func,
+                        **context,
                     },
                 }
                 findings.append(finding)
@@ -411,6 +443,42 @@ class FindingsParser:
 
         # Default to medium severity
         return "medium", "injection"
+
+    @staticmethod
+    def _extract_context(issue_text: str) -> Dict[str, Any]:
+        """Extract validation context and reachability from issue text.
+
+        Parses the Context block added by the Scala queries:
+            Context:
+              Function: returnType methodName(params)
+              File: filename.c
+              Called By: caller1, caller2
+              Reachable From: entryFunc() (external input)
+
+        Returns:
+            Dictionary with context fields to merge into flow_data
+        """
+        context = {}
+
+        # Extract function signature
+        func_match = re.search(r"Function:\s*(.+?)(?:\n|$)", issue_text)
+        if func_match:
+            context["function_signature"] = func_match.group(1).strip()
+
+        # Extract callers
+        callers_match = re.search(r"Called By:\s*(.+?)(?:\n|$)", issue_text)
+        if callers_match:
+            callers_str = callers_match.group(1).strip()
+            context["callers"] = [c.strip() for c in callers_str.split(",")]
+
+        # Extract reachability
+        reach_match = re.search(r"Reachable From:\s*(.+?)(?:\n|$)", issue_text)
+        if reach_match:
+            reach_text = reach_match.group(1).strip()
+            context["reachable_from"] = reach_text
+            context["externally_reachable"] = "external input" in reach_text.lower()
+
+        return context
 
 
 class SARIFBuilder:

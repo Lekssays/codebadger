@@ -406,10 +406,10 @@ class TestConfidencePolicy:
     async def test_confidence_policy_present(
         self, mcp_with_prompts, prompt_name, args
     ):
-        """Every prompt should include the 80% confidence threshold"""
+        """Every prompt should include the confidence policy"""
         async with Client(mcp_with_prompts) as client:
             result = await client.get_prompt(prompt_name, arguments=args)
             # Check first user message for confidence text
             content = result.messages[0].content.text
-            assert "80%" in content
+            assert "Confidence" in content
             assert "false positive" in content.lower()

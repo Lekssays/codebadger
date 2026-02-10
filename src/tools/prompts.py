@@ -11,12 +11,19 @@ from fastmcp.prompts import Message
 
 CONFIDENCE_POLICY = """
 ## Confidence & False-Positive Policy
-**Only report findings where you are at least 80% confident they represent a real issue.**
-- After gathering tool results, critically evaluate each potential finding before including it.
-- Cross-reference: verify a finding with at least two signals (e.g. confirmed taint flow + dangerous sink without sanitization, or CFG shows reachable path + no bounds check).
+
+CodeBadger's detectors assign a **Confidence** level (HIGH / MEDIUM) to each finding based on:
+- Flow type (direct dereference vs passed-to-function, same-pointer vs alias, intraprocedural vs interprocedural)
+- Reachability from external input (BFS depth 10 over call graph)
+
+**Use the tool's confidence levels to structure your report:**
+- **HIGH confidence** findings: Report as confirmed vulnerabilities in the main findings section. These have direct evidence (e.g., same-function usage, confirmed dataflow, direct dereference) or are reachable from external input.
+- **MEDIUM confidence** findings: Include in a "Needs Manual Review" section with explanation of why they are uncertain (e.g., alias-based, passed-to-function without confirmed dereference, not reachable from external input).
+- After gathering tool results, critically evaluate each finding — cross-reference with at least two signals (e.g., confirmed taint flow + dangerous sink without sanitization, or CFG shows reachable path + no bounds check).
 - Discard findings that are likely false positives: dead code paths, safely wrapped calls, test-only code, or sinks that are unreachable from external input.
-- If a finding is borderline (50-80% confidence), include it in a separate "Needs Manual Review" section with an explanation of why it is uncertain.
 - Never pad the report with low-confidence noise. A short report with 3 real findings is far more valuable than a long report with 20 speculative ones.
+
+Each finding also includes **validation context** (function signature, callers, reachability from external input) to help you write targeted PoC triggers and assess exploitability.
 """.strip()
 
 

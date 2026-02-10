@@ -34,6 +34,45 @@
     "ckd_mul", "ckd_add", "ckd_sub"
   )
 
+  // Known external input functions for reachability analysis
+  val externalInputFunctions = Set(
+    "getenv", "fgets", "scanf", "read", "recv", "fread", "gets", "getchar",
+    "fscanf", "recvfrom", "recvmsg", "getopt", "fopen", "getline",
+    "getaddrinfo", "gethostbyname", "accept", "socket", "getpass",
+    "realpath", "popen", "fdopen", "tmpfile", "dlopen"
+  )
+
+  /** Check if a method is transitively reachable from external input.
+    * BFS-walks callers up to maxDepth levels.
+    */
+  def findEntryPoint(methodName: String, maxDepth: Int = 10): Option[String] = {
+    var visited = Set[String]()
+    var frontier = List(methodName)
+    var depth = 0
+
+    while (depth < maxDepth && frontier.nonEmpty) {
+      val nextFrontier = mutable.ListBuffer[String]()
+      frontier.foreach { current =>
+        if (!visited.contains(current)) {
+          visited += current
+          val hasExtInput = cpg.method.name(current).l.exists { m =>
+            m.call.l.exists(c => externalInputFunctions.contains(c.name))
+          }
+          if (hasExtInput) return Some(current)
+          val callers = cpg.method.name(current).l
+            .flatMap(_.callIn.l)
+            .map(_.method.name)
+            .distinct
+            .filterNot(visited.contains)
+          nextFrontier ++= callers
+        }
+      }
+      frontier = nextFrontier.toList
+      depth += 1
+    }
+    None
+  }
+
   // --- Helper functions ---
 
   def isConstantExpr(code: String): Boolean = {
@@ -346,7 +385,15 @@
       output.append(s"Found ${issues.size} potential integer overflow/underflow issue(s):\n\n")
 
       sortedIssues.take(maxResults).zipWithIndex.foreach { case ((file, line, accessCode, arithCode, opStr, methodName, risk, issueType), idx) =>
+        // Confidence mirrors risk level, boosted by reachability
+        val entryPoint = findEntryPoint(methodName)
+        val reachable = entryPoint.isDefined
+        val confidence = if (risk == "HIGH") "HIGH"
+                         else if (reachable) "HIGH"
+                         else "MEDIUM"
+
         output.append(s"--- Issue ${idx + 1} ---\n")
+        output.append(s"Confidence: $confidence\n")
 
         val truncAccessCode = if (accessCode.length > 80) accessCode.take(77) + "..." else accessCode
         val truncArithCode = if (arithCode.length > 60) arithCode.take(57) + "..." else arithCode
@@ -369,6 +416,24 @@
           output.append("out-of-bounds array access\n")
         } else {
           output.append("undersized buffer allocation\n")
+        }
+
+        // Validation context
+        output.append("\nContext:\n")
+        val method = cpg.method.name(methodName).l.headOption
+        method.foreach { m =>
+          val params = m.parameter.l.map(p => s"${p.typeFullName} ${p.name}").mkString(", ")
+          val returnType = m.methodReturn.typeFullName
+          output.append(s"  Function: $returnType $methodName($params)\n")
+        }
+        output.append(s"  File: $file\n")
+        val callers = cpg.method.name(methodName).l.flatMap(_.callIn.l).map(_.method.name).distinct.take(5)
+        if (callers.nonEmpty) {
+          output.append(s"  Called By: ${callers.mkString(", ")}\n")
+        }
+        entryPoint match {
+          case Some(entry) => output.append(s"  Reachable From: $entry() (external input)\n")
+          case None => output.append(s"  Reachable From: Not directly reachable from external input (depth 10)\n")
         }
 
         output.append("\n")

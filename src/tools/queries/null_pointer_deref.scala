@@ -8,6 +8,61 @@
 
   val output = new StringBuilder()
 
+  /** Check if two line numbers are in mutually exclusive branches of the same IF.
+    * Returns true if lineA is inside the THEN block and lineB inside ELSE (or vice versa),
+    * meaning they cannot both execute in the same control flow path.
+    */
+  def areInMutuallyExclusiveBranches(method: Method, lineA: Int, lineB: Int): Boolean = {
+    method.controlStructure.filter(_.controlStructureType == "IF").l.exists { ifStmt =>
+      val children = ifStmt.astChildren.l
+      if (children.size >= 3) {
+        val thenLines = children(1).ast.lineNumber.l
+        val elseLines = children(2).ast.lineNumber.l
+        (thenLines.contains(lineA) && elseLines.contains(lineB)) ||
+        (elseLines.contains(lineA) && thenLines.contains(lineB))
+      } else false
+    }
+  }
+
+  // Known external input functions for reachability analysis
+  val externalInputFunctions = Set(
+    "getenv", "fgets", "scanf", "read", "recv", "fread", "gets", "getchar",
+    "fscanf", "recvfrom", "recvmsg", "getopt", "fopen", "getline",
+    "getaddrinfo", "gethostbyname", "accept", "socket", "getpass",
+    "realpath", "popen", "fdopen", "tmpfile", "dlopen"
+  )
+
+  /** Check if a method is transitively reachable from external input.
+    * BFS-walks callers up to maxDepth levels.
+    */
+  def findEntryPoint(methodName: String, maxDepth: Int = 10): Option[String] = {
+    var visited = Set[String]()
+    var frontier = List(methodName)
+    var depth = 0
+
+    while (depth < maxDepth && frontier.nonEmpty) {
+      val nextFrontier = mutable.ListBuffer[String]()
+      frontier.foreach { current =>
+        if (!visited.contains(current)) {
+          visited += current
+          val hasExtInput = cpg.method.name(current).l.exists { m =>
+            m.call.l.exists(c => externalInputFunctions.contains(c.name))
+          }
+          if (hasExtInput) return Some(current)
+          val callers = cpg.method.name(current).l
+            .flatMap(_.callIn.l)
+            .map(_.method.name)
+            .distinct
+            .filterNot(visited.contains)
+          nextFrontier ++= callers
+        }
+      }
+      frontier = nextFrontier.toList
+      depth += 1
+    }
+    None
+  }
+
   output.append("Null Pointer Dereference Analysis (Deep Interprocedural)\n")
   output.append("=" * 60 + "\n\n")
 
@@ -165,8 +220,9 @@
             }
 
             // Find early exits (return/exit/abort) after allocation
+            // Note: return statements are Return nodes in Joern's CPG, not Call nodes
             val earlyExitLines = mutable.Set[Int]()
-            method.call.name("return").l.foreach { ret =>
+            method.ast.isReturn.l.foreach { ret =>
               val retLine = ret.lineNumber.getOrElse(-1)
               if (retLine > allocLine) earlyExitLines += retLine
             }
@@ -188,7 +244,10 @@
                 // (suggests an error-handling path like: if(!ptr) return;)
                 val hasEarlyExit = earlyExitLines.exists(el => el > allocLine && el < derefLine)
 
-                !reassignedBefore && !hasNullCheckBefore && !hasEarlyExit
+                // Also check if alloc and deref are in mutually exclusive branches
+                val inDifferentBranches = areInMutuallyExclusiveBranches(method, allocLine, derefLine)
+
+                !reassignedBefore && !hasNullCheckBefore && !hasEarlyExit && !inDifferentBranches
               }.distinct.sortBy(_._1)
                 .map { case (line, code, dtype) => (line, code, dtype, "", "") }
             } else {
@@ -339,7 +398,21 @@
       output.append(s"Found ${npIssues.size} potential null pointer dereference issue(s):\n\n")
 
       npIssues.take(maxResults).zipWithIndex.foreach { case ((file, line, code, ptr, methodName, derefs), idx) =>
+        // Compute confidence based on dereference types
+        val hasDirectDeref = derefs.exists(d => d._3 == "member_access" || d._3 == "pointer_deref" || d._3 == "index_access")
+        val hasConfirmedInterproc = derefs.exists(d => d._3 == "interproc" || d._3 == "deep-interproc")
+        val hasFuncArgOnly = derefs.forall(d => d._3 == "passed_to_func")
+        val baseConfidence = if (hasDirectDeref || hasConfirmedInterproc) "HIGH"
+                             else if (hasFuncArgOnly) "MEDIUM"
+                             else "MEDIUM"
+
+        // Check reachability from external input
+        val entryPoint = findEntryPoint(methodName)
+        val reachable = entryPoint.isDefined
+        val confidence = if (reachable && baseConfidence == "MEDIUM") "HIGH" else baseConfidence
+
         output.append(s"--- Issue ${idx + 1} ---\n")
+        output.append(s"Confidence: $confidence\n")
         output.append(s"Allocation Site: $code\n")
         output.append(s"  Location: $file:$line in $methodName()\n")
         output.append(s"  Assigned To: $ptr\n")
@@ -365,6 +438,24 @@
 
         if (derefs.size > 10) {
           output.append(s"  ... and ${derefs.size - 10} more dereference(s)\n")
+        }
+
+        // Validation context
+        output.append("\nContext:\n")
+        val method = cpg.method.name(methodName).l.headOption
+        method.foreach { m =>
+          val params = m.parameter.l.map(p => s"${p.typeFullName} ${p.name}").mkString(", ")
+          val returnType = m.methodReturn.typeFullName
+          output.append(s"  Function: $returnType $methodName($params)\n")
+        }
+        output.append(s"  File: $file\n")
+        val callers = cpg.method.name(methodName).l.flatMap(_.callIn.l).map(_.method.name).distinct.take(5)
+        if (callers.nonEmpty) {
+          output.append(s"  Called By: ${callers.mkString(", ")}\n")
+        }
+        entryPoint match {
+          case Some(entry) => output.append(s"  Reachable From: $entry() (external input)\n")
+          case None => output.append(s"  Reachable From: Not directly reachable from external input (depth 10)\n")
         }
 
         output.append("\n")
