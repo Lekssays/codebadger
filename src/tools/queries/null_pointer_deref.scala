@@ -189,38 +189,43 @@
               }
             }
 
-            // Find null checks on the pointer via IF control structures
+            // Find null checks on the pointer via semantic AST analysis of IF conditions
             val nullCheckLines = mutable.Set[Int]()
             val quotedPtr = java.util.regex.Pattern.quote(assignedPtr)
 
             method.controlStructure.filter(_.controlStructureType == "IF").l.foreach { ifStmt =>
               val condLine = ifStmt.lineNumber.getOrElse(-1)
               if (condLine > allocLine) {
-                // Check condition code for null-testing patterns
-                val condCalls = ifStmt.condition.isCall.l
-                condCalls.foreach { cond =>
-                  val condCode = cond.code
-                  val checksPtr = condCode.contains(assignedPtr) && (
-                    condCode.contains("NULL") ||
-                    condCode.contains("null") ||
-                    condCode.matches(s".*\\b${quotedPtr}\\s*==\\s*0\\b.*") ||
-                    condCode.matches(s".*\\b0\\s*==\\s*${quotedPtr}\\b.*") ||
-                    condCode.matches(s".*\\b${quotedPtr}\\s*!=\\s*NULL\\b.*") ||
-                    condCode.matches(s".*\\bNULL\\s*!=\\s*${quotedPtr}\\b.*") ||
-                    condCode.matches(s".*\\b${quotedPtr}\\s*==\\s*NULL\\b.*") ||
-                    condCode.matches(s".*\\bNULL\\s*==\\s*${quotedPtr}\\b.*") ||
-                    condCode.matches(s".*!\\s*${quotedPtr}\\b.*") ||
-                    condCode == assignedPtr ||
-                    condCode == s"!$assignedPtr"
-                  )
-                  if (checksPtr) {
-                    nullCheckLines += condLine
+                val condAst = ifStmt.condition.ast
+
+                // Semantic check 1: ptr == NULL / ptr != NULL / ptr == 0 / 0 == ptr / ptr == nullptr
+                val hasEqualityNullCheck = condAst.isCall
+                  .name("<operator>.equals|<operator>.notEquals").l.exists { cmp =>
+                    val argCodes = cmp.argument.code.l.map(_.trim)
+                    val hasPtr = argCodes.contains(assignedPtr)
+                    val hasNull = argCodes.exists(c =>
+                      c == "NULL" || c == "0" || c == "nullptr" || c == "((void *)0)" || c == "((void*)0)"
+                    )
+                    hasPtr && hasNull
                   }
-                }
-                // Also check the condition AST for identifiers matching the pointer
-                // This catches cases like: if(ptr) or if(!ptr)
-                val condIds = ifStmt.condition.ast.isIdentifier.name(quotedPtr).l
-                if (condIds.nonEmpty) {
+
+                // Semantic check 2: !ptr (logicalNot applied to the pointer)
+                val hasLogicalNotCheck = condAst.isCall
+                  .name("<operator>.logicalNot").l.exists { notOp =>
+                    notOp.argument.isIdentifier.name(quotedPtr).l.nonEmpty
+                  }
+
+                // Semantic check 3: if(ptr) — pointer used directly as boolean condition
+                val hasImplicitBoolCheck = ifStmt.condition.isIdentifier.name(quotedPtr).l.nonEmpty
+
+                // Semantic check 4: ptr as operand of && or || (implicit truthiness check in compound condition)
+                // e.g., if (ptr && ptr->field > 0) or if (!ptr || error)
+                val hasCompoundBoolCheck = condAst.isCall
+                  .name("<operator>.logicalAnd|<operator>.logicalOr").l.exists { logOp =>
+                    logOp.argument.isIdentifier.name(quotedPtr).l.nonEmpty
+                  }
+
+                if (hasEqualityNullCheck || hasLogicalNotCheck || hasImplicitBoolCheck || hasCompoundBoolCheck) {
                   nullCheckLines += condLine
                 }
               }
@@ -266,10 +271,10 @@
             // Detects: ptr = malloc(...); process(ptr); where process() dereferences without NULL check.
             val interprocDerefs = mutable.ListBuffer[(Int, String, String, String, String)]()
 
-            // Get the pointer identifier nodes at/near the allocation site as sources
+            // Get the pointer identifier nodes after allocation as sources for interprocedural flow.
+            // Include all occurrences (not just first N) so we don't miss flows through later call sites.
             val ptrNodes = method.ast.isIdentifier.name(quotedPtr).l
               .filter(_.lineNumber.getOrElse(-1) >= allocLine)
-              .take(3)
               .collect { case cfgNode: CfgNode => cfgNode }
 
             if (ptrNodes.nonEmpty) {
@@ -316,34 +321,47 @@
                         val hasLocalEarlyExit = earlyExitLines.exists(el => el > allocLine && el < exitLine)
 
                         if (!hasLocalNullGuard && !hasLocalEarlyExit) {
-                          // Check if callee has a null check on the parameter before dereference
+                          // Check if callee has a semantic null check on the parameter before dereference
                           val sinkMethodNode = cpg.method.name(sinkMethod).l.headOption
                           val hasNullCheckInCallee = sinkMethodNode.exists { m =>
                             val mStartLine = m.lineNumber.getOrElse(0)
+                            // Collect candidate identifiers to check: sink's base object + callee parameters
+                            val sinkBaseId = sink match {
+                              case c: Call => c.argument.l.headOption.map(_.code.trim).getOrElse("")
+                              case _ => ""
+                            }
+                            val params = m.parameter.name.l
+                            val candidates = (if (sinkBaseId.nonEmpty) List(sinkBaseId) else Nil) ++ params
+
                             m.controlStructure.filter(_.controlStructureType == "IF").l.exists { ifStmt =>
                               val condLine = ifStmt.lineNumber.getOrElse(-1)
                               condLine >= mStartLine && condLine <= sinkLine && {
-                                val condCode = ifStmt.condition.code.headOption.getOrElse("")
-                                // Check if condition tests the dereferenced identifier for NULL
-                                val sinkBaseId = sink match {
-                                  case c: Call => c.argument.l.headOption.map(_.code.trim).getOrElse("")
-                                  case _ => ""
-                                }
-                                val checksForNull = condCode.contains("NULL") || condCode.contains("null") ||
-                                  condCode.contains("== 0") || condCode.startsWith("!")
+                                val condAst = ifStmt.condition.ast
 
-                                (sinkBaseId.nonEmpty && condCode.contains(sinkBaseId) && checksForNull) || {
-                                  // Also check parameters of the callee method
-                                  val params = m.parameter.name.l
-                                  params.exists { paramName =>
-                                    condCode.contains(paramName) && checksForNull
-                                  }
-                                } || {
-                                  // Check condition AST for identifiers matching parameters
-                                  val params = m.parameter.name.l
-                                  ifStmt.condition.ast.isIdentifier.l.exists { id =>
-                                    params.contains(id.name)
-                                  }
+                                candidates.exists { candidate =>
+                                  val qCand = java.util.regex.Pattern.quote(candidate)
+
+                                  // Semantic: candidate == NULL / != NULL / == 0 / == nullptr
+                                  val hasEqCheck = condAst.isCall
+                                    .name("<operator>.equals|<operator>.notEquals").l.exists { cmp =>
+                                      val argCodes = cmp.argument.code.l.map(_.trim)
+                                      argCodes.contains(candidate) &&
+                                        argCodes.exists(c => c == "NULL" || c == "0" || c == "nullptr" || c == "((void *)0)" || c == "((void*)0)")
+                                    }
+
+                                  // Semantic: !candidate
+                                  val hasNotCheck = condAst.isCall
+                                    .name("<operator>.logicalNot").l.exists { notOp =>
+                                      notOp.argument.isIdentifier.name(qCand).l.nonEmpty
+                                    }
+
+                                  // Semantic: if(candidate) — direct bool or compound &&/||
+                                  val hasBoolCheck = ifStmt.condition.isIdentifier.name(qCand).l.nonEmpty ||
+                                    condAst.isCall.name("<operator>.logicalAnd|<operator>.logicalOr").l.exists { logOp =>
+                                      logOp.argument.isIdentifier.name(qCand).l.nonEmpty
+                                    }
+
+                                  hasEqCheck || hasNotCheck || hasBoolCheck
                                 }
                               }
                             }

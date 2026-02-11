@@ -37,6 +37,14 @@
      }
   }
   
+  // Helper: build path-boundary anchored regex from a filename
+  // e.g., "parser.c" -> "(^|.*/)parser\\.c$" so it matches "/path/to/parser.c"
+  // but NOT "/path/to/myparser.c"
+  def pathBoundaryRegex(f: String): String = {
+    val escaped = java.util.regex.Pattern.quote(f)
+    "(^|.*/)" + escaped + "$"
+  }
+
   // Build source nodes - by node ID or by location
   val sources: List[CfgNode] = {
     if (sourceNodeId > 0) {
@@ -44,14 +52,15 @@
       cpg.identifier.filter(_.id == sourceNodeId).l ++
       cpg.literal.filter(_.id == sourceNodeId).l
     } else if (sourceFile.nonEmpty && sourceLine > 0) {
-      cpg.call.where(_.file.name(".*" + sourceFile + "$")).lineNumber(sourceLine).l ++
-      cpg.identifier.where(_.file.name(".*" + sourceFile + "$")).lineNumber(sourceLine).l ++
-      cpg.literal.where(_.file.name(".*" + sourceFile + "$")).lineNumber(sourceLine).l
+      val srcPattern = pathBoundaryRegex(sourceFile)
+      cpg.call.where(_.file.name(srcPattern)).lineNumber(sourceLine).l ++
+      cpg.identifier.where(_.file.name(srcPattern)).lineNumber(sourceLine).l ++
+      cpg.literal.where(_.file.name(srcPattern)).lineNumber(sourceLine).l
     } else {
       List()
     }
   }
-  
+
   // Build sink nodes - by node ID or by location
   val sinks: List[CfgNode] = {
     if (sinkNodeId > 0) {
@@ -59,9 +68,10 @@
       cpg.identifier.filter(_.id == sinkNodeId).l ++
       cpg.literal.filter(_.id == sinkNodeId).l
     } else if (sinkFile.nonEmpty && sinkLine > 0) {
-      cpg.call.where(_.file.name(".*" + sinkFile + "$")).lineNumber(sinkLine).l ++
-      cpg.identifier.where(_.file.name(".*" + sinkFile + "$")).lineNumber(sinkLine).l ++
-      cpg.literal.where(_.file.name(".*" + sinkFile + "$")).lineNumber(sinkLine).l
+      val snkPattern = pathBoundaryRegex(sinkFile)
+      cpg.call.where(_.file.name(snkPattern)).lineNumber(sinkLine).l ++
+      cpg.identifier.where(_.file.name(snkPattern)).lineNumber(sinkLine).l ++
+      cpg.literal.where(_.file.name(snkPattern)).lineNumber(sinkLine).l
     } else {
       List()
     }

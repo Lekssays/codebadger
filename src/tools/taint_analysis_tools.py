@@ -142,6 +142,83 @@ DEFAULT_SINKS = {
     ],
 }
 
+# Default sanitizer/barrier functions by language
+# Flows through these functions are considered "cleaned" and filtered out
+DEFAULT_SANITIZERS = {
+    "c": [
+        "strlcpy", "strlcat",
+        "snprintf", "vsnprintf",
+        "strtol", "strtoul", "strtoll", "strtoull", "strtod",
+        "atoi", "atol", "atof",
+        "xmlEncodeEntities", "xmlEncodeSpecialChars",
+        "htmlEncodeEntities",
+    ],
+    "cpp": [
+        "strlcpy", "strlcat", "snprintf", "vsnprintf",
+        "stoi", "stol", "stoul", "stod",
+        "atoi", "atol", "atof",
+    ],
+    "java": [
+        "escapeHtml", "escapeXml", "escapeSql", "escapeJavaScript",
+        "encode", "parseInt", "parseLong", "parseDouble",
+        "setString", "setInt", "setLong",
+        "trim", "strip",
+    ],
+    "python": [
+        "escape", "quote", "clean",
+        "int", "float", "str",
+    ],
+    "javascript": [
+        "encodeURIComponent", "encodeURI",
+        "escapeHtml", "sanitize",
+        "parseInt", "parseFloat", "Number",
+    ],
+    "go": [
+        "EscapeString", "QueryEscape",
+        "Atoi", "ParseInt", "ParseFloat",
+        "Clean", "Base",
+        "HTMLEscapeString",
+    ],
+    "php": [
+        "htmlspecialchars", "htmlentities", "strip_tags",
+        "addslashes", "mysqli_real_escape_string",
+        "intval", "floatval",
+        "filter_var", "filter_input",
+        "urlencode", "rawurlencode",
+    ],
+    "ruby": [
+        "sanitize", "h", "html_escape",
+        "Integer", "Float",
+    ],
+    "csharp": [
+        "HtmlEncode", "UrlEncode",
+        "Escape", "TryParse", "ToInt32",
+    ],
+    "swift": [
+        "addingPercentEncoding",
+    ],
+    "kotlin": [
+        "escapeHtml", "encode",
+        "toInt", "toLong", "toDouble",
+    ],
+}
+
+
+def _build_file_filter_regex(filename: str) -> str:
+    """Build a Joern-compatible regex for path-boundary anchored file filtering.
+
+    Anchors the match to path boundaries (/ or start of string) so that
+    'parser.c' matches '/path/to/parser.c' but NOT '/path/to/myparser.c'.
+
+    The returned string is ready for embedding in Scala string literals
+    (backslashes are doubled for Scala escaping).
+    """
+    # Escape regex-special chars with re.escape, then double backslashes
+    # for Scala string literal embedding (Scala \\\\ → Java regex \\)
+    py_escaped = re.escape(filename)
+    scala_escaped = py_escaped.replace("\\", "\\\\")
+    # Anchor to path boundary at start, allow trailing content for partial names
+    return f"(^|.*/){scala_escaped}.*"
 
 
 def _build_joern_name_pattern(patterns: list) -> str:
@@ -221,6 +298,7 @@ def _find_taint_flows_auto(
     language: Optional[str],
     source_patterns: Optional[list],
     sink_patterns: Optional[list],
+    sanitizer_patterns: Optional[list],
     filename: Optional[str],
     max_results: int,
     timeout: int,
@@ -229,6 +307,7 @@ def _find_taint_flows_auto(
 
     Uses language-specific default patterns (or user overrides) to find all
     source and sink nodes, then runs reachableByFlows() once.
+    Flows through sanitizer functions are filtered out.
     """
     # Resolve language
     lang = language or codebase_info.language or "c"
@@ -254,15 +333,28 @@ def _find_taint_flows_auto(
     if not snk_patterns:
         return f"No taint sink patterns available for language '{lang}'. Supported: {', '.join(DEFAULT_SINKS.keys())}"
 
+    # Resolve sanitizer patterns: user-provided -> config -> built-in defaults
+    taint_san_cfg = (
+        getattr(cfg.cpg, "taint_sanitizers", {})
+        if hasattr(cfg.cpg, "taint_sanitizers")
+        else {}
+    )
+    san_patterns = sanitizer_patterns or taint_san_cfg.get(lang, []) or DEFAULT_SANITIZERS.get(lang.lower(), [])
+
     # Build Joern regex patterns
     source_regex = _build_joern_name_pattern(src_patterns)
     sink_regex = _build_joern_name_pattern(snk_patterns)
+    sanitizer_regex = _build_joern_name_pattern(san_patterns) if san_patterns else ""
+
+    # Build file filter regex with path-boundary anchoring
+    file_filter_regex = _build_file_filter_regex(filename) if filename else ""
 
     cache_params = {
         "mode": "auto",
         "lang": lang,
         "source_patterns": sorted(set(src_patterns)),
         "sink_patterns": sorted(set(snk_patterns)),
+        "sanitizer_patterns": sorted(set(san_patterns)) if san_patterns else [],
         "filename": filename,
         "max_results": max_results,
     }
@@ -272,7 +364,8 @@ def _find_taint_flows_auto(
             "taint_flows_auto",
             source_pattern=source_regex,
             sink_pattern=sink_regex,
-            file_filter=filename or "",
+            sanitizer_pattern=sanitizer_regex,
+            file_filter=file_filter_regex,
             max_results=max_results,
         )
 
@@ -375,7 +468,8 @@ Examples:
             def _execute():
                 # Build query with optional file filter
                 if filename:
-                    query = f'cpg.call.name("{joined}").where(_.file.name(".*{filename}.*")).map(c => (c.id, c.name, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take({limit})'
+                    file_regex = _build_file_filter_regex(filename)
+                    query = f'cpg.call.name("{joined}").where(_.file.name("{file_regex}")).map(c => (c.id, c.name, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take({limit})'
                 else:
                     query = f'cpg.call.name("{joined}").map(c => (c.id, c.name, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take({limit})'
 
@@ -499,7 +593,8 @@ Examples:
             def _execute():
                 # Build query with optional file filter
                 if filename:
-                    query = f'cpg.call.name("{joined}").where(_.file.name(".*{filename}.*")).map(c => (c.id, c.name, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take({limit})'
+                    file_regex = _build_file_filter_regex(filename)
+                    query = f'cpg.call.name("{joined}").where(_.file.name("{file_regex}")).map(c => (c.id, c.name, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take({limit})'
                 else:
                     query = f'cpg.call.name("{joined}").map(c => (c.id, c.name, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take({limit})'
 
@@ -617,6 +712,7 @@ Examples:
         source_patterns: Annotated[Optional[list], Field(description="(Auto mode) Override default source function names (e.g., ['getenv', 'read'])")] = None,
         sink_patterns: Annotated[Optional[list], Field(description="(Auto mode) Override default sink function names (e.g., ['system', 'strcpy'])")] = None,
         filename: Annotated[Optional[str], Field(description="(Auto mode) Regex to filter sources/sinks by filename")] = None,
+        sanitizer_patterns: Annotated[Optional[list], Field(description="(Auto mode) Override default sanitizer function names. Flows through sanitizers are filtered out.")] = None,
         # Legacy/Deprecated arguments - included to provide helpful error messages
         source_pattern: Annotated[Optional[str], Field(description="DEPRECATED: Do not use")] = None,
         sink_pattern: Annotated[Optional[str], Field(description="DEPRECATED: Do not use")] = None,
@@ -658,6 +754,7 @@ Examples:
                     language=language,
                     source_patterns=source_patterns,
                     sink_patterns=sink_patterns,
+                    sanitizer_patterns=sanitizer_patterns,
                     filename=filename,
                     max_results=max_results,
                     timeout=timeout if timeout != 60 else 120,  # default to 120s for auto

@@ -173,13 +173,31 @@
           if (aliases.size > 1) {
             val aliasesWithoutOriginal = aliases - freedPtr
             aliasesWithoutOriginal.foreach { alias =>
-              val aliasReassigned = method.assignment.l.exists { assign =>
-                assign.lineNumber.getOrElse(-1) > freeLine && assign.target.code == alias
+              // Collect reassignment lines for this alias (after free)
+              val aliasReassignmentLines = mutable.Set[Int]()
+              method.assignment.l.foreach { assign =>
+                val assignLine = assign.lineNumber.getOrElse(-1)
+                if (assignLine > freeLine && assign.target.code.trim == alias) {
+                  aliasReassignmentLines += assignLine
+                }
               }
-              if (!aliasReassigned) {
-                method.call.l.foreach { call =>
-                  val callLine = call.lineNumber.getOrElse(-1)
-                  if (callLine > freeLine && !call.name.matches("free|cfree|g_free|xmlFree|xsltFree.*")) {
+
+              method.call.l.foreach { call =>
+                val callLine = call.lineNumber.getOrElse(-1)
+                if (callLine > freeLine && !call.name.matches("free|cfree|g_free|xmlFree|xsltFree.*")) {
+                  // Check if alias was reassigned between free and this specific usage
+                  val aliasReassignedBefore = aliasReassignmentLines.exists(rl => rl > freeLine && rl < callLine)
+
+                  // Check for early return between free and usage
+                  val hasEarlyReturn = method.ast.isReturn.l.exists { ret =>
+                    val retLine = ret.lineNumber.getOrElse(-1)
+                    retLine > freeLine && retLine < callLine
+                  }
+
+                  // Check if free and usage are in mutually exclusive if/else branches
+                  val inDifferentBranches = areInMutuallyExclusiveBranches(method, freeLine, callLine)
+
+                  if (!aliasReassignedBefore && !hasEarlyReturn && !inDifferentBranches) {
                     val argsContainAlias = call.argument.code.l.exists { argCode =>
                       argCode == alias || argCode.startsWith(alias + "->") || argCode.startsWith(alias + "[") || argCode.startsWith("*" + alias)
                     }
@@ -206,12 +224,11 @@
                 // Skip usages in the same method at/before the free
                 !(idFile == freeFile && id.method.name == methodName && idLine <= freeLine)
               }
-              .take(100)
               .collect { case cfgNode: CfgNode => cfgNode }
             
             if (sameNameUsages.nonEmpty) {
               try {
-                val flows = sameNameUsages.reachableByFlows(sources).l.take(5)
+                val flows = sameNameUsages.reachableByFlows(sources).l
                 
                 flows.foreach { flow =>
                   val elements = flow.elements.l

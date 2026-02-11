@@ -5,6 +5,7 @@
 
   val sourcePattern = "{{source_pattern}}"
   val sinkPattern = "{{sink_pattern}}"
+  val sanitizerPattern = "{{sanitizer_pattern}}"
   val fileFilter = "{{file_filter}}"
   val maxResults = {{max_results}}
 
@@ -35,9 +36,10 @@
   }
 
   // Build source nodes from pattern, with optional file filter
+  // fileFilter is pre-built with path-boundary anchoring (e.g., "(^|.*/)parser\\.c.*")
   val sources: List[CfgNode] = {
     if (fileFilter.nonEmpty) {
-      cpg.call.name(sourcePattern).where(_.file.name(".*" + fileFilter + ".*")).l
+      cpg.call.name(sourcePattern).where(_.file.name(fileFilter)).l
     } else {
       cpg.call.name(sourcePattern).l
     }
@@ -46,7 +48,7 @@
   // Build sink nodes from pattern, with optional file filter
   val sinkCalls: List[Call] = {
     if (fileFilter.nonEmpty) {
-      cpg.call.name(sinkPattern).where(_.file.name(".*" + fileFilter + ".*")).l
+      cpg.call.name(sinkPattern).where(_.file.name(fileFilter)).l
     } else {
       cpg.call.name(sinkPattern).l
     }
@@ -65,6 +67,9 @@
   if (fileFilter.nonEmpty) {
     output.append(s"File filter: $fileFilter\n")
   }
+  if (sanitizerPattern.nonEmpty) {
+    output.append(s"Sanitizers: $sanitizerPattern\n")
+  }
   output.append("\n")
 
   if (sources.isEmpty) {
@@ -75,13 +80,33 @@
     output.append("Try broadening sink_patterns or removing the filename filter.\n")
   } else {
     // Run batch taint analysis: all sinks reachable from all sources
-    val flows = effectiveSinks.reachableByFlows(sources).l.take(maxResults)
+    val rawFlows = effectiveSinks.reachableByFlows(sources).l.take(maxResults)
+
+    // Filter out flows that pass through sanitizer functions
+    val flows = if (sanitizerPattern.isEmpty) rawFlows else {
+      rawFlows.filterNot { flow =>
+        val elements = flow.elements.l
+        // Check intermediate elements (exclude first=source and last=sink)
+        elements.size > 2 && elements.slice(1, elements.size - 1).exists {
+          case c: Call => c.name.matches(sanitizerPattern)
+          case _ => false
+        }
+      }
+    }
 
     if (flows.isEmpty) {
       output.append("No confirmed taint flows found.\n")
       output.append(s"Tested ${sources.size} sources against ${sinkCalls.size} sinks.\n")
+      if (sanitizerPattern.nonEmpty && rawFlows.nonEmpty) {
+        output.append(s"Note: ${rawFlows.size} flow(s) were filtered out by sanitizer functions.\n")
+      }
     } else {
-      output.append(s"Found ${flows.size} confirmed taint flow(s):\n\n")
+      val filteredCount = rawFlows.size - flows.size
+      output.append(s"Found ${flows.size} confirmed taint flow(s):\n")
+      if (filteredCount > 0) {
+        output.append(s"($filteredCount flow(s) filtered out by sanitizer functions)\n")
+      }
+      output.append("\n")
 
       // Deduplicate: track seen (source_file:line -> sink_file:line) pairs
       val seen = mutable.Set[String]()
