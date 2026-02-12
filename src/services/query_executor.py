@@ -53,6 +53,16 @@ class QueryExecutor:
             # Get cached client with connection pooling instead of creating new one
             joern_client = self.joern_server_manager.get_or_create_client(codebase_hash)
 
+            # Quick health check before submitting potentially expensive queries
+            if not joern_client.check_health(timeout=5):
+                logger.warning(f"Joern server on port {port} is not responding, it may be overloaded or crashed")
+                return QueryResult(
+                    success=False,
+                    error=f"Joern server not responding (port {port}). The server may be overloaded from a previous heavy query. "
+                          f"Try again in a few minutes, or restart the server.",
+                    execution_time=time.time() - start_time,
+                )
+
             # Normalize query for JSON output
             normalized_query = self._normalize_query(query, limit)
             logger.debug(f"Normalized query for execution: {normalized_query}")
@@ -133,8 +143,17 @@ class QueryExecutor:
                     row_count = 1
                 return QueryResult(success=True, data=data, row_count=row_count)
             else:
-                # Query failed
+                # Query failed - provide actionable error messages
                 stderr = result.get("stderr", "")
+                if "timeout" in stderr.lower() or "timed out" in stderr.lower():
+                    error_msg = (
+                        f"Query timed out after {timeout}s. "
+                        f"For large codebases, try: 1) Filtering by filename to reduce scope, "
+                        f"2) Increasing the timeout parameter, "
+                        f"3) Using simpler queries before complex taint analysis."
+                    )
+                    logger.error(f"Query execution timed out after {timeout}s: {query[:100]}...")
+                    return QueryResult(success=False, error=error_msg)
                 logger.error(f"Query execution failed: {stderr}")
                 return QueryResult(success=False, error=stderr)
 

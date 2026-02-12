@@ -176,14 +176,14 @@ class JoernServerManager:
 
         return client
 
-    def load_cpg(self, codebase_hash: str, cpg_path: str, timeout: int = 120) -> bool:
+    def load_cpg(self, codebase_hash: str, cpg_path: str, timeout: int = 600) -> bool:
         """
         Load a CPG into the Joern server for the given codebase
 
         Args:
             codebase_hash: The codebase identifier
             cpg_path: Path to the CPG file
-            timeout: Timeout for loading operation
+            timeout: Timeout for loading operation (default 600s for large codebases)
 
         Returns:
             True if CPG was loaded successfully

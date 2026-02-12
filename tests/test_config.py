@@ -80,7 +80,7 @@ class TestLoadConfig:
             assert config.joern.memory_limit == "4g"
             assert config.cpg.generation_timeout == 600
             assert config.cpg.max_repo_size_mb == 500
-            assert config.query.timeout == 30
+            assert config.query.timeout == 300
             assert config.query.cache_enabled is True
             assert config.query.cache_ttl == 300
             assert config.storage.workspace_root == "/tmp/codebadger"

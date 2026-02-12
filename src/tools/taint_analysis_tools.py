@@ -676,7 +676,7 @@ Args:
     sink_patterns: (Auto mode) Optional list of sink function names to override defaults (e.g., ['system', 'strcpy']).
     filename: (Auto mode) Optional regex to filter sources/sinks by filename.
     max_results: Maximum flows to return (default 20).
-    timeout: Query timeout in seconds (default 60 for manual, 120 for auto).
+    timeout: Query timeout in seconds (default 120 for manual, 300 for auto).
 
 Returns:
     Human-readable text showing:
@@ -706,7 +706,7 @@ Examples:
         source_node_id: Annotated[Optional[int], Field(description="(Manual mode) Node ID from find_taint_sources output")] = None,
         sink_node_id: Annotated[Optional[int], Field(description="(Manual mode) Node ID from find_taint_sinks output")] = None,
         max_results: Annotated[int, Field(description="Maximum flows to return")] = 20,
-        timeout: Annotated[int, Field(description="Query timeout in seconds (default 60 for manual, 120 for auto)")] = 60,
+        timeout: Annotated[int, Field(description="Query timeout in seconds (default 120 for manual, 300 for auto)")] = 120,
         mode: Annotated[Optional[str], Field(description="Set to 'auto' for batch analysis with all default sources/sinks. Omit for manual mode.")] = None,
         language: Annotated[Optional[str], Field(description="(Auto mode) Programming language for default patterns. Auto-detected if omitted.")] = None,
         source_patterns: Annotated[Optional[list], Field(description="(Auto mode) Override default source function names (e.g., ['getenv', 'read'])")] = None,
@@ -757,7 +757,7 @@ Examples:
                     sanitizer_patterns=sanitizer_patterns,
                     filename=filename,
                     max_results=max_results,
-                    timeout=timeout if timeout != 60 else 120,  # default to 120s for auto
+                    timeout=timeout if timeout != 120 else 300,  # default to 300s for auto mode (large codebases need more time)
                 )
 
             # --- MANUAL MODE ---
@@ -1147,7 +1147,7 @@ Args:
     codebase_hash: The codebase hash from generate_cpg.
     filename: Optional filename regex to filter results (e.g., 'runtest.c').
     limit: Maximum results to return (default 100).
-    timeout: Query timeout in seconds (default 180, higher due to dataflow analysis).
+    timeout: Query timeout in seconds (default 300, higher due to dataflow analysis).
 
 Returns:
     Human-readable text showing:
@@ -1165,7 +1165,7 @@ Notes:
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
         filename: Annotated[Optional[str], Field(description="Optional filename regex to filter results")] = None,
         limit: Annotated[int, Field(description="Maximum results to return")] = 100,
-        timeout: Annotated[int, Field(description="Query timeout in seconds")] = 120,
+        timeout: Annotated[int, Field(description="Query timeout in seconds")] = 300,
     ) -> str:
         """Detect potential Use-After-Free vulnerabilities in the codebase."""
         try:
@@ -1238,7 +1238,7 @@ Args:
     codebase_hash: The codebase hash from generate_cpg.
     filename: Optional filename regex to filter results (e.g., 'parser.c').
     limit: Maximum results to return (default 100).
-    timeout: Query timeout in seconds (default 120).
+    timeout: Query timeout in seconds (default 300).
 
 Returns:
     Human-readable text showing:
@@ -1250,7 +1250,7 @@ Returns:
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
         filename: Annotated[Optional[str], Field(description="Optional filename regex to filter results")] = None,
         limit: Annotated[int, Field(description="Maximum results to return")] = 100,
-        timeout: Annotated[int, Field(description="Query timeout in seconds")] = 120,
+        timeout: Annotated[int, Field(description="Query timeout in seconds")] = 300,
     ) -> str:
         """Detect potential Double-Free vulnerabilities in the codebase."""
         try:
@@ -1328,7 +1328,7 @@ Args:
     codebase_hash: The codebase hash from generate_cpg.
     filename: Optional filename regex to filter results (e.g., 'parser.c').
     limit: Maximum results to return (default 100).
-    timeout: Query timeout in seconds (default 120).
+    timeout: Query timeout in seconds (default 300).
 
 Returns:
     Human-readable text showing:
@@ -1346,7 +1346,7 @@ Notes:
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
         filename: Annotated[Optional[str], Field(description="Optional filename regex to filter results")] = None,
         limit: Annotated[int, Field(description="Maximum results to return")] = 100,
-        timeout: Annotated[int, Field(description="Query timeout in seconds")] = 120,
+        timeout: Annotated[int, Field(description="Query timeout in seconds")] = 300,
     ) -> str:
         """Detect potential Null Pointer Dereference vulnerabilities in the codebase."""
         try:
@@ -1426,7 +1426,7 @@ Args:
     codebase_hash: The codebase hash from generate_cpg.
     filename: Optional filename regex to filter results (e.g., 'parser.c').
     limit: Maximum results to return (default 100).
-    timeout: Query timeout in seconds (default 120).
+    timeout: Query timeout in seconds (default 300).
 
 Returns:
     Human-readable text showing:
@@ -1444,7 +1444,7 @@ Notes:
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
         filename: Annotated[Optional[str], Field(description="Optional filename regex to filter results")] = None,
         limit: Annotated[int, Field(description="Maximum results to return")] = 100,
-        timeout: Annotated[int, Field(description="Query timeout in seconds")] = 120,
+        timeout: Annotated[int, Field(description="Query timeout in seconds")] = 300,
     ) -> str:
         """Detect potential Integer Overflow/Underflow vulnerabilities in the codebase."""
         try:

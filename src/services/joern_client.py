@@ -50,6 +50,7 @@ class JoernServerClient:
         # Create retry strategy
         retry_strategy = Retry(
             total=max_retries,
+            read=0,  # Do NOT retry on read timeouts
             backoff_factor=backoff_factor,
             status_forcelist=[429, 500, 502, 503, 504],
             allowed_methods=["HEAD", "GET", "OPTIONS", "POST", "PUT", "DELETE"]
@@ -89,6 +90,22 @@ class JoernServerClient:
         return False
 
     # Legacy async submission methods removed: use execute_query() for synchronous API
+
+    def check_health(self, timeout: int = 5) -> bool:
+        """
+        Quick health check to verify the Joern server is responsive.
+        
+        Args:
+            timeout: Maximum time to wait for response (seconds)
+            
+        Returns:
+            True if server is responding, False otherwise
+        """
+        try:
+            response = self.session.get(self.base_url, timeout=timeout)
+            return response.status_code in [200, 404]
+        except Exception:
+            return False
 
     def execute_query(
         self,
@@ -140,13 +157,23 @@ class JoernServerClient:
             }
             
         except requests.Timeout:
-            logger.error(f"Query timeout after {timeout}s")
+            logger.error(f"Query timeout after {timeout}s: {query[:100]}...")
             return {
                 "success": False,
                 "stdout": "",
-                "stderr": f"Query timeout after {timeout}s"
+                "stderr": f"Query timeout after {timeout}s. The Joern server may be overloaded. "
+                         f"Consider filtering by filename or increasing the timeout."
             }
         except requests.RequestException as e:
+            error_str = str(e)
+            if "ReadTimeoutError" in error_str or "Read timed out" in error_str:
+                logger.error(f"Read timeout after {timeout}s for query: {query[:100]}...")
+                return {
+                    "success": False,
+                    "stdout": "",
+                    "stderr": f"Query read timeout after {timeout}s. Large codebase queries (taint analysis, dataflow) "
+                             f"may need more time. Try increasing the timeout parameter or filtering by filename."
+                }
             logger.error(f"HTTP error executing query: {e}")
             return {
                 "success": False,
@@ -161,14 +188,14 @@ class JoernServerClient:
                 "stderr": f"Error: {str(e)}"
             }
 
-    def load_cpg(self, cpg_path: str, project_name: Optional[str] = None, timeout: int = 120) -> bool:
+    def load_cpg(self, cpg_path: str, project_name: Optional[str] = None, timeout: int = 600) -> bool:
         """
         Load a CPG file into the Joern server
         
         Args:
             cpg_path: Path to the CPG file to load
             project_name: Optional name to assign to the project
-            timeout: Maximum time to wait for loading (seconds)
+            timeout: Maximum time to wait for loading (seconds, default 600 for large codebases)
             
         Returns:
             True if CPG was loaded successfully, False otherwise
@@ -178,7 +205,7 @@ class JoernServerClient:
             # Use workspace.resett to ensure clean state in the isolated workspace
             # We don't force project name to avoid potential API issues, letting Joern derive it from filename
             query = f'workspace.reset; importCpg("{cpg_path}")'
-            logger.info(f"Loading CPG from {cpg_path}")
+            logger.info(f"Loading CPG from {cpg_path} (timeout={timeout}s)")
             
             result = self.execute_query(query, timeout=timeout)
             

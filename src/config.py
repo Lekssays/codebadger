@@ -111,7 +111,7 @@ def load_config(config_path: Optional[str] = None) -> Config:
                 output_truncation_length=int(os.getenv("OUTPUT_TRUNCATION_LENGTH", "2000")),
             ),
             query=QueryConfig(
-                timeout=int(os.getenv("QUERY_TIMEOUT", "30")),
+                timeout=int(os.getenv("QUERY_TIMEOUT", "300")),
                 cache_enabled=os.getenv("QUERY_CACHE_ENABLED", "true").lower()
                 == "true",
                 cache_ttl=int(os.getenv("QUERY_CACHE_TTL", "300")),

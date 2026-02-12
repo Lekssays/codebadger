@@ -115,6 +115,89 @@ def _calculate_repo_size_mb(source_path: str) -> int:
         raise
 
 
+def _estimate_processing_time(source_path: str, language: str, has_cpg: bool = False) -> str:
+    """Estimate processing time based on codebase size and whether CPG already exists.
+    
+    Returns a human-readable time estimate string.
+    """
+    try:
+        size_mb = _calculate_repo_size_mb(source_path)
+    except Exception:
+        size_mb = 0
+
+    if has_cpg:
+        # Only need to load CPG into Joern + warm cache
+        if size_mb > 200:
+            return "~3-8 minutes (loading large CPG into Joern server)"
+        elif size_mb > 50:
+            return "~1-3 minutes (loading CPG into Joern server)"
+        else:
+            return "~30-60 seconds (loading CPG into Joern server)"
+    else:
+        # Full pipeline: CPG generation + Joern load + cache warm-up
+        if size_mb > 200:
+            return "~5-15 minutes (large codebase: CPG generation + server loading)"
+        elif size_mb > 50:
+            return "~2-5 minutes (CPG generation + server loading)"
+        elif size_mb > 10:
+            return "~1-3 minutes (CPG generation + server loading)"
+        else:
+            return "~30-90 seconds (CPG generation + server loading)"
+
+
+async def _restart_server_async(
+    codebase_hash: str,
+    container_cpg_path: str,
+    services: dict,
+):
+    """Async task to restart Joern server and reload CPG for an existing codebase."""
+    logger = logging.getLogger(__name__)
+    try:
+        joern_server_manager = services.get("joern_server_manager")
+        codebase_tracker = services["codebase_tracker"]
+
+        if not joern_server_manager:
+            logger.error(f"No joern_server_manager available for restart of {codebase_hash}")
+            return
+
+        logger.info(f"Async: starting Joern server for {codebase_hash}")
+        joern_port = joern_server_manager.spawn_server(codebase_hash)
+        logger.info(f"Async: Joern server started on port {joern_port}, loading CPG...")
+
+        joern_server_manager.load_cpg(codebase_hash, container_cpg_path)
+        logger.info(f"Async: CPG loaded into Joern server on port {joern_port}")
+
+        # Update DB
+        codebase_tracker.update_codebase(
+            codebase_hash=codebase_hash,
+            joern_port=joern_port,
+            metadata={"status": "ready"}
+        )
+
+        # Trigger cache warm-up
+        if "code_browsing_service" in services:
+            logger.info(f"Async: starting cache warm-up for {codebase_hash}")
+            try:
+                import asyncio
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, services["code_browsing_service"].warm_up_cache, codebase_hash)
+                logger.info(f"Async: cache warm-up complete for {codebase_hash}")
+            except Exception as e:
+                logger.warning(f"Async: cache warm-up failed for {codebase_hash}: {e}")
+
+        logger.info(f"Async: server restart complete for {codebase_hash}")
+    except Exception as e:
+        logger.error(f"Async: failed to restart server for {codebase_hash}: {e}", exc_info=True)
+        try:
+            codebase_tracker = services["codebase_tracker"]
+            codebase_tracker.update_codebase(
+                codebase_hash=codebase_hash,
+                metadata={"status": "failed", "error": f"Server restart failed: {e}"}
+            )
+        except Exception:
+            pass
+
+
 async def _generate_cpg_async(
     codebase_hash: str,
     codebase_dir: str,
@@ -343,44 +426,67 @@ Examples:
                 # Check if Joern server is still running
                 joern_server_manager = services.get("joern_server_manager")
                 joern_port = existing_codebase.joern_port
+                server_running = False
                 
                 if joern_server_manager:
-                    # If we have a port recorded, check if it's actually running
-                    if joern_port and not joern_server_manager.is_server_running(codebase_hash):
-                        logger.info(f"Joern server recorded on port {joern_port} but not running for {codebase_hash}")
-                        joern_port = None # Reset port since it's not running
-                    
-                    # If not running (or wasn't running), start it
-                    if not joern_port:
-                        logger.info(f"Starting Joern server for existing codebase {codebase_hash}")
-                        try:
-                            # Start server
-                            joern_port = joern_server_manager.spawn_server(codebase_hash)
-                            
-                            # Load CPG
-                            container_cpg_path = existing_codebase.metadata.get("container_cpg_path")
-                            if not container_cpg_path:
-                                # Fallback if not in metadata
-                                container_cpg_path = f"/playground/cpgs/{codebase_hash}/cpg.bin"
-                                
-                            joern_server_manager.load_cpg(codebase_hash, container_cpg_path)
-                            
-                            # Update port in DB
-                            codebase_tracker.update_codebase(codebase_hash, joern_port=joern_port)
-                            logger.info(f"Joern server started on port {joern_port}")
-                        except Exception as e:
-                            logger.warning(f"Failed to start Joern server: {e}")
+                    if joern_port and joern_server_manager.is_server_running(codebase_hash):
+                        server_running = True
+                    else:
+                        if joern_port:
+                            logger.info(f"Joern server recorded on port {joern_port} but not running for {codebase_hash}")
+                        joern_port = None
                 
-                return {
-                    "codebase_hash": codebase_hash,
-                    "status": "ready",
-                    "message": "CPG already exists",
-                    "cpg_path": existing_codebase.cpg_path,
-                    "joern_port": joern_port,
-                    "source_type": existing_codebase.source_type,
-                    "source_path": existing_codebase.source_path,
-                    "language": existing_codebase.language,
-                }
+                if server_running:
+                    # Server is already running, return ready immediately
+                    return {
+                        "codebase_hash": codebase_hash,
+                        "status": "ready",
+                        "message": "CPG already exists and Joern server is running.",
+                        "cpg_path": existing_codebase.cpg_path,
+                        "joern_port": joern_port,
+                        "source_type": existing_codebase.source_type,
+                        "source_path": existing_codebase.source_path,
+                        "language": existing_codebase.language,
+                    }
+                else:
+                    # Server not running — kick off async restart and return immediately
+                    container_cpg_path = existing_codebase.metadata.get("container_cpg_path")
+                    if not container_cpg_path:
+                        container_cpg_path = f"/playground/cpgs/{codebase_hash}/cpg.bin"
+
+                    # Mark as loading in DB
+                    codebase_tracker.update_codebase(
+                        codebase_hash=codebase_hash,
+                        joern_port=None,
+                        metadata={"status": "loading", **{k: v for k, v in existing_codebase.metadata.items() if k != "status"}}
+                    )
+
+                    import asyncio
+                    asyncio.create_task(
+                        _restart_server_async(
+                            codebase_hash=codebase_hash,
+                            container_cpg_path=container_cpg_path,
+                            services=services,
+                        )
+                    )
+
+                    # Estimate time
+                    codebase_dir = os.path.join(
+                        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "playground")),
+                        "codebases", codebase_hash
+                    )
+                    estimate = _estimate_processing_time(codebase_dir, existing_codebase.language, has_cpg=True)
+
+                    return {
+                        "codebase_hash": codebase_hash,
+                        "status": "loading",
+                        "message": f"CPG exists but Joern server needs to restart. Loading in background. Estimated time: {estimate}. Use get_cpg_status to check progress.",
+                        "estimated_time": estimate,
+                        "cpg_path": existing_codebase.cpg_path,
+                        "source_type": existing_codebase.source_type,
+                        "source_path": existing_codebase.source_path,
+                        "language": existing_codebase.language,
+                    }
 
             # Get services
             git_manager = services["git_manager"]
@@ -473,11 +579,15 @@ Examples:
                 )
             )
 
+            # Estimate time
+            estimate = _estimate_processing_time(codebase_dir, language, has_cpg=False)
+
             # Return immediately with generating status
             return {
                 "codebase_hash": codebase_hash,
                 "status": "generating",
-                "message": "CPG generation started. Use get_cpg_status to check progress.",
+                "message": f"CPG generation started in background. Estimated time: {estimate}. Use get_cpg_status to check progress.",
+                "estimated_time": estimate,
                 "source_type": source_type,
                 "source_path": source_path,
                 "language": language,
@@ -554,24 +664,33 @@ Examples:
                         is_running = joern_server_manager.is_server_running(codebase_hash)
                     
                     if not is_running:
-                        logger.info(f"Joern server not running for ready codebase {codebase_hash}, starting it...")
+                        logger.info(f"Joern server not running for ready codebase {codebase_hash}, restarting in background...")
+                        joern_port = None
+                        status = "loading"
+
+                        # Kick off async restart
+                        container_cpg_path = codebase_info.metadata.get("container_cpg_path")
+                        if not container_cpg_path:
+                            container_cpg_path = f"/playground/cpgs/{codebase_hash}/cpg.bin"
+
+                        codebase_tracker.update_codebase(
+                            codebase_hash=codebase_hash,
+                            joern_port=None,
+                            metadata={"status": "loading", **{k: v for k, v in codebase_info.metadata.items() if k != "status"}}
+                        )
+
+                        import asyncio
                         try:
-                            # Start server
-                            joern_port = joern_server_manager.spawn_server(codebase_hash)
-                            
-                            # Load CPG
-                            container_cpg_path = codebase_info.metadata.get("container_cpg_path")
-                            if not container_cpg_path:
-                                container_cpg_path = f"/playground/cpgs/{codebase_hash}/cpg.bin"
-                                
-                            joern_server_manager.load_cpg(codebase_hash, container_cpg_path)
-                            
-                            # Update port in DB
-                            codebase_tracker.update_codebase(codebase_hash, joern_port=joern_port)
-                            logger.info(f"Joern server started on port {joern_port}")
-                        except Exception as e:
-                            logger.warning(f"Failed to start Joern server in get_cpg_status: {e}")
-                            # Don't fail the status check, just return what we have but maybe with a warning
+                            loop = asyncio.get_running_loop()
+                            loop.create_task(
+                                _restart_server_async(
+                                    codebase_hash=codebase_hash,
+                                    container_cpg_path=container_cpg_path,
+                                    services=services,
+                                )
+                            )
+                        except RuntimeError:
+                            logger.warning(f"No event loop for async restart of {codebase_hash}")
             
             return {
                 "codebase_hash": codebase_hash,
