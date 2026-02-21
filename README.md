@@ -133,46 +133,42 @@ Add the following:
 
 ## Available Tools
 
-### Core Tools
-| Tool | Description |
-|------|-------------|
-| `generate_cpg` | Generate a CPG for a codebase (from local path or GitHub URL) |
-| `get_cpg_status` | Get status and existence of a CPG by `codebase_hash` |
-| `run_cpgql_query` | Execute raw CPGQL queries |
-| `get_cpgql_syntax_help` | Get CPGQL syntax documentation and examples |
+### Core
+- `generate_cpg`: Generate a Code Property Graph (CPG) for a codebase (local path or GitHub URL).
+- `get_cpg_status`: Check whether a CPG exists and retrieve status metadata.
+- `run_cpgql_query`: Execute a raw CPGQL query against a CPG and return structured results.
+- `get_cpgql_syntax_help`: Show CPGQL syntax helpers, tips, and common error fixes.
 
-### Code Browsing Tools
-| Tool | Description |
-|------|-------------|
-| `get_codebase_summary` | Get high-level codebase overview (files, methods, calls) |
-| `list_files` | List source files in the codebase |
-| `list_methods` | Discover methods/functions with optional filtering |
-| `list_calls` | Find function call relationships |
-| `list_parameters` | Get parameter information for a method |
-| `get_method_source` | Retrieve method source code |
-| `get_code_snippet` | Retrieve code snippets by file and line range |
-| `get_call_graph` | Build call graphs (incoming/outgoing) |
+### Code browsing
+- `list_methods`: List methods/functions with optional regex/file filters.
+- `list_files`: Show source files as a paginated tree view.
+- `get_method_source`: Retrieve the source code for a named method.
+- `list_calls`: List call sites between functions (caller → callee).
+- `get_call_graph`: Build a human-readable call graph (incoming or outgoing).
+- `list_parameters`: Get parameter names, types, and order for a method.
+- `get_codebase_summary`: High-level metrics (files, methods, calls, language).
+- `get_code_snippet`: Return a file snippet by start/end line numbers.
 
-### Semantic Analysis Tools
-| Tool | Description |
-|------|-------------|
-| `get_cfg` | Get control flow graph (nodes AND edges) for a method |
-| `get_type_definition` | Get struct/type definition with members |
-| `get_macro_expansion` | Detect potential macro calls using heuristics |
+### Semantic analysis
+- `get_cfg`: Produce a control-flow graph (nodes and edges) for a method.
+- `get_type_definition`: Inspect struct/class types and their members.
+- `get_macro_expansion`: Heuristically detect likely macro-expanded calls.
 
-### Taint Analysis Tools
-| Tool | Description |
-|------|-------------|
-| `find_taint_sources` | Locate external input points (getenv, malloc, read, etc.) |
-| `find_taint_sinks` | Locate dangerous sinks (memcpy, system, free, etc.) |
-| `find_taint_flows` | Find dataflow paths (source→sink, source-only, or sink-only) |
-| `get_variable_flow` | Track variable assignments and data dependencies |
+### Taint & vulnerability analysis
+- `find_taint_sources`: Find likely external input points (sources).
+- `find_taint_sinks`: Locate dangerous sinks where tainted data can flow.
+- `find_taint_flows`: Detect dataflows from sources to sinks (taint analysis).
+- `get_program_slice`: Build backward/forward program slices for a call.
+- `get_variable_flow`: Trace data dependencies for a variable at a location.
+- `find_bounds_checks`: Search for bounds-checks near a buffer access.
+- `find_use_after_free`: Heuristic detection of use-after-free patterns.
+- `find_double_free`: Detect potential double-free issues.
+- `find_null_pointer_deref`: Find likely null pointer dereferences.
+- `find_integer_overflow`: Detect integer overflow patterns.
 
-### Advanced Analysis Tools
-| Tool | Description |
-|------|-------------|
-| `get_program_slice` | Build backward program slices from a call |
-| `find_bounds_checks` | Find bounds checks near buffer accesses |
+### Export & reporting
+- `store_findings`: Parse and store analysis findings into the database.
+- `export_sarif`: Export high-confidence findings in SARIF format.
 
 ## Contributing & Tests
 
