@@ -298,7 +298,7 @@ async def _generate_cpg_async(
         
         logger.info(f"CPG generated successfully: {cpg_path}")
         
-        # Step 4: Start Joern server with randomly assigned port (2000-2999)
+        # Step 4: Start Joern server with randomly assigned port (13371-13399)
         joern_port = None
         if joern_server_manager:
             try:
