@@ -422,7 +422,8 @@ Notes:
 
 Examples:
     find_taint_sources(codebase_hash="abc", language="c")
-    find_taint_sources(codebase_hash="abc", source_patterns=["read_from_socket"])"""
+    find_taint_sources(codebase_hash="abc", source_patterns=["read_from_socket"])""",
+        timeout=120,
     )
     def find_taint_sources(
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
@@ -548,7 +549,8 @@ Notes:
 
 Examples:
     find_taint_sinks(codebase_hash="abc", language="c")
-    find_taint_sinks(codebase_hash="abc", sink_patterns=["custom_exec"])"""
+    find_taint_sinks(codebase_hash="abc", sink_patterns=["custom_exec"])""",
+        timeout=120,
     )
     def find_taint_sinks(
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
@@ -697,7 +699,8 @@ Examples:
 
     # Manual mode — specific source and sink
     find_taint_flows(codebase_hash="...", source_location="main.c:42", sink_location="utils.c:100")
-    find_taint_flows(codebase_hash="...", source_node_id=12345, sink_node_id=67890)"""
+    find_taint_flows(codebase_hash="...", source_node_id=12345, sink_node_id=67890)""",
+        timeout=300,
     )
     def find_taint_flows(
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
@@ -932,7 +935,8 @@ Notes:
 Examples:
     get_program_slice(codebase_hash="abc", location="main.c:42")
     get_program_slice(codebase_hash="abc", location="parser.c:500:memcpy", direction="backward", max_depth=3)
-    get_program_slice(codebase_hash="abc", location="module/file.c:100", direction="forward")"""
+    get_program_slice(codebase_hash="abc", location="module/file.c:100", direction="forward")""",
+        timeout=300,
     )
     def get_program_slice(
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
@@ -1046,7 +1050,8 @@ Notes:
     - location filename should be relative to the project root.
 
 Examples:
-    get_variable_flow(codebase_hash="abc", location="main.c:50", variable="len", direction="backward")"""
+    get_variable_flow(codebase_hash="abc", location="main.c:50", variable="len", direction="backward")""",
+        timeout=120,
     )
     def get_variable_flow(
         codebase_hash: str,
@@ -1159,7 +1164,8 @@ Returns:
 Notes:
     - Deep interprocedural analysis can be slow (~2 min for large codebases).
     - Use get_program_slice to understand control flow around specific locations.
-    - Use find_taint_flows for alternative dataflow analysis approach."""
+    - Use find_taint_flows for alternative dataflow analysis approach.""",
+        timeout=300,
     )
     def find_use_after_free(
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
@@ -1244,7 +1250,8 @@ Returns:
     Human-readable text showing:
     - Each potential double-free issue with pointer name
     - First and second free locations with [file:line]
-    - Flow type (same-ptr, alias, or [CROSS-FUNC])"""
+    - Flow type (same-ptr, alias, or [CROSS-FUNC])""",
+        timeout=300,
     )
     def find_double_free(
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
@@ -1340,7 +1347,8 @@ Returns:
 Notes:
     - Includes deep interprocedural analysis using Joern's dataflow engine.
     - Use get_program_slice for deeper control-flow context around specific locations.
-    - Use find_taint_flows to check if allocation arguments come from external input."""
+    - Use find_taint_flows to check if allocation arguments come from external input.""",
+        timeout=300,
     )
     def find_null_pointer_deref(
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
@@ -1438,7 +1446,8 @@ Returns:
 Notes:
     - Includes deep interprocedural analysis using Joern's dataflow engine.
     - Use get_program_slice for deeper control-flow context around specific locations.
-    - Use find_taint_flows to check if arithmetic operands come from external input."""
+    - Use find_taint_flows to check if arithmetic operands come from external input.""",
+        timeout=300,
     )
     def find_integer_overflow(
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],

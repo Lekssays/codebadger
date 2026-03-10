@@ -758,7 +758,8 @@ Notes:
     - Parses text outputs into structured data
     - Assigns HIGH confidence to confirmed vulnerabilities
     - Maps findings to CWE IDs
-    - Determines severity based on vulnerability type"""
+    - Determines severity based on vulnerability type""",
+        timeout=60,
     )
     def store_findings(
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
@@ -919,7 +920,8 @@ Notes:
     - Only exports findings matching severity/confidence filters
     - Includes code flow paths for taint flows
     - Maps findings to CWE IDs
-    - Compatible with GitHub Code Scanning upload"""
+    - Compatible with GitHub Code Scanning upload""",
+        timeout=60,
     )
     def export_sarif(
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],

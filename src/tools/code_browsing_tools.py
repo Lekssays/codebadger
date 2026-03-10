@@ -51,7 +51,8 @@ Notes:
 
 Examples:
     list_methods(codebase_hash="abc", name_pattern=".*auth.*")
-    list_methods(codebase_hash="abc", callee_pattern="memcpy")"""
+    list_methods(codebase_hash="abc", callee_pattern="memcpy")""",
+        timeout=30,
     )
     def list_methods(
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
@@ -118,7 +119,8 @@ Notes:
 Examples:
     list_files(codebase_hash="abc")
     list_files(codebase_hash="abc", local_path="src/lib")
-    list_files(codebase_hash="abc", page=2)"""
+    list_files(codebase_hash="abc", page=2)""",
+        timeout=30,
     )
     def list_files(
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
@@ -183,7 +185,8 @@ Notes:
 
 Examples:
     get_method_source(codebase_hash="abc", method_name="main")
-    get_method_source(codebase_hash="abc", method_name="init", filename="driver.c")"""
+    get_method_source(codebase_hash="abc", method_name="init", filename="driver.c")""",
+        timeout=30,
     )
     def get_method_source(
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
@@ -351,7 +354,8 @@ Notes:
 
 Examples:
     list_calls(codebase_hash="abc", callee_pattern="strcpy")
-    list_calls(codebase_hash="abc", caller_pattern="main")"""
+    list_calls(codebase_hash="abc", caller_pattern="main")""",
+        timeout=30,
     )
     def list_calls(
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
@@ -423,7 +427,8 @@ Notes:
 
 Examples:
     get_call_graph(codebase_hash="abc", method_name="main", direction="outgoing")
-    get_call_graph(codebase_hash="abc", method_name="vuln_func", direction="incoming")"""
+    get_call_graph(codebase_hash="abc", method_name="vuln_func", direction="incoming")""",
+        timeout=120,
     )
     def get_call_graph(
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
@@ -514,7 +519,8 @@ Notes:
     - Useful for understanding function signatures.
 
 Examples:
-    list_parameters(codebase_hash="abc", method_name="login")"""
+    list_parameters(codebase_hash="abc", method_name="login")""",
+        timeout=30,
     )
     def list_parameters(
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
@@ -565,7 +571,8 @@ Notes:
     - Useful as a first step when exploring a new codebase.
 
 Examples:
-    get_codebase_summary(codebase_hash="abc")"""
+    get_codebase_summary(codebase_hash="abc")""",
+        timeout=30,
     )
     def get_codebase_summary(
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")]
@@ -727,7 +734,8 @@ Notes:
     - filename should be relative to the project root (e.g., 'src/main.c' not '/absolute/path/src/main.c').
 
 Examples:
-    get_code_snippet(codebase_hash="abc", filename="main.c", start_line=10, end_line=20)"""
+    get_code_snippet(codebase_hash="abc", filename="main.c", start_line=10, end_line=20)""",
+        timeout=30,
     )
     def get_code_snippet(
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
@@ -850,7 +858,8 @@ Notes:
     - Use get_cpgql_syntax_help for reference.
 
 Examples:
-    run_cpgql_query(codebase_hash="abc", query="cpg.method.name.l")"""
+    run_cpgql_query(codebase_hash="abc", query="cpg.method.name.l")""",
+        timeout=120,
     )
     def run_cpgql_query(
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
@@ -956,7 +965,8 @@ Notes:
     - filename in buffer_access_location should be relative to the project root (e.g., 'src/parser.c:100').
 
 Examples:
-    find_bounds_checks(codebase_hash="abc", buffer_access_location="parser.c:3393")"""
+    find_bounds_checks(codebase_hash="abc", buffer_access_location="parser.c:3393")""",
+        timeout=120,
     )
     def find_bounds_checks(
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
@@ -1035,7 +1045,8 @@ Notes:
     - Use this to learn how to write queries for run_cpgql_query.
 
 Examples:
-    get_cpgql_syntax_help()"""
+    get_cpgql_syntax_help()""",
+        timeout=30,
     )
     def get_cpgql_syntax_help() -> Dict[str, Any]:
         """Get CPGQL syntax documentation and common query patterns."""
@@ -1158,7 +1169,8 @@ Notes:
     - Returns plain text.
 
 Examples:
-    get_cfg(codebase_hash="abc", method_name="main")"""
+    get_cfg(codebase_hash="abc", method_name="main")""",
+        timeout=120,
     )
     def get_cfg(
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
@@ -1237,7 +1249,8 @@ Notes:
     - Does not read header files; uses CPG type info.
 
 Examples:
-    get_type_definition(codebase_hash="abc", type_name=".*request_t.*")"""
+    get_type_definition(codebase_hash="abc", type_name=".*request_t.*")""",
+        timeout=30,
     )
     def get_type_definition(
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
@@ -1331,7 +1344,8 @@ Notes:
     - filename should be relative to the project root (e.g., 'src/main.c').
 
 Examples:
-    get_macro_expansion(codebase_hash="abc", filename="main.c", line_number=42)"""
+    get_macro_expansion(codebase_hash="abc", filename="main.c", line_number=42)""",
+        timeout=30,
     )
     def get_macro_expansion(
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
@@ -1483,7 +1497,8 @@ Notes:
 
 Examples:
     discover_fixed_vulnerabilities(codebase_hash="abc")
-    discover_fixed_vulnerabilities(codebase_hash="abc", limit=100)"""
+    discover_fixed_vulnerabilities(codebase_hash="abc", limit=100)""",
+        timeout=120,
     )
     def discover_fixed_vulnerabilities(
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
