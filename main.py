@@ -12,9 +12,8 @@ import os
 import signal
 import shutil
 import socket
-from contextlib import asynccontextmanager
-
 from fastmcp import FastMCP
+from fastmcp.server.lifespan import lifespan
 from starlette.responses import JSONResponse
 
 from src.config import load_config
@@ -84,8 +83,8 @@ def _setup_signal_handlers(mcp: FastMCP):
     logger.debug("Signal handlers registered for SIGTERM and SIGINT")
 
 
-@asynccontextmanager
-async def lifespan(mcp: FastMCP):
+@lifespan
+async def app_lifespan(server: FastMCP):
     """Startup and shutdown logic for the FastMCP server"""
     # Load configuration
     config = load_config("config.yaml")
@@ -93,7 +92,7 @@ async def lifespan(mcp: FastMCP):
     logger.info("Starting CodeBadger Server")
 
     # Setup signal handlers for graceful shutdown
-    _setup_signal_handlers(mcp)
+    _setup_signal_handlers(server)
 
     # Ensure required directories exist
     os.makedirs(config.storage.workspace_root, exist_ok=True)
@@ -148,26 +147,25 @@ async def lifespan(mcp: FastMCP):
         )
 
         # Register MCP tools now that services are initialized
-        register_tools(mcp, services)
+        register_tools(server, services)
 
         logger.info("All services initialized")
         logger.info("CodeBadger Server is ready")
 
-        yield
-
-        # Shutdown
-        await _graceful_shutdown()
-        logger.info("CodeBadger Server shutdown complete")
+        yield services
 
     except Exception as e:
         logger.error(f"Error during server lifecycle: {e}", exc_info=True)
         raise
+    finally:
+        await _graceful_shutdown()
+        logger.info("CodeBadger Server shutdown complete")
 
 
 # Initialize FastMCP server
 mcp = FastMCP(
     "CodeBadger Server",
-    lifespan=lifespan
+    lifespan=app_lifespan
 )
 
 # Note: Tools are registered inside the lifespan function
