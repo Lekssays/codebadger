@@ -113,6 +113,7 @@ class JoernConfig:
     port_min: int = 13371
     port_max: int = 13399
     server_init_sleep_time: float = 3.0
+    server_startup_timeout: int = 120
     # HTTP Connection Pooling
     http_pool_connections: int = 10
     http_pool_maxsize: int = 10

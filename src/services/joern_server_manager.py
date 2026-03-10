@@ -73,10 +73,14 @@ class JoernServerManager:
             work_dir = f"/tmp/joern-server-{codebase_hash}"
             log_file = f"/tmp/joern-{codebase_hash}.log"
 
+            # Set JAVA_OPTS for JVM memory/GC tuning if configured
+            java_opts = self.config.joern.java_opts if self.config else ""
+            java_opts_export = f"export JAVA_OPTS='{java_opts}' && " if java_opts else ""
+
             # Build command as array to prevent injection
             joern_cmd = [
                 "bash", "-c",
-                f"mkdir -p '{work_dir}' && cd '{work_dir}' && nohup /opt/joern/joern-cli/joern --server --server-host 0.0.0.0 --server-port {port} > '{log_file}' 2>&1 &"
+                f"{java_opts_export}mkdir -p '{work_dir}' && cd '{work_dir}' && nohup /opt/joern/joern-cli/joern --server --server-host 0.0.0.0 --server-port {port} > '{log_file}' 2>&1 &"
             ]
 
             logger.info(f"Starting Joern server for {codebase_hash} on port {port} inside container {self.container_name}")
@@ -95,8 +99,9 @@ class JoernServerManager:
 
             logger.info(f"Joern server command executed, waiting for server to be ready on port {port}...")
 
-            # Wait for server to start
-            if self._wait_for_server(port, timeout=60):
+            # Wait for server to start (JVM + Scala REPL init can take >60s in Docker)
+            startup_timeout = self.config.joern.server_startup_timeout if self.config else 120
+            if self._wait_for_server(port, timeout=startup_timeout):
                 logger.info(f"Joern server for {codebase_hash} started successfully on port {port}")
                 return port
             else:

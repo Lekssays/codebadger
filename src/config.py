@@ -50,6 +50,7 @@ def load_config(config_path: Optional[str] = None) -> Config:
                 port_min=int(os.getenv("JOERN_PORT_MIN", str(defaults.JOERN_PORT_MIN))),
                 port_max=int(os.getenv("JOERN_PORT_MAX", str(defaults.JOERN_PORT_MAX))),
                 server_init_sleep_time=float(os.getenv("JOERN_SERVER_INIT_SLEEP_TIME", str(defaults.JOERN_SERVER_INIT_SLEEP_TIME))),
+                server_startup_timeout=int(os.getenv("JOERN_SERVER_STARTUP_TIMEOUT", str(defaults.JOERN_SERVER_STARTUP_TIMEOUT))),
             ),
             cpg=CPGConfig(
                 generation_timeout=int(os.getenv("CPG_GENERATION_TIMEOUT", str(defaults.CPG_GENERATION_TIMEOUT))),
