@@ -10,6 +10,11 @@ docker==7.1.0
 gitpython==3.1.46
 PyYAML==6.0.3
 
+# Telemetry (optional - OpenTelemetry)
+opentelemetry-api>=1.33.0
+opentelemetry-sdk>=1.33.0
+opentelemetry-exporter-otlp>=1.33.0
+
 # Development dependencies
 pytest==8.4.2
 pytest-asyncio==1.2.0

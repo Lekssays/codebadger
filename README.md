@@ -263,6 +263,12 @@ MAX_REPO_SIZE_MB=500
 QUERY_TIMEOUT=30
 QUERY_CACHE_ENABLED=true
 QUERY_CACHE_TTL=300
+
+# Telemetry (OpenTelemetry)
+OTEL_ENABLED=false
+OTEL_SERVICE_NAME=codebadger
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+OTEL_EXPORTER_OTLP_PROTOCOL=grpc
 ```
 
 ### Config File
@@ -274,6 +280,71 @@ cp config.example.yaml config.yaml
 ```
 
 Then customize as needed.
+
+## Telemetry (OpenTelemetry)
+
+CodeBadger has built-in OpenTelemetry support for distributed tracing. When enabled, all MCP tool calls are automatically traced, plus custom spans for CPG generation, Joern server management, and query execution.
+
+### Quick Start
+
+1. Install the telemetry dependencies (included in `requirements.txt`):
+
+```bash
+pip install opentelemetry-sdk opentelemetry-exporter-otlp
+```
+
+2. Enable via environment variables:
+
+```bash
+export OTEL_ENABLED=true
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+python main.py
+```
+
+Or via `config.yaml`:
+
+```yaml
+telemetry:
+  enabled: true
+  service_name: codebadger
+  otlp_endpoint: http://localhost:4317
+  otlp_protocol: grpc  # or "http/protobuf"
+```
+
+### Local Development with Jaeger
+
+```bash
+# Start Jaeger (provides UI at http://localhost:16686)
+docker run -d --name jaeger \
+  -p 16686:16686 \
+  -p 4317:4317 \
+  jaegertracing/all-in-one:latest
+
+# Start CodeBadger with telemetry
+OTEL_ENABLED=true python main.py
+```
+
+### What Gets Traced
+
+| Span | Description |
+|------|-------------|
+| `tools/call {name}` | Every MCP tool invocation (automatic via FastMCP) |
+| `cpg.generate` | Full CPG generation pipeline |
+| `cpg.joern_cli_exec` | Joern CLI command execution inside Docker |
+| `cpg.spawn_server` | Joern server instance creation |
+| `cpg.load_cpg` | CPG file loading into Joern server |
+| `query.execute` | CPGQL query execution with timing and success attributes |
+
+### Configuration Reference
+
+| Setting | Env Variable | Default | Description |
+|---------|-------------|---------|-------------|
+| `enabled` | `OTEL_ENABLED` | `false` | Enable/disable telemetry |
+| `service_name` | `OTEL_SERVICE_NAME` | `codebadger` | Service name in traces |
+| `otlp_endpoint` | `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` | OTLP collector endpoint |
+| `otlp_protocol` | `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` | Export protocol (`grpc` or `http/protobuf`) |
+
+When telemetry is disabled (default), all tracing is no-op with zero overhead.
 
 
 

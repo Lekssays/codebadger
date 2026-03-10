@@ -13,6 +13,7 @@ from .models import (
     QueryConfig,
     ServerConfig,
     StorageConfig,
+    TelemetryConfig,
 )
 
 
@@ -71,6 +72,12 @@ def load_config(config_path: Optional[str] = None) -> Config:
                 workspace_root=os.getenv("WORKSPACE_ROOT", defaults.WORKSPACE_ROOT),
                 cleanup_on_shutdown=os.getenv("CLEANUP_ON_SHUTDOWN", str(defaults.CLEANUP_ON_SHUTDOWN)).lower()
                 == "true",
+            ),
+            telemetry=TelemetryConfig(
+                enabled=os.getenv("OTEL_ENABLED", "false").lower() == "true",
+                service_name=os.getenv("OTEL_SERVICE_NAME", "codebadger"),
+                otlp_endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317"),
+                otlp_protocol=os.getenv("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc"),
             ),
         )
 
@@ -158,4 +165,5 @@ def _dict_to_config(data: dict) -> Config:
         cpg=convert_config_section(CPGConfig, cpg_data),
         query=convert_config_section(QueryConfig, data.get("query", {})),
         storage=convert_config_section(StorageConfig, data.get("storage", {})),
+        telemetry=convert_config_section(TelemetryConfig, data.get("telemetry", {})),
     )

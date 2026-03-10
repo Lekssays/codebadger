@@ -11,9 +11,11 @@ from typing import AsyncIterator, Dict, Optional
 
 from ..exceptions import CPGGenerationError
 from ..models import CPGConfig, Config
+from ..telemetry import get_tracer
 from .joern_client import JoernServerClient
 
 logger = logging.getLogger(__name__)
+tracer = get_tracer()
 
 
 class CPGGenerator:
@@ -61,125 +63,136 @@ class CPGGenerator:
         Returns:
             Tuple of (host path to generated CPG file, joern server port or None)
         """
-        try:
-            logger.info(f"Starting CPG generation for {source_path} -> {cpg_path}")
+        with tracer.start_as_current_span("cpg.generate") as span:
+            span.set_attribute("cpg.language", language)
+            span.set_attribute("cpg.codebase_hash", codebase_hash)
+            span.set_attribute("cpg.source_path", source_path)
 
-            # Get language-specific command
-            if language not in self.LANGUAGE_COMMANDS:
-                raise CPGGenerationError(f"Unsupported language: {language}")
-
-            base_cmd = self.LANGUAGE_COMMANDS[language]
-
-            # Create CPG directory on host (we can do this from host)
-            cpg_dir = os.path.dirname(cpg_path)
-            os.makedirs(cpg_dir, exist_ok=True)
-            logger.info(f"CPG directory created: {cpg_dir}")
-
-            # Validate repository size before CPG generation
-            repo_size_mb = self._calculate_repo_size_mb(source_path)
-            max_size_mb = self.config.cpg.max_repo_size_mb
-            logger.info(f"Repository size: {repo_size_mb}MB, max allowed: {max_size_mb}MB")
-
-            if repo_size_mb > max_size_mb:
-                error_msg = (
-                    f"Repository size ({repo_size_mb}MB) exceeds maximum allowed "
-                    f"({max_size_mb}MB). Please reduce the repository size or increase "
-                    f"the max_repo_size_mb configuration."
-                )
-                logger.error(error_msg)
-                raise CPGGenerationError(error_msg)
-
-            # Convert host paths to container paths for Joern to use
-            # Host path like /home/aleks/.../playground/codebases/hash -> /playground/codebases/hash
-            container_source_path = self._host_to_container_path(source_path)
-            container_cpg_path = self._host_to_container_path(cpg_path)
-
-            logger.info(f"Container paths: src={container_source_path}, cpg={container_cpg_path}")
-
-            # Get Java opts from config
-            java_opts = self.config.joern.java_opts or "-Xmx2G -Xms512M"
-
-            # Build command arguments (base_cmd is already the full path in container)
-            cmd_args = [base_cmd, container_source_path, "-o", container_cpg_path]
-
-            # Add Java opts as environment variables (Joern scripts read JAVA_OPTS)
-            env = os.environ.copy()
-            if java_opts:
-                env["JAVA_OPTS"] = java_opts
-                logger.info(f"Using JAVA_OPTS: {java_opts}")
-
-            # Apply exclusions for languages that support them
-            if (
-                language in self.config.cpg.languages_with_exclusions
-                and self.config.cpg.exclusion_patterns
-            ):
-                # Escape special regex characters in patterns and combine with OR
-                escaped_patterns = [self._escape_regex_pattern(p) for p in self.config.cpg.exclusion_patterns]
-                combined_regex = "|".join(f"({p})" for p in escaped_patterns)
-                cmd_args.extend(["--exclude-regex", combined_regex])
-                logger.info(f"Applied {len(self.config.cpg.exclusion_patterns)} exclusion patterns")
-
-            logger.info(f"Executing CPG generation: {' '.join(cmd_args)}")
-
-            # Execute with timeout (run inside container)
             try:
-                result = self._exec_command_sync(cmd_args, env, self.config.cpg.generation_timeout)
+                logger.info(f"Starting CPG generation for {source_path} -> {cpg_path}")
 
-                truncation_length = self.config.cpg.output_truncation_length
-                logger.info(f"CPG generation output:\n{result[:truncation_length]}")
+                # Get language-specific command
+                if language not in self.LANGUAGE_COMMANDS:
+                    raise CPGGenerationError(f"Unsupported language: {language}")
 
-                # Check for fatal errors
-                if "ERROR:" in result or "Exception" in result:
-                    truncation_length = self.config.cpg.output_truncation_length
-                    logger.error(f"CPG generation reported fatal errors:\n{result[:truncation_length]}")
-                    error_msg = "Joern reported fatal errors during CPG generation"
+                base_cmd = self.LANGUAGE_COMMANDS[language]
+
+                # Create CPG directory on host (we can do this from host)
+                cpg_dir = os.path.dirname(cpg_path)
+                os.makedirs(cpg_dir, exist_ok=True)
+                logger.info(f"CPG directory created: {cpg_dir}")
+
+                # Validate repository size before CPG generation
+                repo_size_mb = self._calculate_repo_size_mb(source_path)
+                max_size_mb = self.config.cpg.max_repo_size_mb
+                span.set_attribute("cpg.repo_size_mb", repo_size_mb)
+                logger.info(f"Repository size: {repo_size_mb}MB, max allowed: {max_size_mb}MB")
+
+                if repo_size_mb > max_size_mb:
+                    error_msg = (
+                        f"Repository size ({repo_size_mb}MB) exceeds maximum allowed "
+                        f"({max_size_mb}MB). Please reduce the repository size or increase "
+                        f"the max_repo_size_mb configuration."
+                    )
+                    logger.error(error_msg)
                     raise CPGGenerationError(error_msg)
 
-                # Validate CPG was created on disk using host path
-                if self._validate_cpg(cpg_path):
-                    logger.info(f"CPG generation completed: {cpg_path}")
-                    
-                    # Spawn Joern server and load CPG if manager is available
-                    joern_port = None
-                    if self.joern_server_manager:
-                        try:
-                            logger.info(f"Spawning Joern server for codebase {codebase_hash}")
-                            joern_port = self.joern_server_manager.spawn_server(codebase_hash)
-                            logger.info(f"Joern server spawned successfully on port {joern_port}")
-                            
-                            logger.info(f"Loading CPG into Joern server on port {joern_port}")
-                            if self.joern_server_manager.load_cpg(codebase_hash, cpg_path):
-                                logger.info(f"CPG loaded into Joern server successfully on port {joern_port}")
-                            else:
-                                logger.warning("Failed to load CPG into Joern server")
-                                # Don't fail the whole operation, but log the issue
-                        except Exception as e:
-                            logger.error(f"Failed to setup Joern server for {codebase_hash}: {e}", exc_info=True)
-                            # Don't fail the whole operation, but the CPG is still usable
+                # Convert host paths to container paths for Joern to use
+                # Host path like /home/aleks/.../playground/codebases/hash -> /playground/codebases/hash
+                container_source_path = self._host_to_container_path(source_path)
+                container_cpg_path = self._host_to_container_path(cpg_path)
+
+                logger.info(f"Container paths: src={container_source_path}, cpg={container_cpg_path}")
+
+                # Get Java opts from config
+                java_opts = self.config.joern.java_opts or "-Xmx2G -Xms512M"
+
+                # Build command arguments (base_cmd is already the full path in container)
+                cmd_args = [base_cmd, container_source_path, "-o", container_cpg_path]
+
+                # Add Java opts as environment variables (Joern scripts read JAVA_OPTS)
+                env = os.environ.copy()
+                if java_opts:
+                    env["JAVA_OPTS"] = java_opts
+                    logger.info(f"Using JAVA_OPTS: {java_opts}")
+
+                # Apply exclusions for languages that support them
+                if (
+                    language in self.config.cpg.languages_with_exclusions
+                    and self.config.cpg.exclusion_patterns
+                ):
+                    # Escape special regex characters in patterns and combine with OR
+                    escaped_patterns = [self._escape_regex_pattern(p) for p in self.config.cpg.exclusion_patterns]
+                    combined_regex = "|".join(f"({p})" for p in escaped_patterns)
+                    cmd_args.extend(["--exclude-regex", combined_regex])
+                    logger.info(f"Applied {len(self.config.cpg.exclusion_patterns)} exclusion patterns")
+
+                logger.info(f"Executing CPG generation: {' '.join(cmd_args)}")
+
+                # Execute with timeout (run inside container)
+                try:
+                    with tracer.start_as_current_span("cpg.joern_cli_exec") as exec_span:
+                        exec_span.set_attribute("cpg.command", base_cmd)
+                        result = self._exec_command_sync(cmd_args, env, self.config.cpg.generation_timeout)
+
+                    truncation_length = self.config.cpg.output_truncation_length
+                    logger.info(f"CPG generation output:\n{result[:truncation_length]}")
+
+                    # Check for fatal errors
+                    if "ERROR:" in result or "Exception" in result:
+                        truncation_length = self.config.cpg.output_truncation_length
+                        logger.error(f"CPG generation reported fatal errors:\n{result[:truncation_length]}")
+                        error_msg = "Joern reported fatal errors during CPG generation"
+                        raise CPGGenerationError(error_msg)
+
+                    # Validate CPG was created on disk using host path
+                    if self._validate_cpg(cpg_path):
+                        logger.info(f"CPG generation completed: {cpg_path}")
+
+                        # Spawn Joern server and load CPG if manager is available
+                        joern_port = None
+                        if self.joern_server_manager:
+                            try:
+                                with tracer.start_as_current_span("cpg.spawn_server") as srv_span:
+                                    logger.info(f"Spawning Joern server for codebase {codebase_hash}")
+                                    joern_port = self.joern_server_manager.spawn_server(codebase_hash)
+                                    srv_span.set_attribute("cpg.joern_port", joern_port)
+                                    logger.info(f"Joern server spawned successfully on port {joern_port}")
+
+                                with tracer.start_as_current_span("cpg.load_cpg"):
+                                    logger.info(f"Loading CPG into Joern server on port {joern_port}")
+                                    if self.joern_server_manager.load_cpg(codebase_hash, cpg_path):
+                                        logger.info(f"CPG loaded into Joern server successfully on port {joern_port}")
+                                    else:
+                                        logger.warning("Failed to load CPG into Joern server")
+                                        # Don't fail the whole operation, but log the issue
+                            except Exception as e:
+                                logger.error(f"Failed to setup Joern server for {codebase_hash}: {e}", exc_info=True)
+                                # Don't fail the whole operation, but the CPG is still usable
+                        else:
+                            logger.warning("joern_server_manager is None - cannot spawn Joern server")
+
+                        logger.info(f"Returning CPG path: {cpg_path}, joern_port: {joern_port}")
+                        return cpg_path, joern_port
                     else:
-                        logger.warning("joern_server_manager is None - cannot spawn Joern server")
-                    
-                    logger.info(f"Returning CPG path: {cpg_path}, joern_port: {joern_port}")
-                    return cpg_path, joern_port
-                else:
-                    error_msg = "CPG file was not created"
-                    truncation_length = self.config.cpg.output_truncation_length
-                    logger.error(f"{error_msg}: {result[:truncation_length]}")
+                        error_msg = "CPG file was not created"
+                        truncation_length = self.config.cpg.output_truncation_length
+                        logger.error(f"{error_msg}: {result[:truncation_length]}")
+                        raise CPGGenerationError(error_msg)
+
+                except asyncio.TimeoutError:
+                    error_msg = (
+                        f"CPG generation timed out after {self.config.cpg.generation_timeout}s"
+                    )
+                    logger.error(error_msg)
                     raise CPGGenerationError(error_msg)
 
-            except asyncio.TimeoutError:
-                error_msg = (
-                    f"CPG generation timed out after {self.config.cpg.generation_timeout}s"
-                )
+            except CPGGenerationError:
+                raise
+            except Exception as e:
+                error_msg = f"CPG generation failed: {str(e)}"
                 logger.error(error_msg)
                 raise CPGGenerationError(error_msg)
-
-        except CPGGenerationError:
-            raise
-        except Exception as e:
-            error_msg = f"CPG generation failed: {str(e)}"
-            logger.error(error_msg)
-            raise CPGGenerationError(error_msg)
 
     def _calculate_repo_size_mb(self, source_path: str) -> int:
         """Calculate total repository size in MB

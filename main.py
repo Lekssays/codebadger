@@ -36,6 +36,42 @@ services = {}
 logger = logging.getLogger(__name__)
 
 
+def _setup_telemetry(config) -> None:
+    """Configure OpenTelemetry SDK if telemetry is enabled.
+
+    Must be called before FastMCP tools are invoked so the tracer provider
+    is in place when FastMCP's built-in instrumentation fires.
+    """
+    telemetry = config.telemetry
+    if not telemetry.enabled:
+        logger.debug("Telemetry disabled, skipping OpenTelemetry setup")
+        return
+
+    try:
+        from opentelemetry import trace
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+        from opentelemetry.sdk.resources import Resource
+
+        resource = Resource.create({"service.name": telemetry.service_name})
+        provider = TracerProvider(resource=resource)
+
+        if telemetry.otlp_protocol == "grpc":
+            from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+        else:
+            from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+
+        exporter = OTLPSpanExporter(endpoint=telemetry.otlp_endpoint)
+        provider.add_span_processor(BatchSpanProcessor(exporter))
+        trace.set_tracer_provider(provider)
+
+        logger.info(f"OpenTelemetry enabled: exporting to {telemetry.otlp_endpoint} via {telemetry.otlp_protocol}")
+    except ImportError:
+        logger.warning("OpenTelemetry packages not installed. Install with: pip install opentelemetry-sdk opentelemetry-exporter-otlp")
+    except Exception as e:
+        logger.warning(f"Failed to initialize OpenTelemetry: {e}")
+
+
 async def _graceful_shutdown():
     """Gracefully shutdown all services"""
     logger.info("Performing graceful shutdown...")
@@ -75,6 +111,9 @@ async def app_lifespan(server: FastMCP):
     config = load_config("config.yaml")
     setup_logging(config.server.log_level)
     logger.info("Starting CodeBadger Server")
+
+    # Setup OpenTelemetry (must happen before tool invocations)
+    _setup_telemetry(config)
 
     # Ensure required directories exist
     os.makedirs(config.storage.workspace_root, exist_ok=True)

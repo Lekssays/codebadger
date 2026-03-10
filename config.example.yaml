@@ -954,3 +954,8 @@ storage:
   workspace_root: ${WORKSPACE_ROOT:/tmp/codebadger}
   cleanup_on_shutdown: ${CLEANUP_ON_SHUTDOWN:true}
 
+telemetry:
+  enabled: ${OTEL_ENABLED:false}
+  service_name: ${OTEL_SERVICE_NAME:codebadger}
+  otlp_endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://localhost:4317}
+  otlp_protocol: ${OTEL_EXPORTER_OTLP_PROTOCOL:grpc}

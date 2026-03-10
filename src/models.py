@@ -164,6 +164,16 @@ class StorageConfig:
 
 
 @dataclass
+class TelemetryConfig:
+    """OpenTelemetry configuration"""
+
+    enabled: bool = False
+    service_name: str = "codebadger"
+    otlp_endpoint: str = "http://localhost:4317"
+    otlp_protocol: str = "grpc"  # "grpc" or "http/protobuf"
+
+
+@dataclass
 class Config:
     """Main configuration"""
 
@@ -172,6 +182,7 @@ class Config:
     cpg: CPGConfig = field(default_factory=CPGConfig)
     query: QueryConfig = field(default_factory=QueryConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
+    telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
 
 
 @dataclass
