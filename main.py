@@ -580,4 +580,4 @@ if __name__ == "__main__":
 
     _apply_transforms(mcp)
     _http_middleware = [Middleware(ConcurrencyLimitMiddleware, max_concurrent=_max_mcp)]
-    mcp.run_http_async(host=host, port=port, middleware=_http_middleware)
+    asyncio.run(mcp.run_http_async(host=host, port=port, middleware=_http_middleware))
