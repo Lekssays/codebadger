@@ -19,7 +19,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-
 class JoernServerManager:
     """Manages individual Joern server instances running in Docker container using Docker Python API"""
 
@@ -126,6 +125,9 @@ class JoernServerManager:
             self._exec_ids[codebase_hash] = f"exec-{codebase_hash}"
             self._ports[codebase_hash] = port
 
+            host = self.config.joern.server_host if self.config else "localhost"
+            logger.info(f"Joern server command executed, waiting for server to be ready at {host}:{port}...")
+
             startup_timeout = self.config.joern.server_startup_timeout if self.config else 120
             if self._wait_for_server(port, timeout=startup_timeout):
                 self._touch(codebase_hash)
@@ -190,7 +192,7 @@ class JoernServerManager:
             }
 
         client = JoernServerClient(
-            host="localhost",
+            host=self.config.joern.server_host if self.config else "localhost",
             port=port,
             username=self.config.joern.server_auth_username if self.config else None,
             password=self.config.joern.server_auth_password if self.config else None,
@@ -255,7 +257,8 @@ class JoernServerManager:
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(1)
-            result = sock.connect_ex(("localhost", port))
+            host = self.config.joern.server_host if self.config else "localhost"
+            result = sock.connect_ex((host, port))
             sock.close()
             return result == 0
         except Exception as e:
@@ -320,8 +323,9 @@ class JoernServerManager:
 
     async def _is_server_healthy(self, port: int) -> bool:
         try:
+            host = self.config.joern.server_host if self.config else "localhost"
             _, writer = await asyncio.wait_for(
-                asyncio.open_connection("localhost", port), timeout=2
+                asyncio.open_connection(host, port), timeout=2
             )
             writer.close()
             try:
@@ -353,17 +357,18 @@ class JoernServerManager:
         start_time = time.time()
         server_responding = False
 
+        host = self.config.joern.server_host if self.config else "localhost"
         while time.time() - start_time < timeout:
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(1)
-                result = sock.connect_ex(("localhost", port))
+                result = sock.connect_ex((host, port))
                 sock.close()
 
                 if result == 0:
                     try:
                         import requests
-                        response = requests.get(f"http://localhost:{port}", timeout=2)
+                        response = requests.get(f"http://{host}:{port}", timeout=2)
                         if response.status_code in [200, 404]:
                             server_responding = True
                             sleep_time = self.config.joern.server_init_sleep_time if self.config else 3.0
