@@ -127,11 +127,11 @@ WORKSPACE_ROOT = "/tmp/codebadger"
 CLEANUP_ON_SHUTDOWN = True
 
 # Joern server pool (LRU eviction)
-MAX_ACTIVE_JOERN_SERVERS = 4
+MAX_ACTIVE_JOERN_SERVERS = 8
 JOERN_EVICTION_POLICY = "lru"
 
 # MCP connection concurrency limit
 MAX_MCP_CONNECTIONS = 8
 
 # CPG build queue
-CPG_BUILD_WORKERS = 2
+CPG_BUILD_WORKERS = 4

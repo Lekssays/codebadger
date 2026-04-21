@@ -300,7 +300,7 @@ mcp = FastMCP(
 )
 # Note: Tools are registered inside the lifespan function
 # register_tools(mcp, services)
-# _apply_transforms is called only in __main__ so tests use direct tool access
+# TODO: _apply_transforms is experimental — call it manually to enable CodeMode
 
 
 def _uptime_seconds() -> float:
@@ -578,6 +578,5 @@ if __name__ == "__main__":
 
     logger.info(f"Starting CodeBadger Server with HTTP transport on {host}:{port}")
 
-    _apply_transforms(mcp)
     _http_middleware = [Middleware(ConcurrencyLimitMiddleware, max_concurrent=_max_mcp)]
     asyncio.run(mcp.run_http_async(host=host, port=port, middleware=_http_middleware))
