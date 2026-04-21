@@ -13,13 +13,11 @@ import docker
 from docker.errors import DockerException, NotFound, APIError
 
 from .port_manager import PortManager
-from ..config import load_config
 
 if TYPE_CHECKING:
     from ..services.codebase_tracker import CodebaseTracker
 
 logger = logging.getLogger(__name__)
-config = load_config("config.yaml")
 
 class JoernServerManager:
     """Manages individual Joern server instances running in Docker container using Docker Python API"""
@@ -127,12 +125,9 @@ class JoernServerManager:
             self._exec_ids[codebase_hash] = f"exec-{codebase_hash}"
             self._ports[codebase_hash] = port
 
-<<<<<<< main
-            logger.info(f"Joern server command executed, waiting for server to be ready at {config.joern.server_host}:{port}...")
+            host = self.config.joern.server_host if self.config else "localhost"
+            logger.info(f"Joern server command executed, waiting for server to be ready at {host}:{port}...")
 
-            # Wait for server to start (JVM + Scala REPL init can take >60s in Docker)
-=======
->>>>>>> main
             startup_timeout = self.config.joern.server_startup_timeout if self.config else 120
             if self._wait_for_server(port, timeout=startup_timeout):
                 self._touch(codebase_hash)
@@ -197,7 +192,7 @@ class JoernServerManager:
             }
 
         client = JoernServerClient(
-            host=config.joern.server_host,
+            host=self.config.joern.server_host if self.config else "localhost",
             port=port,
             username=self.config.joern.server_auth_username if self.config else None,
             password=self.config.joern.server_auth_password if self.config else None,
@@ -262,11 +257,8 @@ class JoernServerManager:
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(1)
-<<<<<<< main
-            result = sock.connect_ex((config.joern.server_host, port))
-=======
-            result = sock.connect_ex(("localhost", port))
->>>>>>> main
+            host = self.config.joern.server_host if self.config else "localhost"
+            result = sock.connect_ex((host, port))
             sock.close()
             return result == 0
         except Exception as e:
@@ -331,8 +323,9 @@ class JoernServerManager:
 
     async def _is_server_healthy(self, port: int) -> bool:
         try:
+            host = self.config.joern.server_host if self.config else "localhost"
             _, writer = await asyncio.wait_for(
-                asyncio.open_connection("localhost", port), timeout=2
+                asyncio.open_connection(host, port), timeout=2
             )
             writer.close()
             try:
@@ -364,26 +357,18 @@ class JoernServerManager:
         start_time = time.time()
         server_responding = False
 
+        host = self.config.joern.server_host if self.config else "localhost"
         while time.time() - start_time < timeout:
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(1)
-<<<<<<< main
-                result = sock.connect_ex((config.joern.server_host, port))
-=======
-                result = sock.connect_ex(("localhost", port))
->>>>>>> main
+                result = sock.connect_ex((host, port))
                 sock.close()
 
                 if result == 0:
                     try:
                         import requests
-<<<<<<< main
-                        response = requests.get(f"http://{config.joern.server_host}:{port}", timeout=2)
-                        # Server responds (even 404 is OK - means it's up)
-=======
-                        response = requests.get(f"http://localhost:{port}", timeout=2)
->>>>>>> main
+                        response = requests.get(f"http://{host}:{port}", timeout=2)
                         if response.status_code in [200, 404]:
                             server_responding = True
                             sleep_time = self.config.joern.server_init_sleep_time if self.config else 3.0
@@ -414,7 +399,4 @@ class JoernServerManager:
             except Exception as e:
                 logger.warning(f"Error closing HTTP session for {codebase_hash}: {e}")
             del self._clients[codebase_hash]
-<<<<<<< main
-=======
         self._lru.pop(codebase_hash, None)
->>>>>>> main
