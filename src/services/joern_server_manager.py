@@ -107,6 +107,11 @@ class JoernServerManager:
                 self.port_manager.release_port(codebase_hash)
                 raise RuntimeError(f"Container {self.container_name} not found")
 
+            # Ensure no stale JVM is still holding the port before we try to bind it.
+            # This closes the race where terminate_server releases the port in our
+            # state but the SIGTERM'd JVM hasn't exited yet.
+            self._ensure_port_free(container, port)
+
             work_dir = f"/tmp/joern-server-{codebase_hash}"
             log_file = f"/tmp/joern-{codebase_hash}.log"
 
@@ -204,7 +209,17 @@ class JoernServerManager:
         logger.debug(f"Created and cached JoernServerClient for {codebase_hash} on port {port}")
         return client
 
-    def load_cpg(self, codebase_hash: str, cpg_path: str, timeout: int = 600) -> bool:
+    def load_cpg(self, codebase_hash: str, cpg_path: str, timeout: int = 0) -> bool:
+        """Load CPG into Joern server.
+
+        importCpg triggers expensive overlay computation (ReachingDefPass, dataflow).
+        On timeout or failure the server is terminated so the spinning JVM doesn't
+        linger at 100% CPU.  We do NOT retry — a timeout means the JVM is stuck,
+        not that there was a transient network hiccup.
+        """
+        if timeout == 0:
+            timeout = self.config.joern.cpg_load_timeout if self.config else 300
+
         try:
             if codebase_hash not in self._ports:
                 raise RuntimeError(f"No Joern server running for codebase {codebase_hash}")
@@ -218,32 +233,29 @@ class JoernServerManager:
                 if len(parts) >= 2:
                     container_cpg_path = f"/playground/{parts[-1]}"
 
-            logger.info(f"Loading CPG {cpg_path} (container: {container_cpg_path}) into Joern server for {codebase_hash} (port {port})")
+            logger.info(
+                f"Loading CPG {cpg_path} (container: {container_cpg_path}) "
+                f"into Joern server for {codebase_hash} (port {port}, timeout {timeout}s)"
+            )
 
-            max_retries = 3
-            for attempt in range(max_retries):
-                try:
-                    success = client.load_cpg(container_cpg_path, project_name=codebase_hash, timeout=timeout)
-                    if success:
-                        logger.info(f"CPG loaded successfully for {codebase_hash}")
-                        return True
-                    else:
-                        logger.warning(f"CPG load attempt {attempt + 1}/{max_retries} failed for {codebase_hash}")
-                        if attempt < max_retries - 1:
-                            wait_time = 2 ** attempt
-                            time.sleep(wait_time)
-                except Exception as e:
-                    logger.warning(f"CPG load attempt {attempt + 1}/{max_retries} error: {e}")
-                    if attempt < max_retries - 1:
-                        time.sleep(2 ** attempt)
-                    else:
-                        raise
+            success = client.load_cpg(container_cpg_path, project_name=codebase_hash, timeout=timeout)
 
-            logger.error(f"Failed to load CPG for {codebase_hash} after {max_retries} attempts")
+            if success:
+                logger.info(f"CPG loaded successfully for {codebase_hash}")
+                return True
+
+            # importCpg failed or timed out — kill the server so the JVM doesn't
+            # spin forever at 100% CPU doing overlay computation.
+            logger.error(
+                f"Failed to load CPG for {codebase_hash} (timeout={timeout}s) — "
+                f"terminating server to stop stuck overlay computation"
+            )
+            self.terminate_server(codebase_hash)
             return False
 
         except Exception as e:
             logger.error(f"Error loading CPG for {codebase_hash}: {e}")
+            self.terminate_server(codebase_hash)
             return False
 
     def get_server_port(self, codebase_hash: str) -> Optional[int]:
@@ -276,7 +288,9 @@ class JoernServerManager:
 
             try:
                 container = self.docker_client.containers.get(self.container_name)
-                kill_cmd = ["bash", "-c", f"pkill -f 'joern.*--server-port {port}' || true"]
+                kill_cmd = ["bash", "-c",
+                    f"pkill -f 'joern.*--server-port {port}' || true; "
+                    f"sleep 3; pkill -9 -f 'joern.*--server-port {port}' || true"]
                 container.exec_run(cmd=kill_cmd)
             except Exception as e:
                 logger.warning(f"Error killing Joern process: {e}")
@@ -322,17 +336,18 @@ class JoernServerManager:
                 logger.error(f"Watchdog loop error: {e}", exc_info=True)
 
     async def _is_server_healthy(self, port: int) -> bool:
+        host = self.config.joern.server_host if self.config else "localhost"
+        import requests as _requests
+        loop = asyncio.get_running_loop()
         try:
-            host = self.config.joern.server_host if self.config else "localhost"
-            _, writer = await asyncio.wait_for(
-                asyncio.open_connection(host, port), timeout=2
+            response = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: _requests.get(f"http://{host}:{port}", timeout=5),
+                ),
+                timeout=8,
             )
-            writer.close()
-            try:
-                await writer.wait_closed()
-            except Exception:
-                pass
-            return True
+            return response.status_code in [200, 404]
         except Exception:
             return False
 
@@ -353,36 +368,61 @@ class JoernServerManager:
     # ----------------------------------------------------------- internal helpers
 
     def _wait_for_server(self, port: int, timeout: int = 30) -> bool:
-        import socket
-        start_time = time.time()
-        server_responding = False
-
+        import requests
         host = self.config.joern.server_host if self.config else "localhost"
-        while time.time() - start_time < timeout:
+        url = f"http://{host}:{port}"
+        deadline = time.time() + timeout
+
+        # Poll until the HTTP server responds. We don't do a prior TCP-only check
+        # because a pre-existing stale JVM could make the port look "open" before
+        # our freshly spawned process has even started.
+        while time.time() < deadline:
             try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(1)
-                result = sock.connect_ex((host, port))
-                sock.close()
-
-                if result == 0:
-                    try:
-                        import requests
-                        response = requests.get(f"http://{host}:{port}", timeout=2)
-                        if response.status_code in [200, 404]:
-                            server_responding = True
-                            sleep_time = self.config.joern.server_init_sleep_time if self.config else 3.0
-                            time.sleep(sleep_time)
-                            return True
-                    except Exception as e:
-                        logger.debug(f"HTTP check failed: {e}")
-
+                response = requests.get(url, timeout=2)
+                if response.status_code in [200, 404]:
+                    sleep_time = self.config.joern.server_init_sleep_time if self.config else 3.0
+                    time.sleep(sleep_time)
+                    return True
             except Exception as e:
-                logger.debug(f"Connection check failed: {e}")
-
+                logger.debug(f"HTTP check on :{port} failed: {e}")
             time.sleep(1)
 
-        return server_responding
+        return False
+
+    def _ensure_port_free(self, container, port: int, wait: int = 8) -> None:
+        """Kill any process still holding *port* inside the container, then wait for it to close."""
+        import socket
+        host = self.config.joern.server_host if self.config else "localhost"
+
+        def _port_open() -> bool:
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(1)
+                result = s.connect_ex((host, port))
+                s.close()
+                return result == 0
+            except Exception:
+                return False
+
+        if not _port_open():
+            return  # Nothing to do
+
+        logger.warning(f"Port {port} still in use before spawn — force-killing stale process")
+        try:
+            container.exec_run(
+                cmd=["bash", "-c", f"pkill -9 -f 'server-port {port}' || true"],
+            )
+        except Exception as e:
+            logger.warning(f"Error force-killing process on port {port}: {e}")
+
+        deadline = time.time() + wait
+        while time.time() < deadline:
+            if not _port_open():
+                logger.info(f"Port {port} is now free")
+                return
+            time.sleep(0.5)
+
+        logger.error(f"Port {port} still occupied after {wait}s — spawn may fail with BindException")
 
     def _cleanup_server(self, codebase_hash: str) -> None:
         if codebase_hash in self._exec_ids:

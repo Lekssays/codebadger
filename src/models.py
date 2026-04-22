@@ -115,6 +115,7 @@ class JoernConfig:
     port_max: int = 13870
     server_init_sleep_time: float = 3.0
     server_startup_timeout: int = 120
+    cpg_load_timeout: int = 300  # seconds before importCpg is abandoned and the server killed
     max_active_servers: int = 3
     # HTTP Connection Pooling
     http_pool_connections: int = 10

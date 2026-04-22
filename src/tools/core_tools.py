@@ -307,10 +307,41 @@ async def _generate_cpg_async(
             logger.info(f"Applied {len(config.cpg.exclusion_patterns)} exclusion patterns")
 
         logger.info(f"Executing CPG generation in container: {' '.join(cmd)}")
-        
-        # Execute CPG generation
-        exec_result = container.exec_run(cmd=cmd, stream=False)
-        
+
+        # exec_run is a synchronous blocking Docker SDK call.  Running it bare in an
+        # async coroutine would freeze the entire asyncio event loop for the duration
+        # of the Joern process (potentially hours if c2cpg hangs on certain C codebases).
+        # We offload it to a thread-pool executor and wrap with wait_for so we can
+        # enforce the configured generation_timeout and keep the event loop responsive.
+        generation_timeout = config.cpg.generation_timeout if config else 600
+        loop = asyncio.get_running_loop()
+        try:
+            exec_result = await asyncio.wait_for(
+                loop.run_in_executor(None, lambda: container.exec_run(cmd=cmd, stream=False)),
+                timeout=generation_timeout,
+            )
+        except asyncio.TimeoutError:
+            error_msg = f"CPG generation timed out after {generation_timeout}s"
+            logger.error(f"{error_msg} for {codebase_hash}")
+            try:
+                # pkill by the codebase source path rather than the frontend script name.
+                # The shell wrapper (c2cpg.sh, javasrc2cpg, …) passes the source path to the
+                # JVM as a positional argument, so both the shell process and the Java child
+                # have it in their command lines.  pkill -f on the script name alone would
+                # only kill the wrapper; the JVM child would survive as an orphan at 100% CPU
+                # and the executor thread running exec_run would stay blocked forever.
+                # Using -9 (SIGKILL) ensures the JVM can't defer or ignore the signal.
+                source_path_in_container = f"/playground/codebases/{codebase_hash}"
+                container.exec_run(["pkill", "-9", "-f", source_path_in_container], stream=False)
+                logger.info(f"Killed hung {cmd_binary} process in container for {codebase_hash}")
+            except Exception as kill_err:
+                logger.warning(f"Failed to kill hung frontend in container: {kill_err}")
+            codebase_tracker.update_codebase(
+                codebase_hash=codebase_hash,
+                metadata={"status": "failed", "error": error_msg}
+            )
+            return
+
         if exec_result.exit_code != 0:
             error_msg = f"CPG generation failed: {exec_result.output.decode('utf-8')}"
             logger.error(error_msg)
@@ -319,9 +350,9 @@ async def _generate_cpg_async(
                 metadata={"status": "failed", "error": error_msg}
             )
             return
-        
+
         logger.info(f"CPG generated successfully: {cpg_path}")
-        
+
         # Step 4: Start Joern server with randomly assigned port (13371-13870)
         joern_port = None
         if joern_server_manager:
@@ -329,7 +360,7 @@ async def _generate_cpg_async(
                 logger.info(f"Spawning Joern server for {codebase_hash}")
                 joern_port = joern_server_manager.spawn_server(codebase_hash)
                 logger.info(f"Joern server started on port {joern_port}")
-                
+
                 # Load CPG into server (use container path, not host path)
                 if joern_server_manager.load_cpg(codebase_hash, container_cpg_path):
                     logger.info(f"CPG loaded into Joern server on port {joern_port}")

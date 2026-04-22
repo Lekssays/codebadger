@@ -119,6 +119,7 @@ EXCLUSION_PATTERNS = [
 
 # Query defaults
 QUERY_TIMEOUT = 300
+CPG_LOAD_TIMEOUT = 300  # importCpg triggers overlay computation; kill if it exceeds this
 QUERY_CACHE_ENABLED = True
 QUERY_CACHE_TTL = 300
 
