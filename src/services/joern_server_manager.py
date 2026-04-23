@@ -409,20 +409,28 @@ class JoernServerManager:
 
         logger.warning(f"Port {port} still in use before spawn — force-killing stale process")
         try:
+            # pkill by name only kills the shell wrapper (e.g. joern bash script);
+            # the JVM child it spawned survives as an orphan and keeps holding the port.
+            # Kill by TCP port directly so we hit the actual process that owns the socket.
+            # fuser and lsof cover different distros; the ||true suppresses "no process" exits.
             container.exec_run(
-                cmd=["bash", "-c", f"pkill -9 -f 'server-port {port}' || true"],
+                cmd=["bash", "-c",
+                     f"fuser -k {port}/tcp 2>/dev/null; "
+                     f"lsof -ti :{port} 2>/dev/null | xargs -r kill -9 2>/dev/null; "
+                     f"true"],
+                stream=False,
             )
         except Exception as e:
             logger.warning(f"Error force-killing process on port {port}: {e}")
 
-        deadline = time.time() + wait
+        deadline = time.time() + 20
         while time.time() < deadline:
             if not _port_open():
                 logger.info(f"Port {port} is now free")
                 return
             time.sleep(0.5)
 
-        logger.error(f"Port {port} still occupied after {wait}s — spawn may fail with BindException")
+        logger.error(f"Port {port} still occupied after 20s — spawn may fail with BindException")
 
     def _cleanup_server(self, codebase_hash: str) -> None:
         if codebase_hash in self._exec_ids:

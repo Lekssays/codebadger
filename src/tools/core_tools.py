@@ -163,10 +163,15 @@ async def _restart_server_async(
             return
 
         logger.info(f"Async: starting Joern server for {codebase_hash}")
-        joern_port = joern_server_manager.spawn_server(codebase_hash)
+        loop = asyncio.get_running_loop()
+        joern_port = await loop.run_in_executor(
+            None, joern_server_manager.spawn_server, codebase_hash
+        )
         logger.info(f"Async: Joern server started on port {joern_port}, loading CPG...")
 
-        joern_server_manager.load_cpg(codebase_hash, container_cpg_path)
+        await loop.run_in_executor(
+            None, joern_server_manager.load_cpg, codebase_hash, container_cpg_path
+        )
         logger.info(f"Async: CPG loaded into Joern server on port {joern_port}")
 
         # Update DB
@@ -353,16 +358,37 @@ async def _generate_cpg_async(
 
         logger.info(f"CPG generated successfully: {cpg_path}")
 
+        # Persist cpg_path before attempting server spawn so that the watchdog's
+        # _respawn_server can find it even if spawn_server fails mid-flight.
+        codebase_tracker.update_codebase(
+            codebase_hash=codebase_hash,
+            cpg_path=cpg_path,
+            metadata={
+                "status": "generating",
+                "container_codebase_path": f"/playground/codebases/{codebase_hash}",
+                "container_cpg_path": container_cpg_path,
+            }
+        )
+
         # Step 4: Start Joern server with randomly assigned port (13371-13870)
+        # spawn_server polls with time.sleep and load_cpg blocks on HTTP for up to
+        # cpg_load_timeout seconds.  Both must run in the executor so they do not
+        # freeze the event loop (which would drop SSE heartbeats and cause the
+        # client's httpx stream to ReadTimeout).
         joern_port = None
         if joern_server_manager:
             try:
                 logger.info(f"Spawning Joern server for {codebase_hash}")
-                joern_port = joern_server_manager.spawn_server(codebase_hash)
+                joern_port = await loop.run_in_executor(
+                    None, joern_server_manager.spawn_server, codebase_hash
+                )
                 logger.info(f"Joern server started on port {joern_port}")
 
                 # Load CPG into server (use container path, not host path)
-                if joern_server_manager.load_cpg(codebase_hash, container_cpg_path):
+                loaded = await loop.run_in_executor(
+                    None, joern_server_manager.load_cpg, codebase_hash, container_cpg_path
+                )
+                if loaded:
                     logger.info(f"CPG loaded into Joern server on port {joern_port}")
                 else:
                     logger.warning("Failed to load CPG into Joern server")
@@ -532,12 +558,28 @@ Examples:
             existing_codebase = codebase_tracker.get_codebase(codebase_hash)
             if existing_codebase and existing_codebase.cpg_path and os.path.exists(existing_codebase.cpg_path):
                 logger.info(f"Found existing codebase in DB: {codebase_hash}")
-                
+
+                prev_status = existing_codebase.metadata.get("status", "")
+                if prev_status == "failed":
+                    # CPG binary exists but a previous attempt (e.g. importCpg timeout) left it
+                    # in a failed state.  Don't silently retry — return the failure so the caller
+                    # can decide whether to regenerate (delete the CPG and call again).
+                    logger.warning(f"Codebase {codebase_hash} has a failed CPG — returning failed status")
+                    return {
+                        "codebase_hash": codebase_hash,
+                        "status": "failed",
+                        "message": existing_codebase.metadata.get("error", "Previous CPG generation or load failed."),
+                        "cpg_path": existing_codebase.cpg_path,
+                        "source_type": existing_codebase.source_type,
+                        "source_path": existing_codebase.source_path,
+                        "language": existing_codebase.language,
+                    }
+
                 # Check if Joern server is still running
                 joern_server_manager = services.get("joern_server_manager")
                 joern_port = existing_codebase.joern_port
                 server_running = False
-                
+
                 if joern_server_manager:
                     if joern_port and joern_server_manager.is_server_running(codebase_hash):
                         server_running = True
@@ -545,7 +587,7 @@ Examples:
                         if joern_port:
                             logger.info(f"Joern server recorded on port {joern_port} but not running for {codebase_hash}")
                         joern_port = None
-                
+
                 if server_running:
                     # Server is already running, return ready immediately
                     return {
