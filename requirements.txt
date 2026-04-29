@@ -9,6 +9,7 @@ pydantic>=2.13.3
 docker==7.1.0
 gitpython==3.1.46
 PyYAML==6.0.3
+psutil==7.2.2
 
 # Telemetry (optional - OpenTelemetry)
 opentelemetry-api>=1.33.0
