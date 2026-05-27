@@ -13,6 +13,14 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
+@pytest.fixture(autouse=True)
+def reset_main_services():
+    """Isolate tests from global state held in main.services."""
+    main.services.clear()
+    yield
+    main.services.clear()
+
+
 class TestLifespan:
     """Test FastMCP lifespan management"""
 
@@ -98,6 +106,65 @@ class TestLifespan:
                 async with main.app_lifespan(mock_mcp) as ctx:
                     pass
 
+    @pytest.mark.asyncio
+    async def test_lifespan_degrades_when_docker_unavailable(self):
+        """Startup should succeed even when Docker/Joern is unavailable."""
+        mock_mcp = MagicMock()
+
+        with patch("main.load_config") as mock_load_config, patch(
+            "main.CodebaseTracker"
+        ), patch(
+            "main.GitManager"
+        ), patch(
+            "main.CPGGenerator"
+        ), patch(
+            "main.setup_logging"
+        ), patch(
+            "main.logger"
+        ), patch(
+            "os.makedirs"
+        ), patch(
+            "main._setup_telemetry"
+        ), patch(
+            "main._graceful_shutdown", new_callable=AsyncMock
+        ), patch(
+            "main.register_tools"
+        ), patch(
+            "main.DBManager"
+        ), patch(
+            "main.PortManager"
+        ), patch(
+            "main.JoernServerManager"
+        ) as mock_joern_manager_class, patch(
+            "main.QueryExecutor"
+        ), patch(
+            "main.CodeBrowsingService"
+        ), patch(
+            "main._check_joern_container_status",
+            return_value={"running": False, "status": "docker_unavailable", "error": "daemon down"},
+        ):
+            mock_config = MagicMock()
+            mock_config.server.log_level = "INFO"
+            mock_config.storage.workspace_root = "/tmp/workspace"
+            mock_config.cpg = MagicMock()
+            mock_config.cpg.build_workers = 1
+            mock_config.query = MagicMock()
+            mock_config.joern = MagicMock()
+            mock_config.joern.port_min = 13371
+            mock_config.joern.port_max = 13870
+            mock_config.joern.binary_path = "joern"
+            mock_config.joern.max_active_servers = 2
+            mock_config.telemetry = MagicMock()
+            mock_config.telemetry.enabled = False
+
+            mock_load_config.return_value = mock_config
+
+            async with main.app_lifespan(mock_mcp) as ctx:
+                assert ctx["joern_server_manager"] is None
+                assert ctx["startup_issues"]
+
+            mock_joern_manager_class.assert_not_called()
+
 
 
 
@@ -161,3 +228,25 @@ class TestEndpoints:
         assert "endpoints" in response_dict
         assert response_dict["endpoints"]["health"] == "/health"
         assert response_dict["endpoints"]["mcp"] == "/mcp"
+
+
+class TestMiddleware:
+    """Test middleware behavior."""
+
+    @pytest.mark.asyncio
+    async def test_concurrency_limit_returns_503_when_saturated(self):
+        """The concurrency middleware should return a valid 503 response when full."""
+        from starlette.requests import Request
+
+        middleware = main.ConcurrencyLimitMiddleware(MagicMock(), max_concurrent=1)
+        await middleware._sem.acquire()
+
+        mock_request = AsyncMock(spec=Request)
+        mock_call_next = AsyncMock()
+
+        response = await middleware.dispatch(mock_request, mock_call_next)
+
+        assert response.status_code == 503
+        assert response.headers["Retry-After"] == "5"
+        assert response.body == b"Server busy - too many concurrent requests"
+        mock_call_next.assert_not_called()
