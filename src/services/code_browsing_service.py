@@ -2,7 +2,7 @@ import logging
 import os
 from typing import Any, Dict, Optional, List
 from ..exceptions import ValidationError
-from ..utils.validators import validate_codebase_hash
+from ..utils.validators import sanitize_path, validate_codebase_hash
 from ..utils.query_rendering import escape_scala_string
 
 logger = logging.getLogger(__name__)
@@ -194,15 +194,7 @@ class CodeBrowsingService:
 
         # Resolve target directory if a local_path is provided; otherwise, use source_dir
         if local_path:
-            # Support both absolute and relative local_path; ensure it stays within source_dir
-            candidate = local_path
-            if not os.path.isabs(candidate):
-                candidate = os.path.join(source_dir, candidate)
-            candidate = os.path.normpath(candidate)
-            source_dir_norm = os.path.normpath(source_dir)
-            if not candidate.startswith(source_dir_norm):
-                raise ValidationError("local_path must be inside the codebase source directory")
-            target_dir = candidate
+            target_dir = sanitize_path(local_path, allowed_root=source_dir)
         else:
             target_dir = source_dir
 

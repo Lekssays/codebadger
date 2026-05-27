@@ -482,6 +482,51 @@ class TestMCPTools:
             assert "Use page=3" not in tree_text2
 
     @pytest.mark.asyncio
+    async def test_list_files_rejects_sibling_escape(self, mock_services, tmp_path):
+        """local_path must not escape to a sibling directory that shares the same prefix."""
+        from src.tools.code_browsing_tools import register_code_browsing_tools
+        from src.models import CodebaseInfo
+        from src.services.code_browsing_service import CodeBrowsingService
+
+        source_dir = tmp_path / "test_codebase"
+        source_dir.mkdir()
+        (source_dir / "inside.txt").write_text("inside")
+
+        sibling_dir = tmp_path / "test_codebase-escape"
+        sibling_dir.mkdir()
+        (sibling_dir / "outside.txt").write_text("outside")
+
+        codebase_hash = "553642871dd4252a"
+        mock_services["codebase_tracker"].get_codebase.return_value = CodebaseInfo(
+            codebase_hash=codebase_hash,
+            source_type="local",
+            source_path=str(source_dir),
+            language="python",
+            cpg_path=None,
+        )
+
+        mock_services["code_browsing_service"] = CodeBrowsingService(
+            codebase_tracker=mock_services["codebase_tracker"],
+            query_executor=mock_services["query_executor"],
+        )
+
+        mcp = FastMCP("TestServer")
+        register_code_browsing_tools(mcp, mock_services)
+
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                "list_files",
+                {
+                    "codebase_hash": codebase_hash,
+                    "local_path": "../test_codebase-escape",
+                },
+            )
+
+            text_result = result.content[0].text
+            assert text_result.startswith("Error: ")
+            assert "Path traversal attempt detected" in text_result
+
+    @pytest.mark.asyncio
     async def test_get_cfg_success(self, mock_services):
         """Test getting CFG for a method successfully"""
         from src.tools.code_browsing_tools import register_code_browsing_tools

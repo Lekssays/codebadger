@@ -142,16 +142,10 @@ Examples:
             )
         except ValidationError as e:
             logger.error(f"Error listing files: {e}")
-            return {
-                "success": False,
-                "error": str(e),
-            }
+            return f"Error: {str(e)}"
         except Exception as e:
             logger.error(f"Unexpected error: {e}", exc_info=True)
-            return {
-                "success": False,
-                "error": str(e),
-            }
+            return f"Internal Error: {str(e)}"
 
 
     @mcp.tool(
