@@ -12,6 +12,7 @@ from pydantic import Field
 from ..exceptions import (
             ValidationError,
 )
+from ..utils.query_rendering import escape_scala_string
 from ..utils.validators import validate_codebase_hash
 from .queries import QueryLoader
 
@@ -203,10 +204,10 @@ Examples:
                 raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
 
             # Build query to get method metadata
-            query_parts = [f'cpg.method.name("{method_name}")']
+            query_parts = [f'cpg.method.name("{escape_scala_string(method_name)}")']
 
             if filename:
-                query_parts.append(f'.filename(".*{filename}.*")')
+                query_parts.append(f'.filename(".*{escape_scala_string(filename)}.*")')
 
             query_parts.append(
                 ".map(m => (m.name, m.filename, m.lineNumber.getOrElse(-1), m.lineNumberEnd.getOrElse(-1)))"

@@ -3,6 +3,7 @@ import os
 from typing import Any, Dict, Optional, List
 from ..exceptions import ValidationError
 from ..utils.validators import validate_codebase_hash
+from ..utils.query_rendering import escape_scala_string
 
 logger = logging.getLogger(__name__)
 
@@ -62,11 +63,11 @@ class CodeBrowsingService:
             if not include_external:
                 query_parts.append(".isExternal(false)")
             if name_pattern:
-                query_parts.append(f'.name("{name_pattern}")')
+                query_parts.append(f'.name("{escape_scala_string(name_pattern)}")')
             if file_pattern:
-                query_parts.append(f'.where(_.file.name("{file_pattern}"))')
+                query_parts.append(f'.where(_.file.name("{escape_scala_string(file_pattern)}"))')
             if callee_pattern:
-                query_parts.append(f'.where(_.callOut.name("{callee_pattern}"))')
+                query_parts.append(f'.where(_.callOut.name("{escape_scala_string(callee_pattern)}"))')
 
             query_parts.append(
                 ".map(m => (m.name, m.id, m.fullName, m.signature, m.filename, m.lineNumber.getOrElse(-1), m.lineNumberEnd.getOrElse(-1), m.controlStructure.size + 1, m.isExternal))"
@@ -286,9 +287,9 @@ class CodeBrowsingService:
 
             query_parts = ["cpg.call"]
             if callee_pattern:
-                query_parts.append(f'.name("{callee_pattern}")')
+                query_parts.append(f'.name("{escape_scala_string(callee_pattern)}")')
             if caller_pattern:
-                query_parts.append(f'.where(_.method.name("{caller_pattern}"))')
+                query_parts.append(f'.where(_.method.name("{escape_scala_string(caller_pattern)}"))')
 
             query_parts.append(
                 ".map(c => (c.method.name, c.name, c.code, c.method.filename, c.lineNumber.getOrElse(-1)))"
@@ -361,7 +362,7 @@ class CodeBrowsingService:
 
             query_parts = ["cpg.method"]
             if method_name:
-                query_parts.append(f'.name("{method_name}")')
+                query_parts.append(f'.name("{escape_scala_string(method_name)}")')
             
             query_parts.append(
                 '.map(m => (m.name, m.parameter.map(p => (p.name, p.typeFullName, p.index)).l))'
@@ -418,9 +419,9 @@ class CodeBrowsingService:
 
             query_parts = ["cpg.literal"]
             if pattern:
-                query_parts.append(f'.code("{pattern}")')
+                query_parts.append(f'.code("{escape_scala_string(pattern)}")')
             if literal_type:
-                query_parts.append(f'.typeFullName(".*{literal_type}.*")')
+                query_parts.append(f'.typeFullName(".*{escape_scala_string(literal_type)}.*")')
 
             query_parts.append(
                 ".map(lit => (lit.code, lit.typeFullName, lit.filename, lit.lineNumber.getOrElse(-1), lit.method.name))"

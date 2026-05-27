@@ -96,6 +96,28 @@ def temp_workspace():
 class TestMCPTools:
     """Test MCP tools functionality"""
 
+    def test_code_browsing_service_escapes_list_methods_query(self, mock_services):
+        """Structured code-browsing queries should escape Scala string literals."""
+        from src.services.code_browsing_service import CodeBrowsingService
+
+        mock_services["query_executor"].execute_query.return_value = QueryResult(
+            success=True,
+            data=[],
+            row_count=0,
+        )
+        service = CodeBrowsingService(
+            codebase_tracker=mock_services["codebase_tracker"],
+            query_executor=mock_services["query_executor"],
+        )
+
+        service.list_methods(
+            "553642871dd4251d",
+            name_pattern='main"; cpg.call.l //',
+        )
+
+        rendered_query = mock_services["query_executor"].execute_query.call_args.kwargs["query"]
+        assert 'cpg.method.isExternal(false).name("main\\"; cpg.call.l //")' in rendered_query
+
     @pytest.mark.asyncio
     async def test_generate_cpg_github_success(self, mock_services, temp_workspace):
         """Test successful CPG generation from GitHub"""

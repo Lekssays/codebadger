@@ -7,6 +7,8 @@ Provides utilities to load Scala query templates from files and substitute varia
 import os
 from typing import Dict
 
+from ...utils.query_rendering import escape_scala_string
+
 
 class QueryLoader:
     """Utility to load Scala query templates from files."""
@@ -21,7 +23,8 @@ class QueryLoader:
         """Sanitize a value to prevent template injection.
 
         Replaces {{ sequences in user-supplied values with a sentinel
-        that will be restored to literal {{ after template substitution.
+        that will be restored to literal {{ after template substitution, and
+        escapes the value for safe embedding inside Scala string literals.
 
         Args:
             value: The user-supplied value to sanitize
@@ -29,7 +32,8 @@ class QueryLoader:
         Returns:
             Sanitized value with {{ escaped
         """
-        return value.replace("{{", cls._ESCAPE_SENTINEL)
+        escaped = escape_scala_string(value)
+        return escaped.replace("{{", cls._ESCAPE_SENTINEL)
 
     @classmethod
     def load(cls, query_name: str, **kwargs) -> str:
@@ -43,8 +47,9 @@ class QueryLoader:
             The query string with variables substituted
 
         Note:
-            User-supplied values containing {{ are automatically escaped
-            to prevent template injection attacks.
+            User-supplied string values are escaped for Scala string literal
+            safety, and values containing {{ are neutralized to prevent
+            template injection attacks.
 
         Example:
             query = QueryLoader.load(

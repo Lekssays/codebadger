@@ -7,6 +7,7 @@ import pytest
 
 from src.models import Config, CPGConfig, QueryResult, CodebaseInfo
 from src.tools.mcp_tools import register_tools
+from src.tools.queries import QueryLoader
 
 
 from fastmcp import FastMCP, Client
@@ -121,6 +122,39 @@ async def test_find_taint_sources_with_filename_filter(fake_services):
         assert query_executor.last_query is not None
         assert "where(_.file.name" in query_executor.last_query
         assert "shell" in query_executor.last_query
+
+
+def test_query_loader_escapes_scala_string_values():
+    query = QueryLoader.load(
+        "call_graph",
+        method_name='main"; cpg.call.l // {{depth}}',
+        depth=2,
+        direction="outgoing",
+    )
+
+    assert 'val methodName = "main\\"; cpg.call.l // {{depth}}"' in query
+
+
+@pytest.mark.asyncio
+async def test_find_taint_sources_escapes_filename_for_query(fake_services):
+    mcp = FastMCP("TestServer")
+    register_tools(mcp, fake_services)
+
+    async with Client(mcp) as client:
+        await client.call_tool(
+            "find_taint_sources",
+            {
+                "codebase_hash": fake_services["codebase_hash"],
+                "language": "c",
+                "filename": 'shell".*',
+                "limit": 10,
+            }
+        )
+
+        query_executor = fake_services["query_executor"]
+        assert query_executor.last_query is not None
+        assert 'shell\\"' in query_executor.last_query
+        assert 'where(_.file.name("(^|.*/)shell\\"\\\\.\\\\*.*"))' in query_executor.last_query
 
 
 @pytest.mark.asyncio

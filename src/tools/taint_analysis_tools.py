@@ -11,6 +11,7 @@ from pydantic import Field
 from ..exceptions import (
             ValidationError,
 )
+from ..utils.query_rendering import escape_scala_string
 from ..utils.validators import validate_codebase_hash
 from .queries import QueryLoader
 
@@ -210,15 +211,14 @@ def _build_file_filter_regex(filename: str) -> str:
     Anchors the match to path boundaries (/ or start of string) so that
     'parser.c' matches '/path/to/parser.c' but NOT '/path/to/myparser.c'.
 
-    The returned string is ready for embedding in Scala string literals
-    (backslashes are doubled for Scala escaping).
+    The returned string is a raw regex pattern. Callers embedding it into a
+    Scala string literal must still escape it for that string context.
     """
-    # Escape regex-special chars with re.escape, then double backslashes
-    # for Scala string literal embedding (Scala \\\\ → Java regex \\)
+    # Escape regex-special chars. String literal escaping is handled separately
+    # at query-render time so patterns remain correct after a single escape pass.
     py_escaped = re.escape(filename)
-    scala_escaped = py_escaped.replace("\\", "\\\\")
     # Anchor to path boundary at start, allow trailing content for partial names
-    return f"(^|.*/){scala_escaped}.*"
+    return f"(^|.*/){py_escaped}.*"
 
 
 def _build_joern_name_pattern(patterns: list) -> str:
@@ -469,9 +469,9 @@ Examples:
                 # Build query with optional file filter
                 if filename:
                     file_regex = _build_file_filter_regex(filename)
-                    query = f'cpg.call.name("{joined}").where(_.file.name("{file_regex}")).map(c => (c.id, c.name, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take({limit})'
+                    query = f'cpg.call.name("{escape_scala_string(joined)}").where(_.file.name("{escape_scala_string(file_regex)}")).map(c => (c.id, c.name, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take({limit})'
                 else:
-                    query = f'cpg.call.name("{joined}").map(c => (c.id, c.name, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take({limit})'
+                    query = f'cpg.call.name("{escape_scala_string(joined)}").map(c => (c.id, c.name, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take({limit})'
 
                 result = query_executor.execute_query(
                     codebase_hash=codebase_hash,
@@ -594,9 +594,9 @@ Examples:
                 # Build query with optional file filter
                 if filename:
                     file_regex = _build_file_filter_regex(filename)
-                    query = f'cpg.call.name("{joined}").where(_.file.name("{file_regex}")).map(c => (c.id, c.name, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take({limit})'
+                    query = f'cpg.call.name("{escape_scala_string(joined)}").where(_.file.name("{escape_scala_string(file_regex)}")).map(c => (c.id, c.name, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take({limit})'
                 else:
-                    query = f'cpg.call.name("{joined}").map(c => (c.id, c.name, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take({limit})'
+                    query = f'cpg.call.name("{escape_scala_string(joined)}").map(c => (c.id, c.name, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take({limit})'
 
                 result = query_executor.execute_query(
                     codebase_hash=codebase_hash,

@@ -16,6 +16,7 @@ from .validators import (
     validate_timeout,
 )
 from .cpgql_validator import CPGQLValidator, QueryTransformer
+from .query_rendering import escape_scala_string
 
 __all__ = [
     "get_logger",
@@ -30,6 +31,7 @@ __all__ = [
     "validate_cpgql_query",
     "validate_timeout",
     "hash_query",
+    "escape_scala_string",
     "CPGQLValidator",
     "QueryTransformer",
 ]
