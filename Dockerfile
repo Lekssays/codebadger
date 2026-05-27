@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Set Joern version
-ENV JOERN_VERSION=4.0.524
+ENV JOERN_VERSION=4.0.548
 ENV JOERN_HOME=/opt/joern
 
 # Download and install Joern from joernio/joern GitHub releases
