@@ -86,6 +86,7 @@ class QueryResult:
     success: bool
     data: Optional[List[Dict[str, Any]]] = None
     error: Optional[str] = None
+    error_code: Optional[str] = None  # "TIMEOUT", "SERVER_UNAVAILABLE", "SERVER_BUSY", "QUERY_ERROR"
     execution_time: float = 0.0
     row_count: int = 0
 
@@ -95,6 +96,7 @@ class QueryResult:
             "success": self.success,
             "data": self.data,
             "error": self.error,
+            "error_code": self.error_code,
             "execution_time": self.execution_time,
             "row_count": self.row_count,
         }
@@ -117,6 +119,8 @@ class JoernConfig:
     server_startup_timeout: int = 120
     cpg_load_timeout: int = 300  # seconds before importCpg is abandoned and the server killed
     max_active_servers: int = 3
+    # RSS-pressure eviction: kill LRU server when container RSS exceeds this (0 = disabled)
+    rss_eviction_threshold_mb: int = 0
     # HTTP Connection Pooling
     http_pool_connections: int = 10
     http_pool_maxsize: int = 10

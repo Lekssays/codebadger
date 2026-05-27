@@ -120,6 +120,13 @@ async def _graceful_shutdown():
         if 'cpg_queue' in services:
             await services['cpg_queue'].stop()
 
+        restart_tasks = services.get('restart_tasks', {})
+        for task in restart_tasks.values():
+            task.cancel()
+        for task in restart_tasks.values():
+            with suppress(asyncio.CancelledError):
+                await task
+
         # Flush database and caches
         if 'db_manager' in services:
             logger.info("Flushing database...")
@@ -501,7 +508,18 @@ def _get_cpg_cache_mb() -> float:
         return -1.0
 
 
-def _get_codebase_list() -> list:
+def _format_codebase_source(source_type: str, source_path: str, include_sensitive: bool = False) -> str:
+    """Format a codebase source for operator output.
+
+    Health responses default to redacted values so repository locations are not
+    exposed. Internal status logs can opt into the original source path.
+    """
+    if include_sensitive:
+        return source_path
+    return f"<redacted:{source_type or 'unknown'}>"
+
+
+def _get_codebase_list(include_sensitive: bool = False) -> list:
     try:
         tracker = services.get("codebase_tracker")
         joern_mgr = services.get("joern_server_manager")
@@ -519,14 +537,19 @@ def _get_codebase_list() -> list:
                 "language": info.language,
                 "status": status,
                 "joern_port": port,
-                "source": info.source_path,
+                "source_type": info.source_type,
+                "source": _format_codebase_source(
+                    info.source_type,
+                    info.source_path,
+                    include_sensitive=include_sensitive,
+                ),
             })
         return result
     except Exception:
         return []
 
 
-def _build_health() -> dict:
+def _build_health(include_sensitive: bool = False) -> dict:
     """Collect all health metrics and return a structured dict."""
     joern_mgr = services.get("joern_server_manager")
     project_root = os.path.dirname(os.path.abspath(__file__))
@@ -540,7 +563,7 @@ def _build_health() -> dict:
 
     # Sleeping count
     sleeping = 0
-    codebases = _get_codebase_list()
+    codebases = _get_codebase_list(include_sensitive=include_sensitive)
     by_status: dict = {}
     for cb in codebases:
         s = cb["status"]
@@ -610,7 +633,7 @@ async def _periodic_status_log(interval_secs: int) -> None:
     while True:
         await asyncio.sleep(interval_secs)
         try:
-            h = _build_health()
+            h = _build_health(include_sensitive=True)
             now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
             sep = "=" * 60
             lines = [

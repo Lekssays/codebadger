@@ -28,6 +28,95 @@ from ..utils.validators import (
 
 logger = logging.getLogger(__name__)
 
+REDACTED_HOST_PATH = "<redacted:host-path>"
+REDACTED_CONTAINER_PATH = "<redacted:container-path>"
+REDACTED_LOCAL_SOURCE = "<redacted:local-source>"
+
+
+def _public_source_path(source_type: str, source_path: Optional[str]) -> Optional[str]:
+    """Redact local source paths before returning them to clients."""
+    if not source_path:
+        return source_path
+    if source_type == "local":
+        return REDACTED_LOCAL_SOURCE
+    return source_path
+
+
+def _redact_public_path(path: Optional[str], replacement: str) -> Optional[str]:
+    if not path:
+        return path
+    return replacement
+
+
+def _public_codebase_fields(
+    *,
+    source_type: str,
+    source_path: Optional[str],
+    language: str,
+    cpg_path: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+    include_internal_paths: bool = False,
+    include_repository: bool = False,
+) -> Dict[str, Any]:
+    """Return client-safe codebase fields without exposing host or container paths."""
+    metadata = metadata or {}
+    fields: Dict[str, Any] = {
+        "cpg_path": _redact_public_path(cpg_path, REDACTED_HOST_PATH),
+        "source_type": source_type,
+        "source_path": _public_source_path(source_type, source_path),
+        "language": language,
+    }
+
+    if include_internal_paths:
+        fields["container_codebase_path"] = _redact_public_path(
+            metadata.get("container_codebase_path"), REDACTED_CONTAINER_PATH
+        )
+        fields["container_cpg_path"] = _redact_public_path(
+            metadata.get("container_cpg_path"), REDACTED_CONTAINER_PATH
+        )
+
+    if include_repository:
+        fields["repository"] = metadata.get("repository")
+
+    return fields
+
+
+def _get_restart_task_registry(services: dict) -> Dict[str, asyncio.Task]:
+    return services.setdefault("restart_tasks", {})
+
+
+def _get_active_restart_task(services: dict, codebase_hash: str) -> Optional[asyncio.Task]:
+    registry = _get_restart_task_registry(services)
+    task = registry.get(codebase_hash)
+    if task is not None and task.done():
+        registry.pop(codebase_hash, None)
+        return None
+    return task
+
+
+def _schedule_restart_server_task(codebase_hash: str, container_cpg_path: str, services: dict) -> bool:
+    if _get_active_restart_task(services, codebase_hash):
+        return False
+
+    task = asyncio.create_task(
+        _restart_server_async(
+            codebase_hash=codebase_hash,
+            container_cpg_path=container_cpg_path,
+            services=services,
+        )
+    )
+
+    registry = _get_restart_task_registry(services)
+    registry[codebase_hash] = task
+
+    def _cleanup(done_task: asyncio.Task) -> None:
+        current_task = registry.get(codebase_hash)
+        if current_task is done_task:
+            registry.pop(codebase_hash, None)
+
+    task.add_done_callback(_cleanup)
+    return True
+
 
 def _get_git_commit_hash(path: str) -> Optional[str]:
     """
@@ -569,10 +658,12 @@ Examples:
                         "codebase_hash": codebase_hash,
                         "status": "failed",
                         "message": existing_codebase.metadata.get("error", "Previous CPG generation or load failed."),
-                        "cpg_path": existing_codebase.cpg_path,
-                        "source_type": existing_codebase.source_type,
-                        "source_path": existing_codebase.source_path,
-                        "language": existing_codebase.language,
+                        **_public_codebase_fields(
+                            source_type=existing_codebase.source_type,
+                            source_path=existing_codebase.source_path,
+                            language=existing_codebase.language,
+                            cpg_path=existing_codebase.cpg_path,
+                        ),
                     }
 
                 # Check if Joern server is still running
@@ -594,13 +685,37 @@ Examples:
                         "codebase_hash": codebase_hash,
                         "status": "ready",
                         "message": "CPG already exists and Joern server is running.",
-                        "cpg_path": existing_codebase.cpg_path,
                         "joern_port": joern_port,
-                        "source_type": existing_codebase.source_type,
-                        "source_path": existing_codebase.source_path,
-                        "language": existing_codebase.language,
+                        **_public_codebase_fields(
+                            source_type=existing_codebase.source_type,
+                            source_path=existing_codebase.source_path,
+                            language=existing_codebase.language,
+                            cpg_path=existing_codebase.cpg_path,
+                        ),
                     }
                 else:
+                    if prev_status == "loading" and _get_active_restart_task(services, codebase_hash):
+                        codebase_dir = os.path.join(
+                            os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "playground")),
+                            "codebases", codebase_hash
+                        )
+                        estimate = _estimate_processing_time(codebase_dir, existing_codebase.language, has_cpg=True)
+                        return {
+                            "codebase_hash": codebase_hash,
+                            "status": "loading",
+                            "message": (
+                                "CPG exists and Joern server restart is already in progress. "
+                                f"Estimated time: {estimate}. Use get_cpg_status to check progress."
+                            ),
+                            "estimated_time": estimate,
+                            **_public_codebase_fields(
+                                source_type=existing_codebase.source_type,
+                                source_path=existing_codebase.source_path,
+                                language=existing_codebase.language,
+                                cpg_path=existing_codebase.cpg_path,
+                            ),
+                        }
+
                     # Server not running — kick off async restart and return immediately
                     container_cpg_path = existing_codebase.metadata.get("container_cpg_path")
                     if not container_cpg_path:
@@ -613,12 +728,10 @@ Examples:
                         metadata={"status": "loading", **{k: v for k, v in existing_codebase.metadata.items() if k != "status"}}
                     )
 
-                    asyncio.create_task(
-                        _restart_server_async(
-                            codebase_hash=codebase_hash,
-                            container_cpg_path=container_cpg_path,
-                            services=services,
-                        )
+                    scheduled_restart = _schedule_restart_server_task(
+                        codebase_hash=codebase_hash,
+                        container_cpg_path=container_cpg_path,
+                        services=services,
                     )
 
                     # Estimate time
@@ -631,12 +744,19 @@ Examples:
                     return {
                         "codebase_hash": codebase_hash,
                         "status": "loading",
-                        "message": f"CPG exists but Joern server needs to restart. Loading in background. Estimated time: {estimate}. Use get_cpg_status to check progress.",
+                        "message": (
+                            f"CPG exists but Joern server needs to restart. Loading in background. Estimated time: {estimate}. "
+                            "Use get_cpg_status to check progress."
+                            if scheduled_restart
+                            else f"CPG exists and Joern server restart is already in progress. Estimated time: {estimate}. Use get_cpg_status to check progress."
+                        ),
                         "estimated_time": estimate,
-                        "cpg_path": existing_codebase.cpg_path,
-                        "source_type": existing_codebase.source_type,
-                        "source_path": existing_codebase.source_path,
-                        "language": existing_codebase.language,
+                        **_public_codebase_fields(
+                            source_type=existing_codebase.source_type,
+                            source_path=existing_codebase.source_path,
+                            language=existing_codebase.language,
+                            cpg_path=existing_codebase.cpg_path,
+                        ),
                     }
 
             # Get services
@@ -690,7 +810,8 @@ Examples:
                                 shutil.copy2(src_item, dst_item)
                         logger.info(f"Source copied successfully to {codebase_dir}")
                     except OSError as e:
-                        raise ValidationError(f"Failed to copy from {host_path}: {e}")
+                        logger.error(f"Failed to copy local source directory for {codebase_hash}: {e}")
+                        raise ValidationError("Failed to copy local source directory")
                 else:
                     logger.info(f"Using existing source at {codebase_dir}")
 
@@ -747,9 +868,11 @@ Examples:
                 "status": "generating",
                 "message": f"CPG generation started in background. Estimated time: {estimate}. Use get_cpg_status to check progress.",
                 "estimated_time": estimate,
-                "source_type": source_type,
-                "source_path": source_path,
-                "language": language,
+                **_public_codebase_fields(
+                    source_type=source_type,
+                    source_path=source_path,
+                    language=language,
+                ),
             }
 
         except ValidationError as e:
@@ -786,6 +909,7 @@ Returns:
 Notes:
     - If status is 'ready', the CPG is available for queries.
     - If status is 'generating', wait and retry.
+    - Filesystem paths in responses are redacted.
 
 Examples:
     get_cpg_status(codebase_hash="abc123456789")""",
@@ -829,35 +953,35 @@ Examples:
                     if not container_cpg_path:
                         container_cpg_path = f"/playground/cpgs/{codebase_hash}/cpg.bin"
 
-                    codebase_tracker.update_codebase(
-                        codebase_hash=codebase_hash,
-                        joern_port=None,
-                        metadata={"status": "loading", **{k: v for k, v in codebase_info.metadata.items() if k != "status"}}
-                    )
+                    if not _get_active_restart_task(services, codebase_hash):
+                        codebase_tracker.update_codebase(
+                            codebase_hash=codebase_hash,
+                            joern_port=None,
+                            metadata={"status": "loading", **{k: v for k, v in codebase_info.metadata.items() if k != "status"}}
+                        )
 
-                    try:
-                        loop = asyncio.get_running_loop()
-                        loop.create_task(
-                            _restart_server_async(
+                        try:
+                            _schedule_restart_server_task(
                                 codebase_hash=codebase_hash,
                                 container_cpg_path=container_cpg_path,
                                 services=services,
                             )
-                        )
-                    except RuntimeError:
-                        logger.warning(f"No event loop for async restart of {codebase_hash}")
+                        except RuntimeError:
+                            logger.warning(f"No event loop for async restart of {codebase_hash}")
             
             return {
                 "codebase_hash": codebase_hash,
                 "status": status,
-                "cpg_path": codebase_info.cpg_path,
                 "joern_port": joern_port,
-                "source_type": codebase_info.source_type,
-                "source_path": codebase_info.source_path,
-                "language": codebase_info.language,
-                "container_codebase_path": codebase_info.metadata.get("container_codebase_path"),
-                "container_cpg_path": codebase_info.metadata.get("container_cpg_path"),
-                "repository": codebase_info.metadata.get("repository"),
+                **_public_codebase_fields(
+                    source_type=codebase_info.source_type,
+                    source_path=codebase_info.source_path,
+                    language=codebase_info.language,
+                    cpg_path=codebase_info.cpg_path,
+                    metadata=codebase_info.metadata,
+                    include_internal_paths=True,
+                    include_repository=True,
+                ),
                 "created_at": codebase_info.created_at.isoformat(),
                 "last_accessed": codebase_info.last_accessed.isoformat(),
             }

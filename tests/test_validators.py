@@ -297,6 +297,20 @@ class TestSanitizePath:
             with pytest.raises(ValidationError, match="Path traversal attempt detected"):
                 sanitize_path("/etc/passwd", allowed_root=tmpdir)
 
+    def test_sanitize_path_with_root_traversal_redacts_paths(self):
+        """Traversal errors should not leak host filesystem paths."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            attempted = "../secret"
+            with pytest.raises(ValidationError) as exc_info:
+                sanitize_path(attempted, allowed_root=tmpdir)
+
+            message = str(exc_info.value)
+            assert "Path traversal attempt detected" in message
+            assert attempted not in message
+            assert tmpdir not in message
+
     def test_sanitize_path_canonicalization(self):
         """Test that paths are properly canonicalized"""
         import tempfile
@@ -362,21 +376,28 @@ class TestResolveHostPath:
         with pytest.raises(ValidationError) as exc_info:
             resolve_host_path("relative/path")
 
-        assert "Host path must be absolute" in str(exc_info.value)
+        assert str(exc_info.value) == "Host path must be absolute"
 
     def test_invalid_host_path_with_traversal(self):
         """Test path with traversal patterns"""
         with pytest.raises(ValidationError) as exc_info:
             resolve_host_path("/home/user/../../../etc/passwd")
 
-        assert "Invalid host path" in str(exc_info.value)
+        assert str(exc_info.value) == "Invalid host path"
 
     def test_invalid_host_path_system_etc(self):
         """Test system path /etc"""
         with pytest.raises(ValidationError) as exc_info:
             resolve_host_path("/etc/passwd")
 
-        assert "Invalid host path" in str(exc_info.value)
+        assert str(exc_info.value) == "Invalid host path"
+
+    def test_invalid_host_path_not_found_redacts_path(self):
+        """Missing path errors should not echo the requested host path."""
+        with pytest.raises(ValidationError) as exc_info:
+            resolve_host_path("/tmp/definitely-not-a-real-codebadger-path")
+
+        assert str(exc_info.value) == "Path does not exist"
 
     def test_invalid_host_path_system_sys(self):
         """Test system path /sys"""

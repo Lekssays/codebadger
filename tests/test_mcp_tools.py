@@ -2,6 +2,7 @@
 Tests for MCP tools
 """
 
+import asyncio
 import os
 import tempfile
 from unittest.mock import MagicMock, patch
@@ -204,8 +205,96 @@ class TestMCPTools:
                 result_dict = json.loads(result.content[0].text)
 
                 assert result_dict["status"] == "ready"
-                assert "cpg_path" in result_dict
+                assert result_dict["cpg_path"] == "<redacted:host-path>"
                 assert result_dict["joern_port"] == 2000
+
+    @pytest.mark.asyncio
+    async def test_generate_cpg_cached_loading_does_not_schedule_duplicate_restart(self, mock_services, temp_workspace):
+        """A cached codebase already loading should not enqueue a second restart."""
+        from src.tools.core_tools import register_core_tools
+
+        codebase_hash = "553642871dd4251d"
+        mock_services["codebase_tracker"].get_codebase.return_value = CodebaseInfo(
+            codebase_hash=codebase_hash,
+            source_type="local",
+            source_path="/Users/private/test-repo",
+            language="c",
+            cpg_path=os.path.join(temp_workspace, "playground/cpgs/test/cpg.bin"),
+            joern_port=2000,
+            metadata={
+                "status": "loading",
+                "container_cpg_path": f"/playground/cpgs/{codebase_hash}/cpg.bin",
+            },
+        )
+        mock_services["joern_server_manager"].is_server_running.return_value = False
+        pending_restart = asyncio.get_running_loop().create_future()
+        mock_services["restart_tasks"] = {codebase_hash: pending_restart}
+
+        with patch("src.tools.core_tools.os.path.abspath", return_value=temp_workspace), \
+             patch("src.tools.core_tools.os.path.dirname", return_value=temp_workspace), \
+             patch("src.tools.core_tools.os.path.join", side_effect=os.path.join), \
+             patch("src.tools.core_tools.os.path.exists", return_value=True), \
+               patch("src.tools.core_tools.get_cpg_cache_key", return_value=codebase_hash), \
+               patch("src.tools.core_tools._schedule_restart_server_task") as schedule_restart:
+
+            mcp = FastMCP("TestServer")
+            register_core_tools(mcp, mock_services)
+
+            async with Client(mcp) as client:
+                result = await client.call_tool(
+                    "generate_cpg",
+                    {
+                        "source_type": "local",
+                        "source_path": "/Users/private/test-repo",
+                        "language": "c"
+                    }
+                )
+
+                import json
+                result_dict = json.loads(result.content[0].text)
+
+                assert result_dict["status"] == "loading"
+                assert "already in progress" in result_dict["message"]
+                schedule_restart.assert_not_called()
+
+            pending_restart.cancel()
+
+    @pytest.mark.asyncio
+    async def test_generate_cpg_local_copy_error_redacts_host_path(self, mock_services, tmp_path):
+        """Local copy failures should not echo host paths back to the client."""
+        from src.tools.core_tools import register_core_tools
+
+        source_dir = tmp_path / "private-repo"
+        source_dir.mkdir()
+        mock_services["codebase_tracker"].get_codebase.return_value = None
+
+        with patch("src.tools.core_tools.resolve_host_path", return_value=str(source_dir)), \
+             patch("src.tools.core_tools._get_git_commit_hash", return_value=None), \
+             patch("src.tools.core_tools.os.path.abspath", return_value=str(tmp_path)), \
+             patch("src.tools.core_tools.os.path.dirname", return_value=str(tmp_path)), \
+             patch("src.tools.core_tools.os.path.join", side_effect=os.path.join), \
+             patch("src.tools.core_tools.os.makedirs"), \
+             patch("src.tools.core_tools.os.listdir", side_effect=OSError(f"permission denied: {source_dir}")):
+
+            mcp = FastMCP("TestServer")
+            register_core_tools(mcp, mock_services)
+
+            async with Client(mcp) as client:
+                result = await client.call_tool(
+                    "generate_cpg",
+                    {
+                        "source_type": "local",
+                        "source_path": str(source_dir),
+                        "language": "c"
+                    }
+                )
+
+                import json
+                result_dict = json.loads(result.content[0].text)
+
+                assert result_dict["success"] is False
+                assert result_dict["error"] == "Failed to copy local source directory"
+                assert str(source_dir) not in result_dict["error"]
 
     @pytest.mark.asyncio
     async def test_get_cpg_status_exists(self, mock_services):
@@ -215,8 +304,8 @@ class TestMCPTools:
         # Set up existing codebase with metadata
         mock_services["codebase_tracker"].get_codebase.return_value = CodebaseInfo(
             codebase_hash="553642871dd4251d",
-            source_type="github",
-            source_path="https://github.com/test/repo",
+            source_type="local",
+            source_path="/Users/private/test-repo",
             language="c",
             cpg_path="/tmp/test.cpg",
             joern_port=2000,
@@ -239,9 +328,10 @@ class TestMCPTools:
 
                 assert result_dict["codebase_hash"] == "553642871dd4251d"
                 assert result_dict["status"] == "ready"
-                assert "cpg_path" in result_dict
-                assert result_dict["container_codebase_path"] == "/playground/codebases/553642871dd4251d"
-                assert result_dict["container_cpg_path"] == "/playground/cpgs/553642871dd4251d/cpg.bin"
+                assert result_dict["cpg_path"] == "<redacted:host-path>"
+                assert result_dict["source_path"] == "<redacted:local-source>"
+                assert result_dict["container_codebase_path"] == "<redacted:container-path>"
+                assert result_dict["container_cpg_path"] == "<redacted:container-path>"
 
     @pytest.mark.asyncio
     async def test_get_cpg_status_not_found(self, mock_services):
@@ -525,6 +615,198 @@ class TestMCPTools:
             text_result = result.content[0].text
             assert text_result.startswith("Error: ")
             assert "Path traversal attempt detected" in text_result
+            assert str(source_dir) not in text_result
+            assert str(sibling_dir) not in text_result
+
+    @pytest.mark.asyncio
+    async def test_get_method_source_uses_sandbox_snapshot(self, mock_services, tmp_path):
+        """Method source should be read from the sandbox snapshot, not the live checkout."""
+        from src.tools.code_browsing_tools import register_code_browsing_tools
+
+        codebase_hash = "553642871dd4252b"
+        playground_dir = tmp_path / "playground"
+        snapshot_dir = playground_dir / "codebases" / codebase_hash / "src"
+        snapshot_dir.mkdir(parents=True)
+        (snapshot_dir / "thing.c").write_text("int sandbox_version() { return 7; }\n")
+
+        live_dir = tmp_path / "live-checkout" / "src"
+        live_dir.mkdir(parents=True)
+        (live_dir / "thing.c").write_text("int live_version() { return 9; }\n")
+
+        mock_services["codebase_tracker"].get_codebase.return_value = CodebaseInfo(
+            codebase_hash=codebase_hash,
+            source_type="local",
+            source_path=str(live_dir.parent),
+            language="c",
+            cpg_path="/tmp/test.cpg",
+        )
+        mock_services["query_executor"].execute_query.return_value = QueryResult(
+            success=True,
+            data=[{"_1": "sandbox_version", "_2": "src/thing.c", "_3": 1, "_4": 1}],
+            row_count=1,
+        )
+
+        mcp = FastMCP("TestServer")
+        register_code_browsing_tools(mcp, mock_services)
+
+        with patch("src.tools.code_browsing_tools._get_playground_path", return_value=str(playground_dir)):
+            async with Client(mcp) as client:
+                result = await client.call_tool(
+                    "get_method_source",
+                    {"codebase_hash": codebase_hash, "method_name": "sandbox_version"},
+                )
+
+        import json
+        result_dict = json.loads(result.content[0].text)
+
+        assert result_dict["success"] is True
+        assert result_dict["methods"][0]["code"] == "int sandbox_version() { return 7; }\n"
+        assert "live_version" not in result_dict["methods"][0]["code"]
+
+    @pytest.mark.asyncio
+    async def test_get_method_source_redacts_read_errors(self, mock_services, tmp_path):
+        """Method source read failures should not expose raw filesystem errors."""
+        from src.tools.code_browsing_tools import register_code_browsing_tools
+
+        codebase_hash = "553642871dd4252d"
+        playground_dir = tmp_path / "playground"
+        snapshot_dir = playground_dir / "codebases" / codebase_hash / "src"
+        snapshot_dir.mkdir(parents=True)
+        target_file = snapshot_dir / "thing.c"
+        target_file.write_text("int hidden() { return 0; }\n")
+
+        mock_services["codebase_tracker"].get_codebase.return_value = CodebaseInfo(
+            codebase_hash=codebase_hash,
+            source_type="local",
+            source_path=str(tmp_path / "live-checkout"),
+            language="c",
+            cpg_path="/tmp/test.cpg",
+        )
+        mock_services["query_executor"].execute_query.return_value = QueryResult(
+            success=True,
+            data=[{"_1": "hidden", "_2": "src/thing.c", "_3": 1, "_4": 1}],
+            row_count=1,
+        )
+
+        real_open = open
+
+        def failing_open(path, *args, **kwargs):
+            if os.path.realpath(path) == os.path.realpath(target_file):
+                raise OSError(f"permission denied: {target_file}")
+            return real_open(path, *args, **kwargs)
+
+        mcp = FastMCP("TestServer")
+        register_code_browsing_tools(mcp, mock_services)
+
+        with patch("src.tools.code_browsing_tools._get_playground_path", return_value=str(playground_dir)), \
+             patch("builtins.open", side_effect=failing_open):
+            async with Client(mcp) as client:
+                result = await client.call_tool(
+                    "get_method_source",
+                    {"codebase_hash": codebase_hash, "method_name": "hidden"},
+                )
+
+        import json
+        result_dict = json.loads(result.content[0].text)
+
+        assert result_dict["success"] is True
+        assert result_dict["methods"][0]["code"] == "// Error reading source file"
+        assert str(target_file) not in result_dict["methods"][0]["code"]
+
+    @pytest.mark.asyncio
+    async def test_get_code_snippet_uses_sandbox_snapshot(self, mock_services, tmp_path):
+        """Code snippets should be read from the sandbox snapshot, not the live checkout."""
+        from src.tools.code_browsing_tools import register_code_browsing_tools
+
+        codebase_hash = "553642871dd4252c"
+        playground_dir = tmp_path / "playground"
+        snapshot_dir = playground_dir / "codebases" / codebase_hash / "src"
+        snapshot_dir.mkdir(parents=True)
+        (snapshot_dir / "main.c").write_text("int sandbox_main() { return 1; }\n")
+
+        live_dir = tmp_path / "live-checkout" / "src"
+        live_dir.mkdir(parents=True, exist_ok=True)
+        (live_dir / "main.c").write_text("int live_main() { return 2; }\n")
+
+        mock_services["codebase_tracker"].get_codebase.return_value = CodebaseInfo(
+            codebase_hash=codebase_hash,
+            source_type="local",
+            source_path=str(live_dir.parent),
+            language="c",
+            cpg_path="/tmp/test.cpg",
+        )
+
+        mcp = FastMCP("TestServer")
+        register_code_browsing_tools(mcp, mock_services)
+
+        with patch("src.tools.code_browsing_tools._get_playground_path", return_value=str(playground_dir)):
+            async with Client(mcp) as client:
+                result = await client.call_tool(
+                    "get_code_snippet",
+                    {
+                        "codebase_hash": codebase_hash,
+                        "filename": "src/main.c",
+                        "start_line": 1,
+                        "end_line": 1,
+                    },
+                )
+
+        import json
+        result_dict = json.loads(result.content[0].text)
+
+        assert result_dict["success"] is True
+        assert result_dict["code"] == "int sandbox_main() { return 1; }\n"
+        assert "live_main" not in result_dict["code"]
+
+    @pytest.mark.asyncio
+    async def test_get_code_snippet_redacts_read_errors(self, mock_services, tmp_path):
+        """Code snippet read failures should not expose raw filesystem errors."""
+        from src.tools.code_browsing_tools import register_code_browsing_tools
+
+        codebase_hash = "553642871dd4252e"
+        playground_dir = tmp_path / "playground"
+        snapshot_dir = playground_dir / "codebases" / codebase_hash / "src"
+        snapshot_dir.mkdir(parents=True)
+        target_file = snapshot_dir / "main.c"
+        target_file.write_text("int hidden_main() { return 0; }\n")
+
+        mock_services["codebase_tracker"].get_codebase.return_value = CodebaseInfo(
+            codebase_hash=codebase_hash,
+            source_type="local",
+            source_path=str(tmp_path / "live-checkout"),
+            language="c",
+            cpg_path="/tmp/test.cpg",
+        )
+
+        real_open = open
+
+        def failing_open(path, *args, **kwargs):
+            if os.path.realpath(path) == os.path.realpath(target_file):
+                raise OSError(f"permission denied: {target_file}")
+            return real_open(path, *args, **kwargs)
+
+        mcp = FastMCP("TestServer")
+        register_code_browsing_tools(mcp, mock_services)
+
+        with patch("src.tools.code_browsing_tools._get_playground_path", return_value=str(playground_dir)), \
+             patch("builtins.open", side_effect=failing_open):
+            async with Client(mcp) as client:
+                result = await client.call_tool(
+                    "get_code_snippet",
+                    {
+                        "codebase_hash": codebase_hash,
+                        "filename": "src/main.c",
+                        "start_line": 1,
+                        "end_line": 1,
+                    },
+                )
+
+        import json
+        result_dict = json.loads(result.content[0].text)
+
+        assert result_dict["success"] is False
+        assert result_dict["error"] == "Failed to read source file"
+        assert str(target_file) not in result_dict["error"]
 
     @pytest.mark.asyncio
     async def test_get_cfg_success(self, mock_services):
@@ -660,8 +942,9 @@ Edges:
         import subprocess
 
         # Create a temporary git repo with security-related commits
-        repo_dir = tmp_path / "test_repo"
-        repo_dir.mkdir()
+        playground_dir = tmp_path / "playground"
+        repo_dir = playground_dir / "codebases" / "553642871dd4251d"
+        repo_dir.mkdir(parents=True)
 
         # Initialize git repo
         subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
@@ -695,12 +978,13 @@ Edges:
         mcp = FastMCP("TestServer")
         register_code_browsing_tools(mcp, mock_services)
 
-        async with Client(mcp) as client:
-            result = await client.call_tool("discover_fixed_vulnerabilities", {
-                "codebase_hash": "553642871dd4251d",
-                "limit": 100
-            })
-            text_result = result.content[0].text
+        with patch("src.tools.code_browsing_tools._get_playground_path", return_value=str(playground_dir)):
+            async with Client(mcp) as client:
+                result = await client.call_tool("discover_fixed_vulnerabilities", {
+                    "codebase_hash": "553642871dd4251d",
+                    "limit": 100
+                })
+                text_result = result.content[0].text
 
             # Should find security-related commits
             assert "Discovered Vulnerability Fixes" in text_result
@@ -719,8 +1003,9 @@ Edges:
         import subprocess
 
         # Create a temporary git repo without security-related commits
-        repo_dir = tmp_path / "clean_repo"
-        repo_dir.mkdir()
+        playground_dir = tmp_path / "playground"
+        repo_dir = playground_dir / "codebases" / "553642871dd4251e"
+        repo_dir.mkdir(parents=True)
 
         subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
         subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=repo_dir, check=True, capture_output=True)
@@ -741,11 +1026,12 @@ Edges:
         mcp = FastMCP("TestServer")
         register_code_browsing_tools(mcp, mock_services)
 
-        async with Client(mcp) as client:
-            result = await client.call_tool("discover_fixed_vulnerabilities", {
-                "codebase_hash": "553642871dd4251e"
-            })
-            text_result = result.content[0].text
+        with patch("src.tools.code_browsing_tools._get_playground_path", return_value=str(playground_dir)):
+            async with Client(mcp) as client:
+                result = await client.call_tool("discover_fixed_vulnerabilities", {
+                    "codebase_hash": "553642871dd4251e"
+                })
+                text_result = result.content[0].text
 
             assert "No commits matching vulnerability patterns were found" in text_result
             assert "CPG-based tools for comprehensive security analysis" in text_result
@@ -757,8 +1043,9 @@ Edges:
         from src.models import CodebaseInfo
 
         # Create a directory without git
-        source_dir = tmp_path / "no_git"
-        source_dir.mkdir()
+        playground_dir = tmp_path / "playground"
+        source_dir = playground_dir / "codebases" / "553642871dd4251f"
+        source_dir.mkdir(parents=True)
         (source_dir / "main.c").write_text("int main() { return 0; }")
 
         mock_services["codebase_tracker"].get_codebase.return_value = CodebaseInfo(
@@ -772,11 +1059,58 @@ Edges:
         mcp = FastMCP("TestServer")
         register_code_browsing_tools(mcp, mock_services)
 
-        async with Client(mcp) as client:
-            result = await client.call_tool("discover_fixed_vulnerabilities", {
-                "codebase_hash": "553642871dd4251f"
-            })
-            text_result = result.content[0].text
+        with patch("src.tools.code_browsing_tools._get_playground_path", return_value=str(playground_dir)):
+            async with Client(mcp) as client:
+                result = await client.call_tool("discover_fixed_vulnerabilities", {
+                    "codebase_hash": "553642871dd4251f"
+                })
+                text_result = result.content[0].text
 
             assert "Error" in text_result
             assert "not a git repository" in text_result
+
+    @pytest.mark.asyncio
+    async def test_discover_fixed_vulnerabilities_uses_sandbox_snapshot(self, mock_services, tmp_path):
+        """Git history analysis should use the sandbox snapshot instead of the original local path."""
+        from src.tools.code_browsing_tools import register_code_browsing_tools
+        from src.models import CodebaseInfo
+        import subprocess
+
+        codebase_hash = "553642871dd4251a"
+        playground_dir = tmp_path / "playground"
+        repo_dir = playground_dir / "codebases" / codebase_hash
+        repo_dir.mkdir(parents=True)
+
+        subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_dir, check=True, capture_output=True)
+
+        (repo_dir / "parser.c").write_text("int parse() { return 0; }")
+        subprocess.run(["git", "add", "."], cwd=repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "Fix buffer overflow in parser"], cwd=repo_dir, check=True, capture_output=True)
+
+        original_source = tmp_path / "live-checkout"
+        original_source.mkdir()
+        (original_source / "main.c").write_text("int main() { return 0; }")
+
+        mock_services["codebase_tracker"].get_codebase.return_value = CodebaseInfo(
+            codebase_hash=codebase_hash,
+            source_type="local",
+            source_path=str(original_source),
+            language="c",
+            cpg_path="/tmp/test.cpg",
+        )
+
+        mcp = FastMCP("TestServer")
+        register_code_browsing_tools(mcp, mock_services)
+
+        with patch("src.tools.code_browsing_tools._get_playground_path", return_value=str(playground_dir)):
+            async with Client(mcp) as client:
+                result = await client.call_tool("discover_fixed_vulnerabilities", {
+                    "codebase_hash": codebase_hash,
+                    "limit": 20
+                })
+                text_result = result.content[0].text
+
+        assert "Discovered Vulnerability Fixes" in text_result
+        assert "buffer overflow" in text_result.lower()

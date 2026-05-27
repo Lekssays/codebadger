@@ -2,6 +2,7 @@
 Tests for main module
 """
 
+import asyncio
 import main
 import sys
 from pathlib import Path
@@ -201,6 +202,109 @@ class TestEndpoints:
         assert response_dict["status"] == "healthy"
         assert response_dict["service"] == "codebadger"
         assert response_dict["version"] == VERSION
+
+    @pytest.mark.asyncio
+    async def test_health_endpoint_redacts_codebase_sources(self):
+        """Health responses should not expose raw repository locations."""
+        from main import health_check
+        from src.models import CodebaseInfo
+
+        mock_request = AsyncMock()
+
+        tracker = MagicMock()
+        tracker.list_codebases.return_value = ["553642871dd4251d"]
+        tracker.get_codebase.return_value = CodebaseInfo(
+            codebase_hash="553642871dd4251d",
+            source_type="local",
+            source_path="/Users/example/private-repo",
+            language="python",
+            cpg_path="/tmp/test.cpg",
+            metadata={"status": "ready"},
+        )
+        main.services["codebase_tracker"] = tracker
+
+        with patch("main._check_joern_container_status", return_value={"status": "running", "running": True}), \
+             patch("main._get_active_servers", return_value={"count": 0, "servers": {}}), \
+             patch("main._get_port_utilization", return_value={"allocated_count": 0, "available_count": 29}), \
+             patch("main._get_disk_usage", return_value={"total_gb": 100, "used_gb": 50, "free_gb": 50}), \
+             patch("main._get_cache_size", return_value={"cache_path": "/tmp", "size_mb": 0, "exists": True}):
+            response = await health_check(mock_request)
+
+        import json
+
+        response_dict = json.loads(response.body.decode("utf-8"))
+        codebase_entry = response_dict["codebases"]["list"][0]
+        assert codebase_entry["source"] == "<redacted:local>"
+        assert codebase_entry["source_type"] == "local"
+        assert "/Users/example/private-repo" not in response.body.decode("utf-8")
+
+
+class TestHealthHelpers:
+    """Test health helper behavior."""
+
+    def test_get_codebase_list_can_include_sensitive_sources(self):
+        """Internal status paths can still request full source locations."""
+        from src.models import CodebaseInfo
+
+        tracker = MagicMock()
+        tracker.list_codebases.return_value = ["553642871dd4251d"]
+        tracker.get_codebase.return_value = CodebaseInfo(
+            codebase_hash="553642871dd4251d",
+            source_type="github",
+            source_path="https://github.com/acme/private-repo",
+            language="python",
+            cpg_path="/tmp/test.cpg",
+            metadata={"status": "ready"},
+        )
+        main.services["codebase_tracker"] = tracker
+
+        redacted = main._get_codebase_list()
+        detailed = main._get_codebase_list(include_sensitive=True)
+
+        assert redacted[0]["source"] == "<redacted:github>"
+        assert detailed[0]["source"] == "https://github.com/acme/private-repo"
+
+
+class TestShutdown:
+    """Test graceful shutdown behavior."""
+
+    @pytest.mark.asyncio
+    async def test_graceful_shutdown_cancels_restart_tasks(self):
+        """Graceful shutdown should cancel tracked restart tasks before clearing services."""
+        status_log_task = asyncio.get_running_loop().create_future()
+        restart_task = asyncio.get_running_loop().create_future()
+
+        joern_server_manager = MagicMock()
+        joern_server_manager._watchdog_task = None
+        port_manager = MagicMock()
+        cpg_queue = MagicMock()
+        cpg_queue.stop = AsyncMock()
+        db_manager = MagicMock()
+
+        main.services.update(
+            {
+                "status_log_task": status_log_task,
+                "restart_tasks": {"codebase": restart_task},
+                "joern_server_manager": joern_server_manager,
+                "port_manager": port_manager,
+                "cpg_queue": cpg_queue,
+                "db_manager": db_manager,
+            }
+        )
+
+        await main._graceful_shutdown()
+
+        assert status_log_task.cancelled()
+        assert restart_task.cancelled()
+        joern_server_manager.terminate_all_servers.assert_called_once()
+        port_manager.release_all_ports.assert_called_once()
+        cpg_queue.stop.assert_awaited_once()
+        db_manager.close.assert_called_once()
+        assert main.services == {}
+
+
+class TestRootEndpoint:
+    """Test root endpoint behavior."""
 
     @pytest.mark.asyncio
     async def test_root_endpoint(self):

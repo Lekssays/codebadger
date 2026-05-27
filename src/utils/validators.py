@@ -187,12 +187,12 @@ def sanitize_path(path: str, allowed_root: Optional[str] = None) -> str:
             common = os.path.commonpath([canonical_root, canonical_path])
             if common != canonical_root:
                 raise ValidationError(
-                    f"Path traversal attempt detected: {path} is outside allowed root {allowed_root}"
+                    "Path traversal attempt detected: requested path is outside the allowed root"
                 )
         except ValueError:
             # Different drives on Windows
             raise ValidationError(
-                f"Path traversal attempt detected: {path} is outside allowed root {allowed_root}"
+                "Path traversal attempt detected: requested path is outside the allowed root"
             )
 
         return canonical_path
@@ -229,17 +229,17 @@ def resolve_host_path(host_path: str) -> str:
     import os
     
     if not os.path.isabs(host_path):
-        raise ValidationError(f"Host path must be absolute: {host_path}")
+        raise ValidationError("Host path must be absolute")
     
     # Check for dangerous patterns
     if ".." in host_path or host_path.startswith("/etc") or host_path.startswith("/sys"):
-        raise ValidationError(f"Invalid host path: {host_path}")
+        raise ValidationError("Invalid host path")
     
     # Now we can properly validate existence (running on host)
     if not os.path.exists(host_path):
-        raise ValidationError(f"Path does not exist: {host_path}")
+        raise ValidationError("Path does not exist")
     
     if not os.path.isdir(host_path):
-        raise ValidationError(f"Path is not a directory: {host_path}")
+        raise ValidationError("Path is not a directory")
     
     return os.path.abspath(host_path)

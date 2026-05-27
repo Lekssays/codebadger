@@ -19,6 +19,19 @@ from .queries import QueryLoader
 logger = logging.getLogger(__name__)
 
 
+def _get_playground_path() -> str:
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "playground"))
+
+
+def _get_source_snapshot_dir(codebase_hash: str) -> str:
+    source_dir = os.path.join(_get_playground_path(), "codebases", codebase_hash)
+    if not os.path.isdir(source_dir):
+        raise ValidationError(
+            "Codebase source snapshot is unavailable. Regenerate the CPG to restore it."
+        )
+    return source_dir
+
+
 def register_code_browsing_tools(mcp, services: dict):
     """Register code browsing MCP tools with the FastMCP server"""
 
@@ -224,27 +237,7 @@ Examples:
 
             methods = []
 
-            # Get playground path once (used for resolving source files)
-            playground_path = os.path.abspath(
-                os.path.join(
-                    os.path.dirname(__file__), "..", "..", "playground"
-                )
-            )
-
-            # Get source directory from session
-            if codebase_info.source_type == "github":
-                from .core_tools import get_cpg_cache_key
-                cpg_cache_key = get_cpg_cache_key(
-                    codebase_info.source_type, codebase_info.source_path, codebase_info.language
-                )
-                source_dir = os.path.join(
-                    playground_path, "codebases", cpg_cache_key
-                )
-            else:
-                source_path = codebase_info.source_path
-                if not os.path.isabs(source_path):
-                    source_path = os.path.abspath(source_path)
-                source_dir = source_path
+            source_dir = _get_source_snapshot_dir(codebase_hash)
 
             for item in result.data:
                 if not isinstance(item, dict):
@@ -291,7 +284,13 @@ Examples:
                         else:
                             full_code = f"// Source file not found: {method_filename}"
                     except Exception as e:
-                        full_code = f"// Error reading source file: {str(e)}"
+                        logger.warning(
+                            "Failed to read source file for method %s in %s: %s",
+                            method_name_result,
+                            method_filename,
+                            e,
+                        )
+                        full_code = "// Error reading source file"
                 else:
                     full_code = "// Unable to determine line range for method"
 
@@ -746,25 +745,7 @@ Examples:
             if not codebase_info or not codebase_info.cpg_path:
                 raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
 
-            # Get playground path
-            playground_path = os.path.abspath(
-                os.path.join(os.path.dirname(__file__), "..", "..", "playground")
-            )
-
-            # Get source directory from session
-            if codebase_info.source_type == "github":
-                # For GitHub repos, use the cached directory
-                from .core_tools import get_cpg_cache_key
-                cpg_cache_key = get_cpg_cache_key(
-                    codebase_info.source_type, codebase_info.source_path, codebase_info.language
-                )
-                source_dir = os.path.join(playground_path, "codebases", cpg_cache_key)
-            else:
-                # For local paths, use the session source path directly
-                source_path = codebase_info.source_path
-                if not os.path.isabs(source_path):
-                    source_path = os.path.abspath(source_path)
-                source_dir = source_path
+            source_dir = _get_source_snapshot_dir(codebase_hash)
 
             # Construct full file path and prevent path traversal
             file_path = os.path.realpath(os.path.join(source_dir, filename))
@@ -819,7 +800,7 @@ Examples:
             logger.error(f"Unexpected error: {e}", exc_info=True)
             return {
                 "success": False,
-                "error": str(e),
+                "error": "Failed to read source file",
             }
     @mcp.tool(
         description="""Execute a raw CPGQL query against the codebase.
@@ -883,12 +864,22 @@ Examples:
                         "error": "Query validation failed",
                     }
 
-            # Use the QueryExecutor service to get structured output (data and row_count)
+            # Dataflow queries (reachableByFlows) legitimately need more time.
+            # Use a higher default when the caller didn't specify an explicit timeout.
+            from ..services.query_executor import _DATAFLOW_PATTERNS, _DATAFLOW_DEFAULT_TIMEOUT
+            _effective_timeout = timeout
+            if _effective_timeout is None:
+                _effective_timeout = (
+                    _DATAFLOW_DEFAULT_TIMEOUT
+                    if any(p in query for p in _DATAFLOW_PATTERNS)
+                    else 30
+                )
+
             result = query_executor.execute_query(
                 codebase_hash=codebase_hash,
                 cpg_path=codebase_info.cpg_path,
                 query=query.strip(),
-                timeout=timeout or 30,
+                timeout=_effective_timeout,
                 limit=None,
             )
 
@@ -899,9 +890,10 @@ Examples:
                 "execution_time": getattr(result, "execution_time", None),
             }
 
-            # Include error information if present
             if not result.success and getattr(result, "error", None):
                 response["error"] = result.error
+            if not result.success and getattr(result, "error_code", None):
+                response["error_code"] = result.error_code
 
             # If validation was requested, include it in response
             if validate and validation_result:
@@ -1498,22 +1490,7 @@ Examples:
             if not codebase_info:
                 raise ValidationError(f"Codebase {codebase_hash} not found. Generate it first using generate_cpg.")
 
-            # Get source directory
-            playground_path = os.path.abspath(
-                os.path.join(os.path.dirname(__file__), "..", "..", "playground")
-            )
-
-            if codebase_info.source_type == "github":
-                from .core_tools import get_cpg_cache_key
-                cpg_cache_key = get_cpg_cache_key(
-                    codebase_info.source_type, codebase_info.source_path, codebase_info.language
-                )
-                source_dir = os.path.join(playground_path, "codebases", cpg_cache_key)
-            else:
-                source_path = codebase_info.source_path
-                if not os.path.isabs(source_path):
-                    source_path = os.path.abspath(source_path)
-                source_dir = source_path
+            source_dir = _get_source_snapshot_dir(codebase_hash)
 
             # Check if it's a git repository
             git_dir = os.path.join(source_dir, ".git")

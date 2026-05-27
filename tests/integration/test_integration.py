@@ -255,8 +255,12 @@ class TestCodeBadgerIntegration:
         # Should get the same hash
         assert cpg_dict1["codebase_hash"] == cpg_dict2["codebase_hash"]
 
-        # Second call should return "ready" status immediately (already exists)
-        assert cpg_dict2["status"] == "ready"
+        # A cached codebase may be immediately ready or may still be restarting the Joern server.
+        assert cpg_dict2["status"] in ["ready", "loading"]
+
+        if cpg_dict2["status"] == "loading":
+            ready = await self.wait_for_cpg_ready(client, codebase_hash)
+            assert ready, "Cached CPG did not return to ready after restart"
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(210)

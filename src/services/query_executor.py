@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+import threading
 import time
 from typing import Any, Dict, List, Optional, Union, TYPE_CHECKING
 
@@ -16,6 +17,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 tracer = get_tracer()
 
+# Dataflow queries (reachableByFlows) return huge result sets and run for minutes.
+# Auto-cap their output and give them a higher default timeout.
+_DATAFLOW_PATTERNS = (".reachableByFlows", "reachableByFlows")
+_DATAFLOW_RESULT_LIMIT = 50
+_DATAFLOW_DEFAULT_TIMEOUT = 120  # seconds
+
 
 class QueryExecutor:
     """Service for executing CPGQL queries against CPGs using Joern HTTP server"""
@@ -29,6 +36,16 @@ class QueryExecutor:
         self.joern_server_manager = joern_server_manager
         self.config = config or {}
         self.codebase_tracker = codebase_tracker
+        # Serialize queries per codebase so a runaway query on one JVM doesn't
+        # cause a second thread to pile on and also burn a worker slot.
+        self._codebase_locks: Dict[str, threading.Semaphore] = {}
+        self._locks_mutex = threading.Lock()
+
+    def _get_codebase_lock(self, codebase_hash: str) -> threading.Semaphore:
+        with self._locks_mutex:
+            if codebase_hash not in self._codebase_locks:
+                self._codebase_locks[codebase_hash] = threading.Semaphore(1)
+            return self._codebase_locks[codebase_hash]
 
     def execute_query(
         self,
@@ -48,65 +65,85 @@ class QueryExecutor:
             try:
                 logger.debug(f"Executing query for codebase {codebase_hash}: {query[:100]}...")
 
-                # Get the Joern server port for this codebase
                 if not self.joern_server_manager:
                     return QueryResult(
                         success=False,
                         error="No Joern server manager configured",
+                        error_code="SERVER_UNAVAILABLE",
                         execution_time=time.time() - start_time,
                     )
 
-                port = self.joern_server_manager.get_server_port(codebase_hash)
-                if not port:
-                    # Auto-wake sleeping codebase
-                    if self.codebase_tracker:
-                        info = self.codebase_tracker.get_codebase(codebase_hash)
-                        if info and info.metadata.get("status") == "sleeping" and info.cpg_path:
-                            logger.info(f"Auto-waking sleeping codebase {codebase_hash}")
+                # Serialize queries per codebase: one JVM handles one query at a time.
+                lock = self._get_codebase_lock(codebase_hash)
+                with lock:
+                    port = self.joern_server_manager.get_server_port(codebase_hash)
+                    if not port:
+                        # Auto-wake sleeping codebase
+                        if self.codebase_tracker:
+                            info = self.codebase_tracker.get_codebase(codebase_hash)
+                            if info and info.metadata.get("status") == "sleeping" and info.cpg_path:
+                                logger.info(f"Auto-waking sleeping codebase {codebase_hash}")
+                                try:
+                                    port = self.joern_server_manager.reactivate(codebase_hash, info.cpg_path)
+                                except Exception as e:
+                                    return QueryResult(
+                                        success=False,
+                                        error=f"Failed to reactivate sleeping codebase: {e}",
+                                        error_code="SERVER_UNAVAILABLE",
+                                        execution_time=time.time() - start_time,
+                                    )
+                    if not port:
+                        return QueryResult(
+                            success=False,
+                            error=f"No Joern server running for codebase {codebase_hash}",
+                            error_code="SERVER_UNAVAILABLE",
+                            execution_time=time.time() - start_time,
+                        )
+
+                    joern_client = self.joern_server_manager.get_or_create_client(codebase_hash)
+
+                    # Single health check — no sleep. If the server was killed due to a
+                    # previous query timeout it will be absent; auto-wake handles restart
+                    # on the next call.
+                    if not joern_client.check_health(timeout=10):
+                        logger.warning(f"Joern server on port {port} not responding")
+                        return QueryResult(
+                            success=False,
+                            error=(
+                                f"Joern server not responding (port {port}). "
+                                f"It may be restarting after a previous timeout. Try again shortly."
+                            ),
+                            error_code="SERVER_UNAVAILABLE",
+                            execution_time=time.time() - start_time,
+                        )
+
+                    normalized_query = self._normalize_query(query, limit)
+                    logger.debug(f"Normalized query for execution: {normalized_query}")
+
+                    result = self._execute_via_client(joern_client, normalized_query, timeout)
+                    result.execution_time = time.time() - start_time
+                    span.set_attribute("query.execution_time_s", result.execution_time)
+                    span.set_attribute("query.success", result.success)
+
+                    # On timeout: kill the server so the runaway JVM doesn't peg CPU.
+                    # Mark it sleeping so the next query auto-reactivates transparently.
+                    if result.error_code == "TIMEOUT":
+                        logger.warning(
+                            f"Query timed out for {codebase_hash} — terminating server "
+                            f"to stop runaway JVM (same pattern as load_cpg timeout)"
+                        )
+                        self.joern_server_manager.terminate_server(codebase_hash)
+                        if self.codebase_tracker:
                             try:
-                                port = self.joern_server_manager.reactivate(codebase_hash, info.cpg_path)
-                            except Exception as e:
-                                return QueryResult(
-                                    success=False,
-                                    error=f"Failed to reactivate sleeping codebase: {e}",
-                                    execution_time=time.time() - start_time,
+                                self.codebase_tracker.update_codebase(
+                                    codebase_hash,
+                                    joern_port=None,
+                                    metadata={"status": "sleeping"},
                                 )
-                if not port:
-                    return QueryResult(
-                        success=False,
-                        error=f"No Joern server running for codebase {codebase_hash}",
-                        execution_time=time.time() - start_time,
-                    )
+                            except Exception as e:
+                                logger.warning(f"Failed to mark codebase sleeping after timeout: {e}")
 
-                # Get cached client with connection pooling instead of creating new one
-                joern_client = self.joern_server_manager.get_or_create_client(codebase_hash)
-
-                # Health check with retry — Joern JVM may be slow after heavy queries
-                server_healthy = joern_client.check_health(timeout=10)
-                if not server_healthy:
-                    logger.warning(f"Joern server on port {port} not responding, retrying after brief wait...")
-                    time.sleep(5)
-                    server_healthy = joern_client.check_health(timeout=15)
-                if not server_healthy:
-                    logger.warning(f"Joern server on port {port} is not responding after retry, it may be overloaded or crashed")
-                    return QueryResult(
-                        success=False,
-                        error=f"Joern server not responding (port {port}). The server may be overloaded from a previous heavy query. "
-                              f"Try again in a few minutes, or restart the server.",
-                        execution_time=time.time() - start_time,
-                    )
-
-                # Normalize query for JSON output
-                normalized_query = self._normalize_query(query, limit)
-                logger.debug(f"Normalized query for execution: {normalized_query}")
-
-                # Execute query via HTTP API
-                result = self._execute_via_client(joern_client, normalized_query, timeout)
-                result.execution_time = time.time() - start_time
-                span.set_attribute("query.execution_time_s", result.execution_time)
-                span.set_attribute("query.success", result.success)
-
-                return result
+                    return result
 
             except Exception as e:
                 execution_time = time.time() - start_time
@@ -145,8 +182,11 @@ class QueryExecutor:
         else:
             base_query = query
 
-        # Add limit if specified (only for queries that return collections)
+        # Auto-cap dataflow queries that are not already limited — they fan out over the
+        # entire identifier set and return enormous result sets if unconstrained.
         is_size_query = bool(re.search(r"\.size\s*$", base_query))
+        if limit is None and any(p in base_query for p in _DATAFLOW_PATTERNS):
+            limit = _DATAFLOW_RESULT_LIMIT
         if limit is not None and limit > 0 and not is_size_query:
             base_query = f"{base_query}.take({limit})"
 
@@ -159,37 +199,31 @@ class QueryExecutor:
         """Execute query using Joern server client"""
         try:
             logger.debug(f"Executing query via Joern client: {query[:100]}...")
-            
+
             result = joern_client.execute_query(query, timeout=timeout)
-            
+
             if result.get("success"):
-                # Parse the output
                 stdout = result.get("stdout", "")
                 data = self._parse_output(stdout)
-                # Data may be a list (for collection outputs) or a primitive (for size/string outputs)
-                if isinstance(data, list):
-                    row_count = len(data)
-                else:
-                    row_count = 1
+                row_count = len(data) if isinstance(data, list) else 1
                 return QueryResult(success=True, data=data, row_count=row_count)
             else:
-                # Query failed - provide actionable error messages
                 stderr = result.get("stderr", "")
                 if "timeout" in stderr.lower() or "timed out" in stderr.lower():
                     error_msg = (
                         f"Query timed out after {timeout}s. "
-                        f"For large codebases, try: 1) Filtering by filename to reduce scope, "
-                        f"2) Increasing the timeout parameter, "
-                        f"3) Using simpler queries before complex taint analysis."
+                        f"Try: 1) filtering by filename, "
+                        f"2) increasing the timeout parameter, "
+                        f"3) using simpler queries before taint analysis."
                     )
                     logger.error(f"Query execution timed out after {timeout}s: {query[:100]}...")
-                    return QueryResult(success=False, error=error_msg)
+                    return QueryResult(success=False, error=error_msg, error_code="TIMEOUT")
                 logger.error(f"Query execution failed: {stderr}")
-                return QueryResult(success=False, error=stderr)
+                return QueryResult(success=False, error=stderr, error_code="QUERY_ERROR")
 
         except Exception as e:
             logger.error(f"Error executing query via Joern client: {e}")
-            return QueryResult(success=False, error=str(e))
+            return QueryResult(success=False, error=str(e), error_code="QUERY_ERROR")
 
     def _parse_output(self, output: str) -> Union[list, int, float, str]:
         """Parse Joern query output"""

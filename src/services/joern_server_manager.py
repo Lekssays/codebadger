@@ -61,9 +61,32 @@ class JoernServerManager:
         self._lru.pop(codebase_hash, None)
         self._lru[codebase_hash] = None
 
+    def _container_memory_mb(self) -> float:
+        """Return the Docker container's current RSS in MB (0.0 on any error)."""
+        try:
+            container = self.docker_client.containers.get(self.container_name)
+            stats = container.stats(stream=False)
+            usage = stats.get("memory_stats", {}).get("usage", 0)
+            return usage / (1024 * 1024)
+        except Exception:
+            return 0.0
+
     def _evict_lru_if_needed(self) -> Optional[str]:
+        # Count-based eviction (existing)
         if len(self._ports) < self._max_active:
-            return None
+            # Also check RSS pressure even when under the server count limit.
+            rss_mb = self._container_memory_mb()
+            rss_limit_mb = (
+                self.config.joern.rss_eviction_threshold_mb if (
+                    self.config and hasattr(self.config.joern, "rss_eviction_threshold_mb")
+                ) else 0
+            )
+            if rss_limit_mb <= 0 or rss_mb < rss_limit_mb:
+                return None
+            logger.warning(
+                f"Container RSS {rss_mb:.0f} MB exceeds threshold {rss_limit_mb} MB — "
+                f"evicting LRU server under memory pressure"
+            )
         if not self._lru:
             return None
         lru_hash, _ = next(iter(self._lru.items()))

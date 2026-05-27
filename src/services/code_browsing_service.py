@@ -190,7 +190,7 @@ class CodeBrowsingService:
             source_dir = source_path
 
         if not os.path.exists(source_dir) or not os.path.isdir(source_dir):
-            raise ValidationError(f"Source directory not found for codebase {codebase_hash}: {source_dir}")
+            raise ValidationError(f"Source directory not found for codebase {codebase_hash}")
 
         # Resolve target directory if a local_path is provided; otherwise, use source_dir
         if local_path:
