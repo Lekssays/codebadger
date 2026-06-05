@@ -15,8 +15,10 @@ class DBManager:
         self._init_db()
 
     def close(self):
-        """Close the database manager and clean up resources."""
-        logger.debug(f"DBManager closed for {self.db_path}")
+        """No-op — connections are opened and closed per operation, so there is
+        nothing to release here.  Exists so callers can call close() without
+        needing to know the implementation detail."""
+        pass
 
     def _get_connection(self):
         conn = sqlite3.connect(self.db_path)

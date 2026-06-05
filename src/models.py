@@ -18,12 +18,17 @@ class SourceType(str, Enum):
 
 
 class SessionStatus(str, Enum):
-    """Status enumeration for CPG operations (kept for backward compatibility)"""
+    """Status enumeration for CPG operations."""
 
     INITIALIZING = "initializing"
     GENERATING = "generating"
+    LOADING = "loading"
     READY = "ready"
     SLEEPING = "sleeping"
+    FAILED = "failed"
+    UNKNOWN = "unknown"
+    CACHED = "cached"
+    QUEUE_FULL = "queue_full"
     ERROR = "error"
 
 @dataclass

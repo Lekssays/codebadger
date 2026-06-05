@@ -1,7 +1,7 @@
 """Configuration management for the CodeBadger Server."""
 
 import os
-from typing import Any, Optional
+from typing import Any, Optional, Union, get_args, get_origin
 
 import yaml
 
@@ -107,6 +107,32 @@ def _dict_to_config(data: dict) -> Config:
     Priority: YAML values > Environment variables > Centralized defaults
     """
 
+    def _unwrap_optional(field_type):
+        """Return (inner_type, is_optional).
+
+        Optional[X] is Union[X, None].  Plain types return (field_type, False).
+        """
+        if get_origin(field_type) is Union:
+            args = [a for a in get_args(field_type) if a is not type(None)]
+            if len(args) == 1:
+                return args[0], True
+        return field_type, False
+
+    def _coerce(value, scalar_type):
+        if value is None:
+            return None
+        if scalar_type == int:
+            return int(value)
+        if scalar_type == float:
+            return float(value)
+        if scalar_type == bool:
+            return value.lower() in ("true", "1", "yes") if isinstance(value, str) else bool(value)
+        if get_origin(scalar_type) is list:
+            return value if isinstance(value, list) else ([value] if value is not None else None)
+        if get_origin(scalar_type) is dict:
+            return value if isinstance(value, dict) else None
+        return value
+
     # Helper function to convert values based on dataclass field types
     def convert_config_section(config_class, values):
         if not values:
@@ -114,37 +140,8 @@ def _dict_to_config(data: dict) -> Config:
         converted = {}
         for field_name, field_type in config_class.__annotations__.items():
             if field_name in values:
-                value = values[field_name]
-                # Handle type conversions
-                if field_type == int or (
-                    hasattr(field_type, "__origin__") and field_type.__origin__ == int
-                ):
-                    converted[field_name] = int(value) if value is not None else None
-                elif field_type == float or (
-                    hasattr(field_type, "__origin__") and field_type.__origin__ == float
-                ):
-                    converted[field_name] = float(value) if value is not None else None
-                elif field_type == bool or (
-                    hasattr(field_type, "__origin__") and field_type.__origin__ == bool
-                ):
-                    if isinstance(value, str):
-                        converted[field_name] = value.lower() in ("true", "1", "yes")
-                    else:
-                        converted[field_name] = bool(value)
-                elif hasattr(field_type, "__origin__") and field_type.__origin__ == list:
-                    # Handle List types
-                    if isinstance(value, list):
-                        converted[field_name] = value
-                    else:
-                        converted[field_name] = [value] if value is not None else None
-                elif hasattr(field_type, "__origin__") and field_type.__origin__ == dict:
-                    # Handle Dict types
-                    if isinstance(value, dict):
-                        converted[field_name] = value
-                    else:
-                        converted[field_name] = None
-                else:
-                    converted[field_name] = value
+                inner_type, _ = _unwrap_optional(field_type)
+                converted[field_name] = _coerce(values[field_name], inner_type)
         return config_class(**converted)
 
     # Get config sections with environment variable substitution

@@ -5,7 +5,7 @@ import threading
 import time
 from typing import Any, Dict, List, Optional, Union, TYPE_CHECKING
 
-from ..models import QueryResult
+from ..models import QueryResult, SessionStatus
 from ..exceptions import QueryExecutionError
 from ..telemetry import get_tracer
 from .joern_server_manager import JoernServerManager
@@ -81,7 +81,7 @@ class QueryExecutor:
                         # Auto-wake sleeping codebase
                         if self.codebase_tracker:
                             info = self.codebase_tracker.get_codebase(codebase_hash)
-                            if info and info.metadata.get("status") == "sleeping" and info.cpg_path:
+                            if info and info.metadata.get("status") == SessionStatus.SLEEPING and info.cpg_path:
                                 logger.info(f"Auto-waking sleeping codebase {codebase_hash}")
                                 try:
                                     port = self.joern_server_manager.reactivate(codebase_hash, info.cpg_path)
@@ -138,7 +138,7 @@ class QueryExecutor:
                                 self.codebase_tracker.update_codebase(
                                     codebase_hash,
                                     joern_port=None,
-                                    metadata={"status": "sleeping"},
+                                    metadata={"status": SessionStatus.SLEEPING},
                                 )
                             except Exception as e:
                                 logger.warning(f"Failed to mark codebase sleeping after timeout: {e}")

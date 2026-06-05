@@ -16,8 +16,9 @@ import tarfile
 from typing import Any, Dict, Optional, Annotated, Set
 from pydantic import Field
 
+from ..defaults import LANGUAGE_COMMANDS
 from ..exceptions import ValidationError
-from ..models import CodebaseInfo
+from ..models import CodebaseInfo, SessionStatus
 from ..utils.validators import (
     validate_github_url,
     validate_language,
@@ -289,7 +290,7 @@ async def _restart_server_async(
         codebase_tracker.update_codebase(
             codebase_hash=codebase_hash,
             joern_port=joern_port,
-            metadata={"status": "ready"}
+            metadata={"status": SessionStatus.READY}
         )
 
         # Trigger cache warm-up
@@ -309,7 +310,7 @@ async def _restart_server_async(
             codebase_tracker = services["codebase_tracker"]
             codebase_tracker.update_codebase(
                 codebase_hash=codebase_hash,
-                metadata={"status": "failed", "error": f"Server restart failed: {e}"}
+                metadata={"status": SessionStatus.FAILED, "error": f"Server restart failed: {e}"}
             )
         except Exception:
             pass
@@ -350,7 +351,7 @@ async def _generate_cpg_async(
                 logger.error(error_msg)
                 codebase_tracker.update_codebase(
                     codebase_hash=codebase_hash,
-                    metadata={"status": "failed", "error": error_msg}
+                    metadata={"status": SessionStatus.FAILED, "error": error_msg}
                 )
                 return
 
@@ -371,7 +372,7 @@ async def _generate_cpg_async(
             logger.error(error_msg)
             codebase_tracker.update_codebase(
                 codebase_hash=codebase_hash,
-                metadata={"status": "failed", "error": error_msg}
+                metadata={"status": SessionStatus.FAILED, "error": error_msg}
             )
             return
         except docker.errors.DockerException as e:
@@ -379,28 +380,11 @@ async def _generate_cpg_async(
             logger.error(error_msg)
             codebase_tracker.update_codebase(
                 codebase_hash=codebase_hash,
-                metadata={"status": "failed", "error": error_msg}
+                metadata={"status": SessionStatus.FAILED, "error": error_msg}
             )
             return
 
-        # Get language-specific command
-        language_commands = {
-            "java": "/opt/joern/joern-cli/javasrc2cpg",
-            "c": "/opt/joern/joern-cli/c2cpg.sh",
-            "cpp": "/opt/joern/joern-cli/c2cpg.sh",
-            "javascript": "/opt/joern/joern-cli/jssrc2cpg.sh",
-            "python": "/opt/joern/joern-cli/pysrc2cpg",
-            "go": "/opt/joern/joern-cli/gosrc2cpg",
-            "kotlin": "/opt/joern/joern-cli/kotlin2cpg",
-            "csharp": "/opt/joern/joern-cli/csharpsrc2cpg",
-            "ghidra": "/opt/joern/joern-cli/ghidra2cpg",
-            "jimple": "/opt/joern/joern-cli/jimple2cpg",
-            "php": "/opt/joern/joern-cli/php2cpg",
-            "ruby": "/opt/joern/joern-cli/rubysrc2cpg",
-            "swift": "/opt/joern/joern-cli/swiftsrc2cpg.sh",
-        }
-
-        cmd_binary = language_commands.get(language)
+        cmd_binary = LANGUAGE_COMMANDS.get(language)
         if not cmd_binary:
             raise ValueError(f"Unsupported language: {language}")
 
@@ -455,7 +439,7 @@ async def _generate_cpg_async(
                 logger.warning(f"Failed to kill hung frontend in container: {kill_err}")
             codebase_tracker.update_codebase(
                 codebase_hash=codebase_hash,
-                metadata={"status": "failed", "error": error_msg}
+                metadata={"status": SessionStatus.FAILED, "error": error_msg}
             )
             return
 
@@ -464,7 +448,7 @@ async def _generate_cpg_async(
             logger.error(error_msg)
             codebase_tracker.update_codebase(
                 codebase_hash=codebase_hash,
-                metadata={"status": "failed", "error": error_msg}
+                metadata={"status": SessionStatus.FAILED, "error": error_msg}
             )
             return
 
@@ -476,7 +460,7 @@ async def _generate_cpg_async(
             codebase_hash=codebase_hash,
             cpg_path=cpg_path,
             metadata={
-                "status": "generating",
+                "status": SessionStatus.GENERATING,
                 "container_codebase_path": f"/playground/codebases/{codebase_hash}",
                 "container_cpg_path": container_cpg_path,
             }
@@ -510,7 +494,7 @@ async def _generate_cpg_async(
                         cpg_path=cpg_path,
                         joern_port=None,
                         metadata={
-                            "status": "failed",
+                            "status": SessionStatus.FAILED,
                             "error": error_msg,
                             "container_codebase_path": f"/playground/codebases/{codebase_hash}",
                             "container_cpg_path": container_cpg_path
@@ -551,7 +535,7 @@ async def _generate_cpg_async(
             codebase_tracker = services["codebase_tracker"]
             codebase_tracker.update_codebase(
                 codebase_hash=codebase_hash,
-                metadata={"status": "failed", "error": str(e)}
+                metadata={"status": SessionStatus.FAILED, "error": str(e)}
             )
         except Exception as tracker_error:
             logger.error(f"Failed to update codebase status in error handler: {tracker_error}")
@@ -726,7 +710,7 @@ Examples:
                     logger.warning(f"Codebase {codebase_hash} has a failed CPG — returning failed status")
                     return {
                         "codebase_hash": codebase_hash,
-                        "status": "failed",
+                        "status": SessionStatus.FAILED,
                         "message": existing_codebase.metadata.get("error", "Previous CPG generation or load failed."),
                         **_public_codebase_fields(
                             source_type=existing_codebase.source_type,
@@ -753,7 +737,7 @@ Examples:
                     # Server is already running, return ready immediately
                     return {
                         "codebase_hash": codebase_hash,
-                        "status": "ready",
+                        "status": SessionStatus.READY,
                         "message": "CPG already exists and Joern server is running.",
                         "joern_port": joern_port,
                         **_public_codebase_fields(
@@ -772,7 +756,7 @@ Examples:
                         estimate = _estimate_processing_time(codebase_dir, existing_codebase.language, has_cpg=True)
                         return {
                             "codebase_hash": codebase_hash,
-                            "status": "loading",
+                            "status": SessionStatus.LOADING,
                             "message": (
                                 "CPG exists and Joern server restart is already in progress. "
                                 f"Estimated time: {estimate}. Use get_cpg_status to check progress."
@@ -795,7 +779,7 @@ Examples:
                     codebase_tracker.update_codebase(
                         codebase_hash=codebase_hash,
                         joern_port=None,
-                        metadata={"status": "loading", **{k: v for k, v in existing_codebase.metadata.items() if k != "status"}}
+                        metadata={"status": SessionStatus.LOADING, **{k: v for k, v in existing_codebase.metadata.items() if k != "status"}}
                     )
 
                     scheduled_restart = _schedule_restart_server_task(
@@ -813,7 +797,7 @@ Examples:
 
                     return {
                         "codebase_hash": codebase_hash,
-                        "status": "loading",
+                        "status": SessionStatus.LOADING,
                         "message": (
                             f"CPG exists but Joern server needs to restart. Loading in background. Estimated time: {estimate}. "
                             "Use get_cpg_status to check progress."
@@ -904,7 +888,7 @@ Examples:
                     "container_codebase_path": container_codebase_path,
                     "container_cpg_path": container_cpg_path,
                     "repository": repository_url,
-                    "status": "generating"
+                    "status": SessionStatus.GENERATING
                 }
             )
 
@@ -923,7 +907,7 @@ Examples:
                 if submit_result == CPGGenerationQueue.DUPLICATE:
                     return {
                         "codebase_hash": codebase_hash,
-                        "status": "generating",
+                        "status": SessionStatus.GENERATING,
                         "message": "CPG build already in progress for this codebase.",
                     }
                 if submit_result == CPGGenerationQueue.QUEUE_FULL:
@@ -941,7 +925,7 @@ Examples:
             # Return immediately with generating status
             return {
                 "codebase_hash": codebase_hash,
-                "status": "generating",
+                "status": SessionStatus.GENERATING,
                 "message": f"CPG generation started in background. Estimated time: {estimate}. Use get_cpg_status to check progress.",
                 "estimated_time": estimate,
                 **_public_codebase_fields(
@@ -1033,7 +1017,7 @@ Examples:
                         codebase_tracker.update_codebase(
                             codebase_hash=codebase_hash,
                             joern_port=None,
-                            metadata={"status": "loading", **{k: v for k, v in codebase_info.metadata.items() if k != "status"}}
+                            metadata={"status": SessionStatus.LOADING, **{k: v for k, v in codebase_info.metadata.items() if k != "status"}}
                         )
 
                         try:
@@ -1105,12 +1089,12 @@ delete_files=True:
                 codebase_tracker.update_codebase(
                     codebase_hash=codebase_hash,
                     joern_port=None,
-                    metadata={"status": "sleeping"},
+                    metadata={"status": SessionStatus.SLEEPING},
                 )
                 return {
                     "success": True,
                     "codebase_hash": codebase_hash,
-                    "status": "sleeping",
+                    "status": SessionStatus.SLEEPING,
                     "message": "Joern process terminated. CPG kept on disk for fast re-activation.",
                 }
 

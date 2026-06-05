@@ -13,6 +13,7 @@ import docker
 from docker.errors import DockerException, NotFound, APIError
 
 from .port_manager import PortManager
+from ..models import SessionStatus
 
 if TYPE_CHECKING:
     from ..services.codebase_tracker import CodebaseTracker
@@ -99,7 +100,7 @@ class JoernServerManager:
                 self.codebase_tracker.update_codebase(
                     lru_hash,
                     joern_port=None,
-                    metadata={"status": "sleeping"},
+                    metadata={"status": SessionStatus.SLEEPING},
                 )
             except Exception as e:
                 logger.warning(f"Failed to update sleeping status for {lru_hash}: {e}")
@@ -191,7 +192,7 @@ class JoernServerManager:
                 self.codebase_tracker.update_codebase(
                     codebase_hash,
                     joern_port=port,
-                    metadata={"status": "ready"},
+                    metadata={"status": SessionStatus.READY},
                 )
             except Exception as e:
                 logger.warning(f"Failed to update ready status for {codebase_hash}: {e}")

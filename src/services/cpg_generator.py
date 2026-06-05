@@ -9,6 +9,7 @@ import re
 import subprocess
 from typing import AsyncIterator, Dict, Optional
 
+from ..defaults import LANGUAGE_COMMANDS
 from ..exceptions import CPGGenerationError
 from ..models import CPGConfig, Config
 from ..telemetry import get_tracer
@@ -21,22 +22,7 @@ tracer = get_tracer()
 class CPGGenerator:
     """Generates CPG from source code using Docker containers"""
 
-    # Language-specific Joern commands (full paths inside container)
-    LANGUAGE_COMMANDS = {
-        "java": "/opt/joern/joern-cli/javasrc2cpg",
-        "c": "/opt/joern/joern-cli/c2cpg.sh",
-        "cpp": "/opt/joern/joern-cli/c2cpg.sh",
-        "javascript": "/opt/joern/joern-cli/jssrc2cpg.sh",
-        "python": "/opt/joern/joern-cli/pysrc2cpg",
-        "go": "/opt/joern/joern-cli/gosrc2cpg",
-        "kotlin": "/opt/joern/joern-cli/kotlin2cpg",
-        "csharp": "/opt/joern/joern-cli/csharpsrc2cpg",
-        "ghidra": "/opt/joern/joern-cli/ghidra2cpg",
-        "jimple": "/opt/joern/joern-cli/jimple2cpg",
-        "php": "/opt/joern/joern-cli/php2cpg",
-        "ruby": "/opt/joern/joern-cli/rubysrc2cpg",
-        "swift": "/opt/joern/joern-cli/swiftsrc2cpg.sh",
-    }
+    LANGUAGE_COMMANDS = LANGUAGE_COMMANDS
 
     def __init__(
         self, config: Config, joern_server_manager: Optional['JoernServerManager'] = None, docker_orchestrator=None

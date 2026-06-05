@@ -30,11 +30,6 @@ HTTP_READ_TIMEOUT = 300.0
 HTTP_MAX_RETRIES = 3
 HTTP_BACKOFF_FACTOR = 0.3
 
-# Session defaults
-SESSION_TTL = 3600
-SESSION_IDLE_TIMEOUT = 1800
-MAX_CONCURRENT_SESSIONS = 50
-
 # CPG defaults
 CPG_GENERATION_TIMEOUT = 600
 MAX_REPO_SIZE_MB = 1024
@@ -136,3 +131,20 @@ MAX_MCP_CONNECTIONS = 16
 
 # CPG build queue
 CPG_BUILD_WORKERS = 4
+
+# Language-specific Joern frontend binaries (full paths inside the container)
+LANGUAGE_COMMANDS = {
+    "java":       "/opt/joern/joern-cli/javasrc2cpg",
+    "c":          "/opt/joern/joern-cli/c2cpg.sh",
+    "cpp":        "/opt/joern/joern-cli/c2cpg.sh",
+    "javascript": "/opt/joern/joern-cli/jssrc2cpg.sh",
+    "python":     "/opt/joern/joern-cli/pysrc2cpg",
+    "go":         "/opt/joern/joern-cli/gosrc2cpg",
+    "kotlin":     "/opt/joern/joern-cli/kotlin2cpg",
+    "csharp":     "/opt/joern/joern-cli/csharpsrc2cpg",
+    "ghidra":     "/opt/joern/joern-cli/ghidra2cpg",
+    "jimple":     "/opt/joern/joern-cli/jimple2cpg",
+    "php":        "/opt/joern/joern-cli/php2cpg",
+    "ruby":       "/opt/joern/joern-cli/rubysrc2cpg",
+    "swift":      "/opt/joern/joern-cli/swiftsrc2cpg.sh",
+}

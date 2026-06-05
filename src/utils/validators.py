@@ -54,20 +54,6 @@ def validate_codebase_hash(codebase_hash: str) -> None:
         raise ValidationError("codebase_hash must be a valid 16-character hex string")
 
 
-def validate_session_id(session_id: str) -> None:
-    """Validate session ID format"""
-    if not session_id or not isinstance(session_id, str):
-        raise ValidationError("session_id must be a non-empty string")
-    
-    # Session IDs should be UUIDs or similar format
-    if len(session_id) < 8:
-        raise ValidationError("session_id must be at least 8 characters long")
-
-    # Hash pattern (16 character hex string)
-    hash_pattern = r"^[a-f0-9]{16}$"
-    if not re.match(hash_pattern, session_id):
-        raise ValidationError("session_id must be a valid 16-character hex string")
-
 
 def validate_github_url(url: str) -> bool:
     """Validate GitHub URL format"""
