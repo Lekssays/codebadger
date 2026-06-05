@@ -90,6 +90,13 @@ class GitManager:
                 None, self._do_clone, auth_url, source_path, branch
             )
 
+            # Remove the embedded credential from .git/config so the token is
+            # not stored on disk in plaintext.
+            if token:
+                await loop.run_in_executor(
+                    None, self._strip_remote_credential, source_path, repo_url
+                )
+
             logger.info(f"Cloned repository {repo_url} to {source_path}")
             return source_path
 
@@ -112,6 +119,20 @@ class GitManager:
             # Mask tokens in error messages
             safe_error = _mask_token_in_text(str(e))
             raise GitOperationError(f"Git clone failed: {safe_error}")
+
+    def _strip_remote_credential(self, repo_path: str, clean_url: str) -> None:
+        """Rewrite the 'origin' remote URL to the credential-free form.
+
+        git clone stores the full auth URL (including embedded token) in
+        .git/config.  Overwriting it with the public URL prevents the token
+        from persisting on disk after the clone completes.
+        """
+        try:
+            repo = git.Repo(repo_path)
+            if "origin" in [r.name for r in repo.remotes]:
+                repo.remotes["origin"].set_url(clean_url)
+        except Exception as e:
+            logger.warning(f"Could not strip credential from remote URL: {e}")
 
     def validate_repository(self, repo_url: str) -> bool:
         """Validate that repository exists and is accessible"""

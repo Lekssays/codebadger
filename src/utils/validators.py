@@ -110,18 +110,39 @@ def validate_cpgql_query(query: str) -> None:
     if len(query) > 10000:
         raise ValidationError("Query too long (max 10000 characters)")
 
-    # Basic safety checks
+    # Block patterns that enable shell execution, filesystem writes, or network access.
+    # Joern CPGQL runs inside an Ammonite Scala REPL, so all of these are reachable.
     dangerous_patterns = [
-        r"System\.exit",
-        r"Runtime\.getRuntime",
-        r"ProcessBuilder",
-        r"java\.io\.File.*delete",
+        # Process / shell execution
+        (r"System\.exit",                       "process execution"),
+        (r"Runtime\.getRuntime",                "process execution"),
+        (r"Runtime\.exec",                      "process execution"),
+        (r"ProcessBuilder",                     "process execution"),
+        (r"scala\.sys\.process",                "shell execution"),
+        (r"import\s+sys\.process",              "shell execution"),
+        # Filesystem writes / deletes
+        (r"java\.io\.File.*\.delete",           "file deletion"),
+        (r"java\.io\.FileWriter",               "file write"),
+        (r"java\.io\.FileOutputStream",         "file write"),
+        (r"java\.io\.PrintWriter",              "file write"),
+        (r"java\.nio\.file\.Files\s*\.\s*(write|delete|move|copy)\b",
+                                                "file write/delete"),
+        (r"\bos\s*\.\s*(write|remove|move|copy)\s*\(", "file write/delete (Ammonite os-lib)"),
+        # Network access
+        (r"java\.net\.(Socket|ServerSocket)\b", "network access"),
+        (r"java\.net\.URL\b.*\.(openStream|openConnection|getContent)\b",
+                                                "network access"),
+        (r"java\.net\.HttpURLConnection",       "network access"),
+        # Reflection (can bypass the above checks)
+        (r"java\.lang\.reflect\b",              "reflection"),
+        (r"Class\.forName\b",                   "reflection"),
+        (r"\.(getDeclaredMethod|getDeclaredField)\b", "reflection"),
     ]
 
-    for pattern in dangerous_patterns:
-        if re.search(pattern, query, re.IGNORECASE):
+    for pattern, category in dangerous_patterns:
+        if re.search(pattern, query, re.IGNORECASE | re.DOTALL):
             raise ValidationError(
-                f"Query contains potentially dangerous operation: {pattern}"
+                f"Query contains a potentially dangerous operation ({category})"
             )
 
 
@@ -210,36 +231,44 @@ def validate_timeout(timeout: int, max_timeout: int = 300) -> None:
         raise ValidationError(f"Timeout cannot exceed {max_timeout} seconds")
 
 
+_BLOCKED_PATH_PREFIXES = (
+    "/etc", "/sys", "/proc", "/dev",
+    "/boot", "/run", "/var/run",
+    "/root", "/var/log",
+)
+
+
 def resolve_host_path(host_path: str) -> str:
     """
     Validate and resolve a host path.
-    
+
     Since the MCP server runs on the host, we can properly validate
     that the path exists and is a directory.
-    
+
     Args:
         host_path: Absolute path on the host
-        
+
     Returns:
         The resolved absolute path
-        
+
     Raises:
         ValidationError: If path doesn't exist, isn't a directory, or is unsafe
     """
     import os
-    
+
     if not os.path.isabs(host_path):
         raise ValidationError("Host path must be absolute")
-    
-    # Check for dangerous patterns
-    if ".." in host_path or host_path.startswith("/etc") or host_path.startswith("/sys"):
+
+    # Resolve symlinks before checking prefixes so symlink tricks can't bypass the check.
+    canonical = os.path.realpath(os.path.abspath(host_path))
+
+    if any(canonical == p or canonical.startswith(p + "/") for p in _BLOCKED_PATH_PREFIXES):
         raise ValidationError("Invalid host path")
-    
-    # Now we can properly validate existence (running on host)
-    if not os.path.exists(host_path):
+
+    if not os.path.exists(canonical):
         raise ValidationError("Path does not exist")
-    
-    if not os.path.isdir(host_path):
+
+    if not os.path.isdir(canonical):
         raise ValidationError("Path is not a directory")
-    
-    return os.path.abspath(host_path)
+
+    return canonical
