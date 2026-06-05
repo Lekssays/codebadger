@@ -177,6 +177,35 @@ def get_cpg_cache_path(cache_key: str, playground_path: str) -> str:
     return os.path.join(playground_path, "cpgs", cache_key, "cpg.bin")
 
 
+def _count_lines_of_code(source_path: str) -> int:
+    """Count total lines of code in a repository, skipping binary and non-source files."""
+    try:
+        total_lines = 0
+        text_extensions = {
+            '.c', '.cpp', '.cc', '.cxx', '.h', '.hpp', '.hxx',
+            '.java', '.kt', '.kts', '.scala',
+            '.py', '.js', '.ts', '.jsx', '.tsx',
+            '.go', '.cs', '.php', '.rb', '.swift',
+            '.rs', '.sh', '.bash', '.xml', '.json', '.yaml', '.yml',
+        }
+        skip_dirs = {'.git', '.svn', '.hg', '.idea', '.vscode', 'node_modules', '__pycache__'}
+        for dirpath, dirnames, filenames in os.walk(source_path):
+            dirnames[:] = [d for d in dirnames if d not in skip_dirs]
+            for filename in filenames:
+                if os.path.splitext(filename)[1].lower() not in text_extensions:
+                    continue
+                filepath = os.path.join(dirpath, filename)
+                try:
+                    with open(filepath, 'r', errors='ignore') as f:
+                        total_lines += sum(1 for _ in f)
+                except OSError:
+                    pass
+        return total_lines
+    except Exception as e:
+        logger.error(f"Failed to count lines of code: {e}")
+        return 0
+
+
 def _calculate_repo_size_mb(source_path: str) -> int:
     """Calculate total repository size in MB
 
@@ -586,12 +615,25 @@ This tool initiates the analysis process by generating a CPG for the specified c
 For GitHub repositories, it clones the repo first. For local paths, it copies the source code.
 The CPG is cached by a hash of the codebase.
 
+IMPORTANT — large project guard:
+Before calling this tool for a local path, check the project size. If the project has more than
+15,000 lines of code OR is larger than 150 MB, you MUST warn the user first:
+  "This project is large (X lines / Y MB). CPG generation may take a long time and consume
+   significant resources. Consider providing the absolute path to a specific sub-component
+   (e.g. /path/to/repo/src/module) to scope the analysis. If you still want to analyze the
+   full project, I will proceed."
+Only call generate_cpg after the user either provides a scoped path or explicitly confirms
+they want the full project. Pass force=True when the user confirms the full project.
+This guard does NOT apply to GitHub URLs — size is unknown until cloned.
+
 Args:
     source_type: Either 'local' or 'github'.
     source_path: Absolute path (local) or full GitHub URL.
     language: Programming language (java, c, cpp, python, javascript, go, etc.).
     github_token: Optional PAT for private repos.
     branch: Optional specific git branch.
+    force: Set to True to skip the large-project size warning (use when the user has
+           explicitly confirmed they want to analyze the full project).
 
 Returns:
     {
@@ -619,6 +661,7 @@ Examples:
         language: Annotated[str, Field(description="Programming language - one of: java, c, cpp, javascript, python, go, kotlin, csharp, ghidra, jimple, php, ruby, swift")],
         github_token: Annotated[Optional[str], Field(description="GitHub Personal Access Token for private repositories (optional)")] = None,
         branch: Annotated[Optional[str], Field(description="Specific git branch to checkout (optional, defaults to default branch)")] = None,
+        force: Annotated[bool, Field(description="Skip the large-project size warning. Set to True only after the user has explicitly confirmed they want to analyze the full project.")] = False,
     ) -> Dict[str, Any]:
         """Create a Code Property Graph from source code for analysis."""
         try:
@@ -627,6 +670,26 @@ Examples:
             validate_language(language)
 
             codebase_tracker = services["codebase_tracker"]
+
+            # Large-project guard: warn before committing to an expensive full-project CPG
+            if source_type == "local" and not force:
+                resolved = resolve_host_path(source_path)
+                size_mb = _calculate_repo_size_mb(resolved)
+                loc = _count_lines_of_code(resolved)
+                if size_mb > 150 or loc > 15000:
+                    return {
+                        "status": "large_project_warning",
+                        "size_mb": size_mb,
+                        "lines_of_code": loc,
+                        "message": (
+                            f"This project is large ({loc:,} lines of code, {size_mb} MB). "
+                            "CPG generation may take a long time and consume significant resources. "
+                            "Consider providing the absolute path to a specific sub-component "
+                            "(e.g. /path/to/repo/src/module) to scope the analysis. "
+                            "If you still want to analyze the full project, call generate_cpg "
+                            "again with force=True."
+                        ),
+                    }
 
             # Try to get git commit hash for local repos
             commit_hash = None
