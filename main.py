@@ -23,11 +23,10 @@ from starlette.responses import JSONResponse, PlainTextResponse
 
 from src.config import load_config
 from src import defaults
-from src.tools.core_tools import CPGGenerationQueue
+from src.tools.core_tools import CPGGenerationQueue, _schedule_restart_server_task
 from src.services import (
     CodebaseTracker,
     GitManager,
-    CPGGenerator,
     JoernServerManager,
     PortManager,
     QueryExecutor,
@@ -326,10 +325,6 @@ async def app_lifespan(server: FastMCP):
             else PortManager(port_min=config.joern.port_min, port_max=config.joern.port_max)
         )
 
-        # Initialize CPG generator (runs Joern CLI directly in container)
-        services['cpg_generator'] = CPGGenerator(config=config, joern_server_manager=joern_server_manager)
-        # Skip initialize() - no Docker needed
-
         # Initialize query executor with Joern server manager
         services['query_executor'] = QueryExecutor(
             joern_server_manager,
@@ -357,8 +352,13 @@ async def app_lifespan(server: FastMCP):
         # Register MCP tools now that services are initialized
         register_tools(server, services)
 
-        # Start Joern watchdog (C1) — must run after tools are registered
+        # Wire watchdog → shared restart registry BEFORE starting the watchdog so
+        # every dead-server detection goes through _schedule_restart_server_task
+        # and can't race a user-triggered restart on the same codebase.
         if joern_server_manager:
+            joern_server_manager.set_restart_callback(
+                lambda h, p: _schedule_restart_server_task(h, p, services)
+            )
             joern_server_manager.start_watchdog()
             logger.info("Joern server watchdog started")
 

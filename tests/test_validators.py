@@ -14,7 +14,6 @@ from src.utils.validators import (
     validate_github_url,
     validate_language,
     validate_local_path,
-    validate_session_id,
     validate_source_type,
     validate_timeout,
     resolve_host_path,

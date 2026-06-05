@@ -7,7 +7,7 @@ import logging
 import time
 import os
 from collections import OrderedDict
-from typing import Dict, Optional, TYPE_CHECKING
+from typing import Callable, Dict, Optional, TYPE_CHECKING
 
 import docker
 from docker.errors import DockerException, NotFound, APIError
@@ -55,6 +55,19 @@ class JoernServerManager:
         self._lru_eviction_count: int = 0
 
         self._watchdog_task: Optional[asyncio.Task] = None
+        # Injected by main.py after tools are registered so the watchdog goes
+        # through the shared dedup registry instead of spawning its own tasks.
+        self._restart_callback: Optional[Callable[[str, str], bool]] = None
+
+    def set_restart_callback(self, callback: Callable[[str, str], bool]) -> None:
+        """Wire in the shared restart-dedup registry from core_tools.
+
+        The callback receives (codebase_hash, cpg_path) and returns True when a
+        new restart task was scheduled, False when one is already in-flight.
+        Must be called after MCP tools are registered so the services dict is
+        fully populated.
+        """
+        self._restart_callback = callback
 
     # ------------------------------------------------------------------ LRU
 
@@ -353,7 +366,24 @@ class JoernServerManager:
                     if not await self._is_server_healthy(port):
                         logger.warning(f"Joern server {codebase_hash}:{port} is dead, respawning")
                         self.terminate_server(codebase_hash)
-                        asyncio.create_task(self._respawn_server(codebase_hash))
+                        if self._restart_callback and self.codebase_tracker:
+                            # Route through the shared dedup registry so a
+                            # watchdog respawn and a user-triggered restart can't
+                            # race each other on spawn_server + load_cpg.
+                            info = self.codebase_tracker.get_codebase(codebase_hash)
+                            if info and info.cpg_path:
+                                scheduled = self._restart_callback(codebase_hash, info.cpg_path)
+                                if not scheduled:
+                                    logger.debug(
+                                        f"Watchdog: restart already in-flight for {codebase_hash}"
+                                    )
+                            else:
+                                logger.warning(
+                                    f"Watchdog: cannot respawn {codebase_hash}: no CPG path in DB"
+                                )
+                        else:
+                            # Fallback when callback hasn't been wired yet (e.g. during startup).
+                            asyncio.create_task(self._respawn_server(codebase_hash))
             except asyncio.CancelledError:
                 break
             except Exception as e:

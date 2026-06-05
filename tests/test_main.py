@@ -36,8 +36,6 @@ class TestLifespan:
         ) as mock_codebase_tracker_class, patch(
             "main.GitManager"
         ) as mock_git_manager_class, patch(
-            "main.CPGGenerator"
-        ) as mock_cpg_generator_class, patch(
             "main.setup_logging"
         ) as mock_setup_logging, patch(
             "main.logger"
@@ -82,9 +80,6 @@ class TestLifespan:
             mock_git_manager = MagicMock()
             mock_git_manager_class.return_value = mock_git_manager
 
-            mock_cpg_generator = MagicMock()
-            mock_cpg_generator_class.return_value = mock_cpg_generator
-
             # Lifespan.__call__ returns an async context manager
             async with main.app_lifespan(mock_mcp) as ctx:
                 # Verify initialization calls
@@ -116,8 +111,6 @@ class TestLifespan:
             "main.CodebaseTracker"
         ), patch(
             "main.GitManager"
-        ), patch(
-            "main.CPGGenerator"
         ), patch(
             "main.setup_logging"
         ), patch(
