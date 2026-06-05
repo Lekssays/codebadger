@@ -289,12 +289,6 @@ async def app_lifespan(server: FastMCP):
         services['codebase_tracker'] = CodebaseTracker(db_manager)
         services['git_manager'] = GitManager(config.storage.workspace_root)
 
-        # Initialize port manager for Joern servers
-        services['port_manager'] = PortManager(
-            port_min=config.joern.port_min,
-            port_max=config.joern.port_max
-        )
-
         container_name = os.getenv("JOERN_CONTAINER_NAME", "codebadger-joern-server")
         services['joern_container_name'] = container_name
 
@@ -324,6 +318,13 @@ async def app_lifespan(server: FastMCP):
                 )
 
         services['joern_server_manager'] = joern_server_manager
+        # Use the server manager's port_manager so health stats reflect actual allocations.
+        # Fall back to a fresh instance only when the container is unavailable.
+        services['port_manager'] = (
+            joern_server_manager.port_manager
+            if joern_server_manager
+            else PortManager(port_min=config.joern.port_min, port_max=config.joern.port_max)
+        )
 
         # Initialize CPG generator (runs Joern CLI directly in container)
         services['cpg_generator'] = CPGGenerator(config=config, joern_server_manager=joern_server_manager)

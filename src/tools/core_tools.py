@@ -124,11 +124,6 @@ def _get_git_commit_hash(path: str) -> Optional[str]:
     """
     try:
         import subprocess
-        # Check if it is a git repo
-        if not os.path.exists(os.path.join(path, ".git")):
-             # It might be a subdirectory of a git repo
-             pass
-
         # Run git rev-parse HEAD
         process = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -363,10 +358,11 @@ async def _generate_cpg_async(
 
         # Use Docker API to generate CPG inside container
         docker_client = docker.from_env()
-        container_name = "codebadger-joern-server"
-        joern_server_manager = services.get("joern_server_manager")
-        if joern_server_manager:
-            container_name = joern_server_manager.container_name
+        container_name = (
+            joern_server_manager.container_name
+            if joern_server_manager
+            else os.getenv("JOERN_CONTAINER_NAME", "codebadger-joern-server")
+        )
         try:
             container = docker_client.containers.get(container_name)
         except docker.errors.NotFound:
@@ -580,6 +576,8 @@ class CPGGenerationQueue:
     async def stop(self) -> None:
         for task in self._tasks:
             task.cancel()
+        await asyncio.gather(*self._tasks, return_exceptions=True)
+        self._tasks.clear()
 
     async def submit(self, codebase_hash: str, job: dict) -> bool:
         """Submit a CPG generation job. Returns False if hash already in-flight."""

@@ -407,7 +407,6 @@ class DBManager:
                     min_sev_val = severity_order[min_severity]
                     severity_levels = [k for k, v in severity_order.items() if v >= min_sev_val]
                     if severity_levels:
-                        placeholders = ",".join(["?" * len(severity_levels)])
                         query += f" AND severity IN ({','.join(['?'] * len(severity_levels))})"
                         params.extend(severity_levels)
 
