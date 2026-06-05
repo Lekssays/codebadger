@@ -3,6 +3,7 @@ Input validation utilities
 """
 
 import hashlib
+import os
 import re
 from typing import Optional
 from urllib.parse import urlparse
@@ -217,10 +218,15 @@ def validate_timeout(timeout: int, max_timeout: int = 300) -> None:
         raise ValidationError(f"Timeout cannot exceed {max_timeout} seconds")
 
 
-_BLOCKED_PATH_PREFIXES = (
-    "/etc", "/sys", "/proc", "/dev",
-    "/boot", "/run", "/var/run",
-    "/root", "/var/log",
+# Resolve each blocked prefix through the host's symlink tree so the comparison
+# works correctly on macOS, where e.g. /etc -> /private/etc.
+_BLOCKED_PATH_PREFIXES = tuple(
+    os.path.realpath(p)
+    for p in (
+        "/etc", "/sys", "/proc", "/dev",
+        "/boot", "/run", "/var/run",
+        "/root", "/var/log",
+    )
 )
 
 
@@ -240,8 +246,6 @@ def resolve_host_path(host_path: str) -> str:
     Raises:
         ValidationError: If path doesn't exist, isn't a directory, or is unsafe
     """
-    import os
-
     if not os.path.isabs(host_path):
         raise ValidationError("Host path must be absolute")
 

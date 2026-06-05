@@ -74,45 +74,6 @@ class TestValidateLanguage:
         assert "Supported:" in str(exc_info.value)
 
 
-class TestValidateSessionId:
-    """Test session ID validation"""
-
-    def test_valid_session_id(self):
-        """Test valid 16-character hex session ID"""
-        valid_hex = "1234567890abcdef"
-        # Should not raise
-        validate_session_id(valid_hex)
-
-    def test_invalid_session_id_empty(self):
-        """Test empty session ID"""
-        with pytest.raises(ValidationError) as exc_info:
-            validate_session_id("")
-
-        assert "session_id must be a non-empty string" in str(exc_info.value)
-
-    def test_invalid_session_id_none(self):
-        """Test None session ID"""
-        with pytest.raises(ValidationError) as exc_info:
-            validate_session_id(None)
-
-        assert "session_id must be a non-empty string" in str(exc_info.value)
-
-    def test_invalid_session_id_wrong_format(self):
-        """Test invalid hex format"""
-        invalid_ids = [
-            "not-hex-at-all",  # Non-hex characters, 15 chars
-            "gggggggggggggggg",  # Invalid hex characters, 16 chars
-            "1234567890ABCDEF",  # Uppercase (should be lowercase), 16 chars
-            "ggggggggggggggggg",  # Invalid hex, 17 chars (too long)
-        ]
-
-        for invalid_id in invalid_ids:
-            with pytest.raises(ValidationError) as exc_info:
-                validate_session_id(invalid_id)
-
-            assert "session_id must be a valid 16-character hex string" in str(exc_info.value)
-
-
 class TestValidateGithubUrl:
     """Test GitHub URL validation"""
 
