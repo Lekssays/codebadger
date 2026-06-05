@@ -172,62 +172,60 @@ def get_cpg_cache_path(cache_key: str, playground_path: str) -> str:
     return os.path.join(playground_path, "cpgs", cache_key, "cpg.bin")
 
 
-def _count_lines_of_code(source_path: str) -> int:
-    """Count total lines of code in a repository, skipping binary and non-source files."""
-    try:
-        total_lines = 0
-        text_extensions = {
-            '.c', '.cpp', '.cc', '.cxx', '.h', '.hpp', '.hxx',
-            '.java', '.kt', '.kts', '.scala',
-            '.py', '.js', '.ts', '.jsx', '.tsx',
-            '.go', '.cs', '.php', '.rb', '.swift',
-            '.rs', '.sh', '.bash', '.xml', '.json', '.yaml', '.yml',
-        }
-        skip_dirs = {'.git', '.svn', '.hg', '.idea', '.vscode', 'node_modules', '__pycache__'}
-        for dirpath, dirnames, filenames in os.walk(source_path):
-            dirnames[:] = [d for d in dirnames if d not in skip_dirs]
-            for filename in filenames:
-                if os.path.splitext(filename)[1].lower() not in text_extensions:
-                    continue
-                filepath = os.path.join(dirpath, filename)
-                try:
-                    with open(filepath, 'r', errors='ignore') as f:
-                        total_lines += sum(1 for _ in f)
-                except OSError:
-                    pass
-        return total_lines
-    except Exception as e:
-        logger.error(f"Failed to count lines of code: {e}")
-        return 0
+_SKIP_DIRS = {'.git', '.svn', '.hg', '.idea', '.vscode', 'node_modules', '__pycache__'}
+_TEXT_EXTENSIONS = {
+    '.c', '.cpp', '.cc', '.cxx', '.h', '.hpp', '.hxx',
+    '.java', '.kt', '.kts', '.scala',
+    '.py', '.js', '.ts', '.jsx', '.tsx',
+    '.go', '.cs', '.php', '.rb', '.swift',
+    '.rs', '.sh', '.bash', '.xml', '.json', '.yaml', '.yml',
+}
 
 
-def _calculate_repo_size_mb(source_path: str) -> int:
-    """Calculate total repository size in MB
+def _scan_repo(source_path: str) -> tuple:
+    """Single-pass directory walk returning (size_mb: int, loc: int).
 
-    Args:
-        source_path: Path to the repository directory
-
-    Returns:
-        Size in MB
+    Combining both metrics into one walk halves filesystem I/O versus calling
+    _calculate_repo_size_mb and _count_lines_of_code separately.
     """
+    total_size = 0
+    total_lines = 0
     try:
-        total_size = 0
         for dirpath, dirnames, filenames in os.walk(source_path):
-            # Skip .git directories and other common exclusions for size calculation
-            dirnames[:] = [d for d in dirnames if d not in {'.git', '.svn', '.hg', '.idea', '.vscode', 'node_modules'}]
-
+            dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
             for filename in filenames:
                 filepath = os.path.join(dirpath, filename)
                 try:
                     total_size += os.path.getsize(filepath)
                 except OSError as e:
                     logger.warning(f"Failed to get size of {filepath}: {e}")
-
-        size_mb = total_size / (1024 * 1024)
-        return int(size_mb)
+                    continue
+                if os.path.splitext(filename)[1].lower() in _TEXT_EXTENSIONS:
+                    try:
+                        with open(filepath, 'r', errors='ignore') as f:
+                            total_lines += sum(1 for _ in f)
+                    except OSError:
+                        pass
     except Exception as e:
-        logger.error(f"Failed to calculate repository size: {e}")
+        logger.error(f"Failed to scan repository: {e}")
         raise
+    return int(total_size / (1024 * 1024)), total_lines
+
+
+def _count_lines_of_code(source_path: str) -> int:
+    """Count total lines of code in a repository, skipping binary and non-source files."""
+    try:
+        _, loc = _scan_repo(source_path)
+        return loc
+    except Exception as e:
+        logger.error(f"Failed to count lines of code: {e}")
+        return 0
+
+
+def _calculate_repo_size_mb(source_path: str) -> int:
+    """Calculate total repository size in MB."""
+    size_mb, _ = _scan_repo(source_path)
+    return size_mb
 
 
 def _estimate_processing_time(source_path: str, language: str, has_cpg: bool = False) -> str:
@@ -562,8 +560,15 @@ async def _generate_cpg_async(
 class CPGGenerationQueue:
     """Bounded async queue for CPG generation jobs (B1 dedup + B3 concurrency limit)."""
 
-    def __init__(self, workers: int = 2):
-        self._queue: asyncio.Queue = asyncio.Queue()
+    # Sentinel values returned by submit() so callers can distinguish outcomes.
+    SUBMITTED = "submitted"
+    DUPLICATE = "duplicate"
+    QUEUE_FULL = "queue_full"
+
+    def __init__(self, workers: int = 2, maxsize: int = 0):
+        # maxsize=0 means unlimited; default is capped by the caller based on workers.
+        self._queue: asyncio.Queue = asyncio.Queue(maxsize=maxsize)
+        self._maxsize = maxsize
         self._workers = workers
         self._in_flight: Set[str] = set()
         self._tasks: list = []
@@ -579,13 +584,18 @@ class CPGGenerationQueue:
         await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
 
-    async def submit(self, codebase_hash: str, job: dict) -> bool:
-        """Submit a CPG generation job. Returns False if hash already in-flight."""
+    async def submit(self, codebase_hash: str, job: dict) -> str:
+        """Submit a CPG generation job.
+
+        Returns SUBMITTED, DUPLICATE (already in-flight), or QUEUE_FULL.
+        """
         if codebase_hash in self._in_flight:
-            return False
+            return self.DUPLICATE
+        if self._maxsize and self._queue.qsize() >= self._maxsize:
+            return self.QUEUE_FULL
         self._in_flight.add(codebase_hash)
         await self._queue.put((codebase_hash, job))
-        return True
+        return self.SUBMITTED
 
     @property
     def depth(self) -> int:
@@ -672,8 +682,7 @@ Examples:
             # Large-project guard: warn before committing to an expensive full-project CPG
             if source_type == "local" and not force:
                 resolved = resolve_host_path(source_path)
-                size_mb = _calculate_repo_size_mb(resolved)
-                loc = _count_lines_of_code(resolved)
+                size_mb, loc = _scan_repo(resolved)
                 if size_mb > 150 or loc > 15000:
                     return {
                         "status": "large_project_warning",
@@ -910,12 +919,18 @@ Examples:
             )
             cpg_queue = services.get("cpg_queue")
             if cpg_queue:
-                submitted = await cpg_queue.submit(codebase_hash, job)
-                if not submitted:
+                submit_result = await cpg_queue.submit(codebase_hash, job)
+                if submit_result == CPGGenerationQueue.DUPLICATE:
                     return {
                         "codebase_hash": codebase_hash,
                         "status": "generating",
                         "message": "CPG build already in progress for this codebase.",
+                    }
+                if submit_result == CPGGenerationQueue.QUEUE_FULL:
+                    return {
+                        "codebase_hash": codebase_hash,
+                        "status": "queue_full",
+                        "message": "CPG generation queue is full. Try again shortly.",
                     }
             else:
                 asyncio.create_task(_generate_cpg_async(**job))

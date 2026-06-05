@@ -21,6 +21,10 @@ class DBManager:
     def _get_connection(self):
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+        # Allow readers to proceed concurrently with a single writer.
+        conn.execute("PRAGMA journal_mode=WAL")
+        # Retry for up to 5 s instead of immediately raising OperationalError on lock.
+        conn.execute("PRAGMA busy_timeout=5000")
         return conn
 
     def _init_db(self):
@@ -137,12 +141,22 @@ class DBManager:
                 row = cursor.fetchone()
                 
                 if row:
-                    # Update last_accessed
-                    now = datetime.now(timezone.utc).isoformat()
-                    conn.execute("UPDATE codebases SET last_accessed = ? WHERE hash = ?", (now, codebase_hash))
-                    conn.commit()
-                    
                     data = dict(row)
+                    # Only write last_accessed when the stored value is >60s old to avoid
+                    # a DB write on every status poll from an LLM client.
+                    try:
+                        stored = datetime.fromisoformat(data["last_accessed"])
+                        age = datetime.now(timezone.utc) - stored
+                    except (KeyError, ValueError):
+                        age = timedelta(seconds=61)
+                    if age.total_seconds() > 60:
+                        now = datetime.now(timezone.utc).isoformat()
+                        conn.execute(
+                            "UPDATE codebases SET last_accessed = ? WHERE hash = ?",
+                            (now, codebase_hash),
+                        )
+                        conn.commit()
+                        data["last_accessed"] = now
                     if data["metadata"]:
                         data["metadata"] = json.loads(data["metadata"])
                     return data

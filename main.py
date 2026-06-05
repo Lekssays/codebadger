@@ -344,8 +344,12 @@ async def app_lifespan(server: FastMCP):
             services['db_manager']
         )
 
-        # Start CPG generation queue (B3)
-        cpg_queue = CPGGenerationQueue(workers=config.cpg.build_workers)
+        # Start CPG generation queue (B3). Cap pending jobs to 4× the worker count
+        # so a runaway client can't fill disk by queueing unlimited generation requests.
+        cpg_queue = CPGGenerationQueue(
+            workers=config.cpg.build_workers,
+            maxsize=config.cpg.build_workers * 4,
+        )
         await cpg_queue.start()
         services['cpg_queue'] = cpg_queue
         logger.info(f"CPG generation queue started with {config.cpg.build_workers} workers")
