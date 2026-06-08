@@ -59,7 +59,7 @@ sequenceDiagram
     end
     M-->>Q: client
     Q->>J: run query (per-CPG lock, timeout)
-    J-->>Q: &lt;codebadger_result&gt; text
+    J-->>Q: codebadger_result text
     Q->>Q: cache result
     Q-->>C: structured result
 ```
