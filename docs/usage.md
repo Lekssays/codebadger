@@ -75,28 +75,8 @@ run_cpgql_query(codebase_hash="ddf44eb0a10a85e6",
 
 ## Tool catalog
 
-### Core
-- `generate_cpg` - build a CPG for a codebase (local path or GitHub URL).
-- `get_cpg_status` - check whether a CPG exists and its status.
-- `run_cpgql_query` - execute a raw CPGQL query, returns structured results.
-- `get_cpgql_syntax_help` - CPGQL syntax helpers and common error fixes.
+Every analysis capability is an MCP tool, grouped into CPG lifecycle, code
+browsing, semantic analysis, taint/slicing, and vulnerability detectors. For the
+full list with a description of each, see **[Available Tools](available-tools.md)**.
 
-### Code browsing
-- `list_methods`, `list_files`, `get_method_source`, `list_calls`,
-  `get_call_graph`, `list_parameters`, `get_codebase_summary`, `get_code_snippet`.
-
-### Semantic analysis
-- `get_cfg` - control-flow graph for a method.
-- `get_type_definition` - struct/class members.
-- `get_macro_expansion` - heuristically detect macro-expanded calls.
-
-### Taint & vulnerability analysis
-- `find_taint_sources`, `find_taint_sinks`, `find_taint_flows` - data-flow taint analysis.
-- `get_program_slice`, `get_variable_flow` - slicing and data-dependency tracing.
-- `find_bounds_checks` - bounds-checks near a buffer access.
-- Memory-safety detectors: `find_use_after_free`, `find_double_free`,
-  `find_null_pointer_deref`, `find_integer_overflow`, `find_heap_overflow` (CWE-122),
-  `find_stack_overflow` (CWE-121), `find_uninitialized_reads` (CWE-457).
-- Other CWEs: `find_format_string_vulns` (CWE-134), `find_toctou` (CWE-367).
-
-Need a detector that isn't here? Add one in minutes - see [Custom Tools](custom-tools.md).
+Need a detector that isn't there? Add one in minutes - see [Custom Tools](custom-tools.md).

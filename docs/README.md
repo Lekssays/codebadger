@@ -16,6 +16,7 @@ These docs are for two audiences:
 |-----|--------------|
 | [Installation](installation.md) | Prerequisites and a 5-minute local setup. |
 | [Usage](usage.md) | Connecting MCP clients, the tool catalog, and a researcher workflow with examples. |
+| [Available Tools](available-tools.md) | Every MCP tool by category, with a description of what each does. |
 | [Configuration](configuration.md) | `config.yaml` + environment variable reference, telemetry. |
 | [Deployment](deployment.md) | Docker Compose, Postgres/Redis profiles, memory sizing, `shared` vs `pool` mode, large batches. |
 | [Architecture](architecture.md) | System design, request flow, memory-aware admission, and design decisions (with diagrams). |
