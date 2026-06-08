@@ -13,7 +13,6 @@ import logging
 import sys
 import os
 
-# Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -83,7 +82,6 @@ async def main():
             await client.ping()
             logger.info("✓ Server is responding")
 
-            # ===== GENERATE CPG =====
             logger.info("\n[2] Generating CPG for codebase...")
             cpg_result = await client.call_tool("generate_cpg", {
                 "source_type": "local",
@@ -101,13 +99,12 @@ async def main():
             codebase_hash = cpg_dict["codebase_hash"]
             logger.info(f"✓ CPG generation initiated. Hash: {codebase_hash}")
 
-            # ===== WAIT FOR CPG TO BE READY =====
             logger.info("\n[3] Waiting for CPG to be ready...")
             cpg_ready = False
             max_attempts = 30
 
             for attempt in range(max_attempts):
-                await asyncio.sleep(2)  # Wait 2 seconds between checks
+                await asyncio.sleep(2)
 
                 status_result = await client.call_tool("get_cpg_status", {
                     "codebase_hash": codebase_hash
@@ -128,7 +125,6 @@ async def main():
                 logger.error("❌ CPG not ready after waiting")
                 return
 
-            # ===== LIST METHODS =====
             logger.info("\n[4] Listing methods in the codebase...")
             methods_result = await client.call_tool("list_methods", {
                 "codebase_hash": codebase_hash,
@@ -142,7 +138,7 @@ async def main():
                 total = methods_dict.get("total", 0)
                 logger.info(f"✓ Found {total} methods total, showing up to 20:")
 
-                for method in methods[:10]:  # Show first 10
+                for method in methods[:10]:
                     logger.info(f"  - {method.get('name', 'unknown')} in {method.get('filename', 'unknown')}")
 
                 if len(methods) > 10:
@@ -150,7 +146,6 @@ async def main():
             else:
                 logger.error(f"❌ Failed to list methods: {methods_dict}")
 
-                        # ===== RUN SIMPLE QUERY - GET CODEBASE SUMMARY =====
             logger.info("\n[5] Getting codebase summary...")
 
             summary_result = await client.call_tool("get_codebase_summary", {
@@ -169,7 +164,6 @@ async def main():
             else:
                 logger.error(f"❌ Failed to get summary: {summary_dict}")
 
-            # ===== RUN ANOTHER QUERY - LIST CALLS =====
             logger.info("\n[6] Listing function calls...")
 
             calls_result = await client.call_tool("list_calls", {
@@ -184,7 +178,7 @@ async def main():
                 total = calls_dict.get("total", 0)
                 logger.info(f"✓ Found {total} calls total, showing up to 10:")
 
-                for call in calls[:5]:  # Show first 5
+                for call in calls[:5]:
                     logger.info(f"  - {call.get('caller', 'unknown')} -> {call.get('callee', 'unknown')}")
 
                 if len(calls) > 5:

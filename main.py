@@ -9,6 +9,7 @@ capabilities through the Model Context Protocol (MCP) using Joern's Code Propert
 import asyncio
 import logging
 import os
+import re
 import shutil
 import socket
 import time
@@ -23,7 +24,7 @@ from starlette.responses import JSONResponse, PlainTextResponse
 
 from src.config import load_config
 from src import defaults
-from src.tools.core_tools import CPGGenerationQueue, _schedule_restart_server_task
+from src.tools.core_tools import CPGGenerationQueue, DurableCPGQueue, _schedule_restart_server_task
 from src.services import (
     CodebaseTracker,
     GitManager,
@@ -32,13 +33,16 @@ from src.services import (
     QueryExecutor,
     CodeBrowsingService
 )
-from src.utils import DBManager, setup_logging
+from src.utils import setup_logging
+from src.utils import compute_recommendation, current_from_config, render_recommendation
+from src.utils.postgres_db_manager import PostgresDBManager
+
+# Postgres is the store (SQLite removed). Override with the DATABASE_URL env var.
+DEFAULT_DATABASE_URL = "postgresql://codebadger:codebadger@localhost:55432/codebadger"
 from src.tools import register_tools
 
-# Version information - bump this when releasing new versions
 VERSION = "0.3.4-beta"
 
-# Global service instances
 services = {}
 
 # Set when the lifespan starts — used for uptime calculation
@@ -83,6 +87,189 @@ def _setup_telemetry(config) -> None:
         logger.warning(f"Failed to initialize OpenTelemetry: {e}")
 
 
+def _apply_startup_tuning(config) -> None:
+    """Log the memory-aware recommendation and auto-derive unset memory limits.
+
+    Logging is gated by RECOMMEND_ON_STARTUP (default on); the auto-tuning that
+    fills in an unset Joern memory budget / RSS threshold from host RAM is gated
+    by AUTO_TUNE_MEMORY (default on). Auto-tuning runs before the Joern manager
+    is constructed so it picks up the derived values. Explicit config always
+    wins — only values left at 0 are filled in."""
+    try:
+        rec = compute_recommendation(worker_mode=getattr(config.joern, "worker_mode", "shared"))
+    except Exception as e:
+        logger.warning(f"Could not compute startup config recommendation: {e}")
+        return
+
+    if os.getenv("RECOMMEND_ON_STARTUP", "true").lower() != "false":
+        try:
+            for line in render_recommendation(rec, current=current_from_config(config)).splitlines():
+                logger.info(line)
+        except Exception as e:
+            logger.warning(f"Could not render startup recommendation: {e}")
+
+    if os.getenv("AUTO_TUNE_MEMORY", "true").lower() == "false":
+        return
+    try:
+        if getattr(config.joern, "memory_budget_mb", 0) <= 0:
+            config.joern.memory_budget_mb = rec.query_budget_gb * 1024
+            logger.info(
+                f"Auto-tuned Joern memory_budget_mb={config.joern.memory_budget_mb} "
+                f"({rec.query_budget_gb}GB query pool from {rec.host.total_mem_gb:g}GB host). "
+                f"Set JOERN_MEMORY_BUDGET_MB or AUTO_TUNE_MEMORY=false to override."
+            )
+        if getattr(config.joern, "rss_eviction_threshold_mb", 0) <= 0:
+            config.joern.rss_eviction_threshold_mb = rec.rss_eviction_threshold_mb
+            logger.info(
+                f"Auto-tuned Joern rss_eviction_threshold_mb={config.joern.rss_eviction_threshold_mb}"
+            )
+        # Pool mode: the build (joern-server) container cap and the worker
+        # reservation ledger are SEPARATE memory pools. Keep their sum within the
+        # Joern budget so they can't jointly over-commit host RAM.
+        if getattr(config.joern, "worker_mode", "shared") == "pool":
+            _guard_pool_memory(config, rec)
+    except Exception as e:
+        logger.warning(f"Could not apply startup memory auto-tuning: {e}")
+
+
+def _parse_mem_to_mb(value):
+    """Parse a Docker-style memory string ('100g', '512m', '2048') to MB, or None."""
+    if value is None:
+        return None
+    s = str(value).strip().lower().rstrip("b")
+    m = re.match(r"^(\d+(?:\.\d+)?)\s*([gmk]?)$", s)
+    if not m:
+        return None
+    factor = {"g": 1024, "m": 1, "k": 1 / 1024, "": 1}[m.group(2)]  # bare value treated as MB
+    return int(float(m.group(1)) * factor)
+
+
+def _guard_pool_memory(config, rec) -> None:
+    """Prevent pool-mode host over-commit by clamping the worker memory budget.
+
+    The joern-server container (builds) is capped by JOERN_MEM_LIMIT and the
+    query workers by memory_budget_mb; those are independent pools, so we hold
+    build_cap + memory_budget <= joern_budget."""
+    joern_budget_mb = rec.joern_budget_gb * 1024
+    build_cap_mb = _parse_mem_to_mb(os.getenv("JOERN_MEM_LIMIT"))
+    if build_cap_mb is None:
+        build_cap_mb = 100 * 1024  # docker-compose default when unset
+    safe_worker_mb = joern_budget_mb - build_cap_mb
+    min_worker_mb = min((t.container_cap_gb for t in rec.tiers), default=3) * 1024
+
+    if safe_worker_mb < min_worker_mb:
+        logger.warning(
+            f"Pool mode: the build container cap (JOERN_MEM_LIMIT≈{build_cap_mb}MB) leaves only "
+            f"{safe_worker_mb}MB for query workers within the {joern_budget_mb}MB Joern budget. "
+            f"Lower JOERN_MEM_LIMIT to ~{rec.build_container_cap_gb}g (the build reserve) so workers "
+            f"get ~{rec.query_budget_gb}GB. Forcing worker budget to {min_worker_mb}MB for now."
+        )
+        config.joern.memory_budget_mb = min_worker_mb
+    elif config.joern.memory_budget_mb > safe_worker_mb:
+        logger.warning(
+            f"Pool-mode over-commit guard: build cap {build_cap_mb}MB + worker budget "
+            f"{config.joern.memory_budget_mb}MB > Joern budget {joern_budget_mb}MB. Clamping worker "
+            f"budget to {safe_worker_mb}MB. To regain capacity set JOERN_MEM_LIMIT="
+            f"{rec.build_container_cap_gb}g (build-only) in docker-compose."
+        )
+        config.joern.memory_budget_mb = safe_worker_mb
+
+
+def _container_mem_limit_mb(joern_manager, container_name: str):
+    """Actual mem_limit (MB) of the running build container, or None.
+
+    A container's memory cap is fixed at `docker compose up` time, so this is the
+    REAL limit in force — not whatever JOERN_MEM_LIMIT is set to for this process."""
+    try:
+        import docker
+
+        client = getattr(joern_manager, "docker_client", None) or docker.from_env()
+        container = client.containers.get(container_name)
+        mem_bytes = (container.attrs.get("HostConfig", {}) or {}).get("Memory", 0)
+        if mem_bytes and mem_bytes > 0:
+            return int(mem_bytes / (1024 * 1024))
+    except Exception:
+        return None
+    return None
+
+
+def _log_effective_config(config) -> None:
+    """Log the RESOLVED runtime config and flag env-vs-effective mismatches.
+
+    Env vars are only honored if config.yaml uses a ${VAR:default} placeholder, so
+    `CPG_QUEUE_BACKEND=durable` (etc.) can be silently ignored. This prints what
+    actually took effect and warns when the env you set disagrees with it — the
+    "I set the env but it didn't take" class of boot-time surprise."""
+    try:
+        joern_mgr = services.get("joern_server_manager")
+        coordinator = services.get("coordinator")
+        cpg_queue = services.get("cpg_queue")
+        container_name = services.get("joern_container_name", "codebadger-joern-server")
+
+        database_url = os.getenv("DATABASE_URL") or DEFAULT_DATABASE_URL
+        db_target = database_url.split("@")[-1]
+        redis_url = os.getenv("REDIS_URL", "")
+
+        worker_mode = getattr(config.joern, "worker_mode", "shared")
+        queue_backend = getattr(config.cpg, "queue_backend", "memory")
+        coord_backend = getattr(coordinator, "backend", "unknown") if coordinator else "none"
+        queue_type = type(cpg_queue).__name__ if cpg_queue else "none"
+        mem_budget = getattr(config.joern, "memory_budget_mb", 0)
+        build_heap = getattr(config.cpg, "build_heap_gb", "?")
+        build_workers = getattr(config.cpg, "build_workers", "?")
+
+        logger.info("=" * 60)
+        logger.info("Effective runtime configuration:")
+        logger.info(f"  Database     : postgres @ {db_target}")
+        logger.info(f"  Redis        : {redis_url or '(not set — single-process)'}")
+        logger.info(f"  Coordinator  : {coord_backend}")
+        logger.info(f"  Joern mode   : {worker_mode}")
+        logger.info(f"  CPG queue    : {queue_backend} ({queue_type})")
+        logger.info(f"  Query budget : {mem_budget}MB")
+        logger.info(f"  Build        : {build_workers} workers × {build_heap}G heap")
+
+        intended = os.getenv("JOERN_MEM_LIMIT")
+        actual_mb = _container_mem_limit_mb(joern_mgr, container_name) if joern_mgr else None
+        if actual_mb is not None:
+            logger.info(f"  Build cap    : {actual_mb}MB (live container '{container_name}')")
+            intended_mb = _parse_mem_to_mb(intended)
+            if intended_mb is not None and abs(intended_mb - actual_mb) > 1:
+                logger.warning(
+                    f"  ⚠ JOERN_MEM_LIMIT={intended} (≈{intended_mb}MB) != live container cap "
+                    f"{actual_mb}MB. A running container's mem_limit is fixed at compose-up; "
+                    f"recreate it: `JOERN_MEM_LIMIT={intended} docker compose --profile postgres "
+                    f"up -d --force-recreate {container_name}`."
+                )
+        logger.info("=" * 60)
+
+        # Env-vs-effective drift: the env was set but the placeholder wasn't honored.
+        def _drift(env_name, env_val, effective, label):
+            if env_val and env_val.lower() != str(effective).lower():
+                logger.warning(
+                    f"  ⚠ {env_name}={env_val} but effective {label}={effective}. "
+                    f"config.yaml likely lacks a ${{{env_name}:...}} placeholder, so the env "
+                    f"was ignored. Edit config.yaml or unset config.yaml to use env defaults."
+                )
+
+        _drift("CPG_QUEUE_BACKEND", os.getenv("CPG_QUEUE_BACKEND", ""), queue_backend, "queue_backend")
+        _drift("JOERN_WORKER_MODE", os.getenv("JOERN_WORKER_MODE", ""), worker_mode, "worker_mode")
+
+        # Redis set but neither coordinator nor pool actually using it.
+        if redis_url and coord_backend != "redis" and worker_mode != "pool":
+            logger.warning(
+                f"  ⚠ REDIS_URL is set but coordinator={coord_backend} and worker_mode={worker_mode} "
+                f"— Redis is not being used for coordination or the worker pool."
+            )
+
+        # Durable queue requested but jobs table never engaged is worth a hint.
+        if queue_backend == "durable" and "Durable" not in queue_type:
+            logger.warning(
+                f"  ⚠ queue_backend=durable but the active queue is {queue_type}, not DurableCPGQueue."
+            )
+    except Exception as e:
+        logger.warning(f"Could not log effective configuration: {e}")
+
+
 async def _graceful_shutdown():
     """Gracefully shutdown all services"""
     logger.info("Performing graceful shutdown...")
@@ -94,7 +281,6 @@ async def _graceful_shutdown():
             with suppress(asyncio.CancelledError):
                 await status_log_task
 
-        # Terminate all Joern servers
         joern_server_manager = services.get('joern_server_manager')
         if joern_server_manager:
             watchdog_task = getattr(joern_server_manager, '_watchdog_task', None)
@@ -107,7 +293,6 @@ async def _graceful_shutdown():
             joern_server_manager.terminate_all_servers()
             logger.info("All Joern servers terminated")
 
-        # Release all ports
         if 'port_manager' in services:
             logger.info("Releasing allocated ports...")
             try:
@@ -115,7 +300,6 @@ async def _graceful_shutdown():
             except Exception as e:
                 logger.warning(f"Error releasing ports: {e}")
 
-        # Stop CPG generation queue
         if 'cpg_queue' in services:
             await services['cpg_queue'].stop()
 
@@ -126,7 +310,6 @@ async def _graceful_shutdown():
             with suppress(asyncio.CancelledError):
                 await task
 
-        # Flush database and caches
         if 'db_manager' in services:
             logger.info("Flushing database...")
             try:
@@ -254,18 +437,20 @@ async def app_lifespan(server: FastMCP):
     services.clear()
     _server_start_time = time.monotonic()
 
-    # Load configuration
     config = load_config("config.yaml")
     setup_logging(config.server.log_level)
     logger.info("Starting CodeBadger Server")
 
+    # Print the memory-aware configuration envelope before the heavy service
+    # init, flag drift that risks an OOM cascade, and auto-derive an unset Joern
+    # memory budget from host RAM (before the Joern manager is constructed).
+    _apply_startup_tuning(config)
+
     # Setup OpenTelemetry (must happen before tool invocations)
     _setup_telemetry(config)
 
-    # Ensure required directories exist
     os.makedirs(config.storage.workspace_root, exist_ok=True)
 
-    # Create playground directory relative to project root
     project_root = os.path.dirname(os.path.abspath(__file__))
     playground_dir = os.path.join(project_root, "playground")
     cpgs_dir = os.path.join(playground_dir, "cpgs")
@@ -276,12 +461,21 @@ async def app_lifespan(server: FastMCP):
     logger.info("Created required directories")
 
     try:
-        # Initialize DB Manager
-        db_manager = DBManager(os.path.join(project_root, "codebadger.db"))
+        # Initialize DB Manager — Postgres only (shared catalog/cache/findings/jobs
+        # for multi-process). Defaults to the Compose Postgres; override via
+        # DATABASE_URL. Start it with: docker compose --profile postgres up -d
+        database_url = os.getenv("DATABASE_URL") or DEFAULT_DATABASE_URL
+        try:
+            db_manager = PostgresDBManager(database_url)
+            db_manager.init_schema()
+        except Exception as e:
+            logger.error(
+                f"Cannot reach Postgres at {database_url.split('@')[-1]}: {e}. "
+                f"Start it with `docker compose --profile postgres up -d` or set DATABASE_URL."
+            )
+            raise
+        logger.info(f"DB Manager initialized (postgres: {database_url.split('@')[-1]})")
 
-        logger.info("DB Manager initialized")
-
-        # Initialize services
         services['config'] = config
         services['db_manager'] = db_manager
         services['startup_issues'] = []
@@ -303,6 +497,7 @@ async def app_lifespan(server: FastMCP):
                     config=config,
                     codebase_tracker=services['codebase_tracker'],
                     max_active_servers=config.joern.max_active_servers,
+                    redis_url=os.getenv("REDIS_URL", ""),
                 )
                 logger.info(f"Docker container '{container_name}' is running")
             except Exception as e:
@@ -325,31 +520,60 @@ async def app_lifespan(server: FastMCP):
             else PortManager(port_min=config.joern.port_min, port_max=config.joern.port_max)
         )
 
-        # Initialize query executor with Joern server manager
+        # Cross-process coordinator (Phase 3c). Redis-backed when REDIS_URL is set
+        # so the per-CPG query lock holds across multiple API worker processes;
+        # otherwise in-process (single-process behavior).
+        from src.services.coordination import make_coordinator
+        try:
+            qt = int(getattr(config.query, "timeout", 300))
+        except (TypeError, ValueError):
+            qt = 300
+        query_lock_timeout = max(qt, 300) + 60
+        coordinator = make_coordinator(os.getenv("REDIS_URL", ""), lock_timeout=query_lock_timeout)
+        services['coordinator'] = coordinator
+        logger.info(f"Coordinator backend: {coordinator.backend}")
+
         services['query_executor'] = QueryExecutor(
             joern_server_manager,
             config=config.query,
             codebase_tracker=services['codebase_tracker'],
+            coordinator=coordinator,
         )
 
-        # Initialize Code Browsing Service
         services['code_browsing_service'] = CodeBrowsingService(
             services['codebase_tracker'],
             services['query_executor'],
             services['db_manager']
         )
 
-        # Start CPG generation queue (B3). Cap pending jobs to 4× the worker count
-        # so a runaway client can't fill disk by queueing unlimited generation requests.
-        cpg_queue = CPGGenerationQueue(
-            workers=config.cpg.build_workers,
-            maxsize=config.cpg.build_workers * 4,
-        )
+        # Start CPG generation queue. Cap pending jobs to 4× the worker count so a
+        # runaway client can't fill disk by queueing unlimited generation requests.
+        # "durable" backs the queue with the DB jobs table so a large batch
+        # survives restarts and is never silently dropped; "memory" is the
+        # in-process queue.
+        queue_backend = getattr(config.cpg, "queue_backend", "memory")
+        queue_maxsize = config.cpg.build_workers * 4
+        if queue_backend == "durable":
+            # db_manager (Postgres) provides the job-queue methods via
+            # FOR UPDATE SKIP LOCKED, so it doubles as the job store.
+            cpg_queue = DurableCPGQueue(
+                db_manager, services,
+                workers=config.cpg.build_workers,
+                maxsize=queue_maxsize,
+            )
+            logger.info("Durable CPG queue using postgres job store")
+        else:
+            cpg_queue = CPGGenerationQueue(
+                workers=config.cpg.build_workers,
+                maxsize=queue_maxsize,
+            )
         await cpg_queue.start()
         services['cpg_queue'] = cpg_queue
-        logger.info(f"CPG generation queue started with {config.cpg.build_workers} workers")
+        logger.info(
+            f"CPG generation queue started ({queue_backend} backend, "
+            f"{config.cpg.build_workers} workers)"
+        )
 
-        # Register MCP tools now that services are initialized
         register_tools(server, services)
 
         # Wire watchdog → shared restart registry BEFORE starting the watchdog so
@@ -362,11 +586,11 @@ async def app_lifespan(server: FastMCP):
             joern_server_manager.start_watchdog()
             logger.info("Joern server watchdog started")
 
-        # Periodic status logger
         interval = int(os.getenv("STATUS_LOG_INTERVAL_SECS", "60"))
         services['status_log_task'] = asyncio.create_task(_periodic_status_log(interval))
 
         logger.info("All services initialized")
+        _log_effective_config(config)
         logger.info("CodeBadger Server is ready")
 
         yield services
@@ -419,14 +643,12 @@ class ConcurrencyLimitMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
 
-# Initialize FastMCP server
 _max_mcp = int(os.getenv("MAX_MCP_CONNECTIONS", str(defaults.MAX_MCP_CONNECTIONS)))
 mcp = FastMCP(
     "CodeBadger Server",
     lifespan=app_lifespan,
 )
-# Note: Tools are registered inside the lifespan function
-# register_tools(mcp, services)
+# Tools are registered inside the lifespan (app_lifespan), not here.
 # TODO: _apply_transforms is experimental — call it manually to enable CodeMode
 
 
@@ -530,18 +752,24 @@ def _get_codebase_list(include_sensitive: bool = False) -> list:
         joern_mgr = services.get("joern_server_manager")
         if not tracker:
             return []
+        # One bulk query for all codebases, and ONE snapshot of running servers,
+        # instead of a per-codebase DB query + port lookup. Under Postgres the old
+        # per-codebase loop opened one connection per codebase on the event loop
+        # (seconds of blocking at 1000s of codebases), stalling the whole server.
+        infos = tracker.list_codebases_full()
+        ports = {}
+        if joern_mgr:
+            try:
+                ports = joern_mgr.get_running_servers()
+            except Exception:
+                ports = {}
         result = []
-        for h in tracker.list_codebases():
-            info = tracker.get_codebase(h)
-            if not info:
-                continue
-            status = info.metadata.get("status", "unknown")
-            port = joern_mgr.get_server_port(h) if joern_mgr else None
+        for info in infos:
             result.append({
-                "hash": h,
+                "hash": info.codebase_hash,
                 "language": info.language,
-                "status": status,
-                "joern_port": port,
+                "status": info.metadata.get("status", "unknown"),
+                "joern_port": ports.get(info.codebase_hash),
                 "source_type": info.source_type,
                 "source": _format_codebase_source(
                     info.source_type,
@@ -559,14 +787,11 @@ def _build_health(include_sensitive: bool = False) -> dict:
     joern_mgr = services.get("joern_server_manager")
     project_root = os.path.dirname(os.path.abspath(__file__))
 
-    # Joern container
     container_info = _check_joern_container_status(services.get("joern_container_name"), joern_mgr)
 
-    # Joern server pool
     active_servers_info = _get_active_servers()
     active_servers = active_servers_info.get("servers", {})
 
-    # Sleeping count
     sleeping = 0
     codebases = _get_codebase_list(include_sensitive=include_sensitive)
     by_status: dict = {}
@@ -576,17 +801,35 @@ def _build_health(include_sensitive: bool = False) -> dict:
         if s == "sleeping":
             sleeping += 1
 
-    # Port pool
     port_usage = _get_port_utilization()
     port_info = {
         "allocated": port_usage.get("allocated_count", 0),
         "available": port_usage.get("available_count", 0),
     }
 
-    # CPG queue
     cpq = services.get("cpg_queue")
     config = services.get("config")
     cache_info = _get_cache_size()
+
+    # Memory-admission ledger (Phase 1)
+    memory_info: dict = {}
+    if joern_mgr:
+        try:
+            memory_info = joern_mgr.get_memory_stats()
+        except Exception as e:
+            memory_info = {"error": str(e)}
+
+    queue_info = {
+        "depth": cpq.depth if cpq else 0,
+        "in_flight": cpq.in_flight if cpq else 0,
+        "maxsize": cpq.maxsize if cpq else 0,
+        "full": cpq.is_full if cpq else False,
+        "workers": config.cpg.build_workers if config else 0,
+    }
+
+    mem_util = memory_info.get("utilization_pct")
+    can_accept_query = bool(joern_mgr) and container_info.get("running", False)
+    can_accept_generation = can_accept_query and not queue_info["full"]
 
     issues = list(services.get("startup_issues", []))
     container_issue = _describe_joern_container_issue(container_info)
@@ -594,6 +837,12 @@ def _build_health(include_sensitive: bool = False) -> dict:
         issues.append(container_issue)
     if _get_system_memory_available_gb() < 1.0:
         issues.append("System memory critically low (<1 GB available)")
+    if isinstance(mem_util, (int, float)) and mem_util >= 95:
+        issues.append(f"Joern memory budget nearly exhausted ({mem_util}% reserved)")
+    if port_info["available"] <= 0:
+        issues.append("Joern port pool exhausted")
+    if queue_info["full"]:
+        issues.append("CPG generation queue is full — new generate_cpg calls will be rejected")
 
     uptime = _uptime_seconds()
     return {
@@ -605,20 +854,27 @@ def _build_health(include_sensitive: bool = False) -> dict:
             "seconds": uptime,
             "human": _format_uptime(uptime),
         },
+        "capacity": {
+            "accept_query": can_accept_query,
+            "accept_generation": can_accept_generation,
+        },
         "joern": {
             "container": container_info,
             "servers": {
+                "worker_mode": joern_mgr.worker_mode if joern_mgr else "shared",
+                # In "memory" admission mode the real cap is the memory budget +
+                # port pool, not a fixed count; count_cap is only used as the
+                # ceiling in legacy "count" mode.
+                "admission": memory_info.get("mode", "count"),
                 "active": len(active_servers),
                 "sleeping": sleeping,
-                "max_allowed": joern_mgr._max_active if joern_mgr else 0,
+                "count_cap": joern_mgr._max_active if joern_mgr else 0,
                 "lru_evictions": joern_mgr._lru_eviction_count if joern_mgr else 0,
                 "port_pool": port_info,
             },
+            "memory": memory_info,
         },
-        "cpg_queue": {
-            "depth": cpq.depth if cpq else 0,
-            "workers": config.cpg.build_workers if config else 0,
-        },
+        "cpg_queue": queue_info,
         "codebases": {
             "total": len(codebases),
             "by_status": by_status,
@@ -648,23 +904,36 @@ async def _periodic_status_log(interval_secs: int) -> None:
                 f"Status : {h['status'].upper()}" + (f"  issues={h['issues']}" if h['issues'] else ""),
                 f"Memory : process={h['resources']['process_memory_mb']} MB  "
                 f"system_avail={h['resources']['system_memory_available_gb']} GB",
-                f"Joern  : active={h['joern']['servers']['active']}  "
+                f"Joern  : mode={h['joern']['servers']['worker_mode']}  "
+                f"active={h['joern']['servers']['active']}  "
                 f"sleeping={h['joern']['servers']['sleeping']}  "
-                f"max={h['joern']['servers']['max_allowed']}  "
-                f"evictions={h['joern']['servers']['lru_evictions']}",
+                f"count_cap={h['joern']['servers']['count_cap']}  "
+                f"evictions={h['joern']['servers']['lru_evictions']}  "
+                f"ports={h['joern']['servers']['port_pool']['available']} free",
+                f"Budget : {h['joern']['memory'].get('reserved_mb', 0)}/"
+                f"{h['joern']['memory'].get('budget_mb', 0)} MB reserved"
+                + (f" ({h['joern']['memory'].get('utilization_pct')}%)"
+                   if h['joern']['memory'].get('utilization_pct') is not None else "")
+                + f"  rss={h['joern']['memory'].get('container_rss_mb', '?')} MB",
                 f"Queue  : depth={h['cpg_queue']['depth']}  "
+                f"in_flight={h['cpg_queue']['in_flight']}  "
+                f"max={h['cpg_queue']['maxsize']}  "
                 f"workers={h['cpg_queue']['workers']}",
                 f"CPGs   : {h['codebases']['total']} registered  "
                 + "  ".join(f"{k}={v}" for k, v in h['codebases']['by_status'].items()),
             ]
-            for cb in h['codebases']['list']:
-                port_str = f":{cb['joern_port']}" if cb['joern_port'] else "      "
+            # Only list ACTIVE servers (those with a port) — listing every
+            # registered codebase floods the log with thousands of lines per tick.
+            active = [cb for cb in h['codebases']['list'] if cb['joern_port']]
+            for cb in active:
                 src = cb['source']
                 if len(src) > 40:
                     src = "..." + src[-37:]
                 lines.append(
-                    f"  {cb['hash']:<12}  {cb['language']:<10}  {cb['status']:<10}  {port_str:<7}  {src}"
+                    f"  {cb['hash']:<12}  {cb['language']:<10}  {cb['status']:<10}  :{cb['joern_port']:<6}  {src}"
                 )
+            if not active:
+                lines.append("  (no active Joern servers)")
             lines.append(sep)
             for line in lines:
                 logger.info(line)
@@ -672,7 +941,6 @@ async def _periodic_status_log(interval_secs: int) -> None:
             logger.warning(f"Periodic status log failed: {e}")
 
 
-# Health check endpoint
 @mcp.custom_route("/health", methods=["GET"])
 async def health_check(request):
     """Health check endpoint"""
@@ -690,7 +958,6 @@ async def health_check(request):
         }, status_code=500)
 
 
-# Root endpoint
 @mcp.custom_route("/", methods=["GET"])
 async def root(request):
     """Root endpoint providing basic server information"""

@@ -135,6 +135,8 @@ build.log
 .vscode/
 playground/codebases/*
 !playground/codebases/core/
+playground/cpgs/
+playground/pgdata/
 joern-docs.md
 test_scripts/
 codebadger.db

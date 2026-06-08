@@ -40,7 +40,6 @@ class CodebaseTracker:
                 metadata=metadata or {},
             )
 
-            # Convert to dict (which handles metadata JSON serialization)
             data = codebase.to_dict()
             self.db.save_codebase(data)
 
@@ -66,27 +65,14 @@ class CodebaseTracker:
             return None
 
     def update_codebase(self, codebase_hash: str, **updates) -> None:
-        """Update codebase fields"""
+        """Update codebase fields.
+
+        Delegates to the DB layer, which merges metadata and sets the given fields
+        under a row lock in one transaction — so concurrent updates to the same
+        codebase don't lose each other's metadata keys (a read-modify-write race)."""
         try:
-            # Get existing data first
-            existing = self.get_codebase(codebase_hash)
-            if not existing:
+            if not self.db.update_codebase(codebase_hash, updates):
                 raise ValueError(f"Codebase {codebase_hash} not found")
-            
-            data = existing.to_dict()
-            
-            # Handle metadata updates - merge with existing metadata
-            if "metadata" in updates and isinstance(updates["metadata"], dict):
-                if existing.metadata:
-                    merged_metadata = {**existing.metadata, **updates["metadata"]}
-                    updates["metadata"] = merged_metadata
-            
-            # Update data with new values
-            data.update(updates)
-            
-            # Save back to DB
-            self.db.save_codebase(data)
-            
             logger.debug(f"Updated codebase {codebase_hash}")
         except Exception as e:
             logger.error(f"Failed to update codebase {codebase_hash}: {e}")
@@ -99,3 +85,16 @@ class CodebaseTracker:
     def list_codebases(self) -> list[str]:
         """List all tracked codebase hashes"""
         return self.db.list_codebases()
+
+    def list_codebases_full(self) -> list[CodebaseInfo]:
+        """All codebases as CodebaseInfo in a single bulk query (read-only).
+
+        For /health and the status logger — avoids N per-codebase DB round-trips
+        (one DB connection per codebase on the event loop under Postgres)."""
+        out = []
+        for data in self.db.list_all():
+            try:
+                out.append(CodebaseInfo.from_dict(data))
+            except Exception as e:
+                logger.warning(f"Skipping malformed codebase row {data.get('hash')}: {e}")
+        return out

@@ -78,7 +78,7 @@ class TestLoadConfig:
             assert config.server.log_level == "INFO"
             assert config.joern.binary_path == "joern"
             assert config.joern.memory_limit == "4g"
-            assert config.cpg.generation_timeout == 600
+            assert config.cpg.generation_timeout == 1800
             assert config.cpg.max_repo_size_mb == 1024
             assert config.query.timeout == 300
             assert config.query.cache_enabled is True

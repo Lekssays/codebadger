@@ -37,9 +37,9 @@ class CodebaseInfo:
     codebase_hash: str  # The codebase hash (cpg_cache_key)
     source_type: str  # "local" or "github"
     source_path: str  # Original path or GitHub URL
-    language: str  # Programming language
-    cpg_path: Optional[str] = None  # Path to CPG file
-    joern_port: Optional[int] = None  # Port for Joern server instance
+    language: str
+    cpg_path: Optional[str] = None
+    joern_port: Optional[int] = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_accessed: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -62,7 +62,6 @@ class CodebaseInfo:
     def from_dict(cls, data: Dict[str, Any]) -> "CodebaseInfo":
         """Create codebase info from dictionary"""
         logger = logging.getLogger(__name__)
-        # Parse metadata if it's a JSON string
         metadata = data.get("metadata", {})
         if isinstance(metadata, str):
             try:
@@ -124,6 +123,20 @@ class JoernConfig:
     server_startup_timeout: int = 120
     cpg_load_timeout: int = 300  # seconds before importCpg is abandoned and the server killed
     max_active_servers: int = 3
+    # Worker mode (Phase 2): "shared" (one container, servers as processes) or
+    # "pool" (one cgroup-capped container per CPG for OOM isolation).
+    worker_mode: str = "shared"
+    worker_image: str = "codebadger-joern-server:latest"
+    worker_internal_port: int = 8080
+    worker_port_min: int = 14000
+    worker_port_max: int = 14999
+    # Host path bind-mounted as /playground into pool workers ("" = auto-derive).
+    playground_host_path: str = ""
+    # Memory-aware admission: admit servers while the sum of per-CPG heap
+    # reservations stays under this budget (MB), evicting LRU to make room.
+    # 0 = disabled (fall back to the max_active_servers count cap); auto-derived
+    # from host RAM at startup when left at 0.
+    memory_budget_mb: int = 0
     # RSS-pressure eviction: kill LRU server when container RSS exceeds this (0 = disabled)
     rss_eviction_threshold_mb: int = 0
     # HTTP Connection Pooling
@@ -158,6 +171,11 @@ class CPGConfig:
     min_cpg_file_size: int = 1024  # 1KB minimum
     output_truncation_length: int = 2000  # Max characters for output logging
     build_workers: int = 2
+    # Per-frontend build heap cap (GB) — bounds c2cpg/javasrc2cpg/... JVM memory
+    # so concurrent builds can't exhaust host RAM.
+    build_heap_gb: int = 6
+    # "memory" (in-process queue) or "durable" (DB-backed jobs table).
+    queue_backend: str = "memory"
 
 
 @dataclass
@@ -240,7 +258,6 @@ class Finding:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Finding":
         """Create finding from dictionary"""
-        # Parse metadata if it's a JSON string
         metadata = data.get("metadata", {})
         if isinstance(metadata, str):
             try:
@@ -248,7 +265,6 @@ class Finding:
             except json.JSONDecodeError:
                 metadata = {}
 
-        # Parse flow_data if it's a JSON string
         flow_data = data.get("flow_data")
         if isinstance(flow_data, str):
             try:

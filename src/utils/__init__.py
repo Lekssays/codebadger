@@ -17,11 +17,21 @@ from .validators import (
 )
 from .cpgql_validator import CPGQLValidator, QueryTransformer
 from .query_rendering import escape_scala_string
+from .recommend import (
+    compute as compute_recommendation,
+    current_from_config,
+    detect_host,
+    render as render_recommendation,
+)
 
 __all__ = [
     "get_logger",
     "setup_logging",
     "DBManager",
+    "compute_recommendation",
+    "current_from_config",
+    "detect_host",
+    "render_recommendation",
     "validate_codebase_hash",
     "validate_source_type",
     "validate_local_path",

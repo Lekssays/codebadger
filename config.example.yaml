@@ -6,13 +6,20 @@ server:
 joern:
   binary_path: ${JOERN_BINARY_PATH:joern}
   memory_limit: ${JOERN_MEMORY_LIMIT:4g}
-  java_opts: ${JOERN_JAVA_OPTS:-Xmx4G -Xms2G -XX:+UseG1GC -Dfile.encoding=UTF-8}
+  java_opts: '-Xmx4G -Xms2G -XX:+UseG1GC -XX:+UseStringDeduplication -Dfile.encoding=UTF-8'
 
-  # For large projects
-  # memory_limit: ${JOERN_MEMORY_LIMIT:16g}
-  # java_opts: ${JOERN_JAVA_OPTS:-Xmx16G -Xms8G -XX:+UseG1GC -Dfile.encoding=UTF-8}
+  # Memory-aware server pool; run scripts/recommend_config.py to size for your host.
+  max_active_servers: 15                          # safety ceiling on concurrent query servers
+  memory_budget_mb: ${JOERN_MEMORY_BUDGET_MB:0}   # real concurrency limit; 0 = auto from host RAM
+  rss_eviction_threshold_mb: 0                    # LRU-evict above this container RSS; 0 = auto
 
-  # HTTP Connection Pooling for Joern Server
+  # worker_mode: shared = query servers run as processes in the build container;
+  #              pool = each CPG in its own cgroup-capped container (needs worker image + Docker).
+  worker_mode: ${JOERN_WORKER_MODE:shared}
+  worker_image: ${JOERN_WORKER_IMAGE:codebadger-joern-server:latest}
+  worker_port_min: ${JOERN_WORKER_PORT_MIN:14000}
+  worker_port_max: ${JOERN_WORKER_PORT_MAX:14999}
+
   http_pool_connections: ${HTTP_POOL_CONNECTIONS:10}
   http_pool_maxsize: ${HTTP_POOL_MAXSIZE:10}
   http_connect_timeout: ${HTTP_CONNECT_TIMEOUT:5.0}
@@ -26,8 +33,17 @@ sessions:
   max_concurrent: ${MAX_CONCURRENT_SESSIONS:50}
 
 cpg:
-  generation_timeout: ${CPG_GENERATION_TIMEOUT:600}
+  generation_timeout: 1800                    # 30 min; large repos (v8, wireshark) exceed 10 min
+  # queue_backend: memory (in-process, lost on restart) or durable (DB jobs table,
+  # survives restart, dedup + backpressure — use for large batches). Set DATABASE_URL
+  # to a postgres:// DSN to move the whole store (catalog, cache, findings, queue) to Postgres.
+  queue_backend: ${CPG_QUEUE_BACKEND:memory}
+  # build_workers * build_heap_gb must fit the build container's mem_limit (~7GB/worker incl. JVM).
+  build_workers: ${CPG_BUILD_WORKERS:8}
   max_repo_size_mb: ${MAX_REPO_SIZE_MB:1024}
+  # CRITICAL: caps each build frontend's JVM heap. Without it a frontend grabs ~25% of the
+  # container (~25GB) and N concurrent builds OOM the host. Raise it, lower build_workers, for v8.
+  build_heap_gb: ${CPG_BUILD_HEAP_GB:6}
   supported_languages:
     - java
     - c
@@ -43,11 +59,11 @@ cpg:
     - ruby
     - swift
   exclusion_patterns:
-    # Hidden files and directories (starting with .)
+    # Hidden files and directories
     - ".*/\\..*"
     - "\\..*"
-    
-    # Test and fuzzing directories (both root level and nested, with wildcards)
+
+    # Tests and fuzzing
     - ".*/test.*"
     - "test.*"
     - ".*/fuzz.*"
@@ -68,8 +84,8 @@ cpg:
     - "benchmark.*"
     - ".*/perf.*"
     - "perf.*"
-    
-    # Documentation and examples (both root level and nested, with wildcards)
+
+    # Docs and examples
     - ".*/doc?/.*"
     - "doc?/.*"
     - ".*/documentation.*"
@@ -84,8 +100,8 @@ cpg:
     - "tutorial.*"
     - ".*/guide.*"
     - "guide.*"
-    
-    # Build and development artifacts
+
+    # Build and dev artifacts
     - ".*/build.*/.*"
     - ".*_build/.*"
     - ".*/target/.*"
@@ -99,7 +115,7 @@ cpg:
     - ".*/m4/.*"
     - ".*/autom4te.*/.*"
     - ".*/autotools/.*"
-    
+
     # Version control and dependencies
     - ".*/\\.git/.*"
     - ".*/\\.svn/.*"
@@ -111,21 +127,21 @@ cpg:
     - ".*/extern/.*"
     - ".*/external/.*"
     - ".*/packages/.*"
-    
+
     # Performance and profiling
     - ".*/benchmark.*/.*"
     - ".*/perf.*/.*"
     - ".*/profile.*/.*"
     - ".*/bench/.*"
-    
-    # Tools and scripts  
+
+    # Tools and scripts
     - ".*/tool.*/.*"
     - ".*/script.*/.*"
     - ".*/utils/.*"
     - ".*/util/.*"
     - ".*/helper.*/.*"
     - ".*/misc/.*"
-    
+
     # Language-specific binding/wrapper directories
     - ".*/python/.*"
     - ".*/java/.*"
@@ -135,7 +151,7 @@ cpg:
     - ".*/csharp/.*"
     - ".*/dotnet/.*"
     - ".*/go/.*"
-    
+
     # Generated and temporary files
     - ".*/generated/.*"
     - ".*/gen/.*"
@@ -148,8 +164,8 @@ cpg:
     - ".*/result.*/.*"
     - ".*/results/.*"
     - ".*/output/.*"
-    
-    # Configuration and metadata files (by extension)
+
+    # Config and metadata files
     - ".*\\.md$"
     - ".*\\.txt$"
     - ".*\\.xml$"
@@ -176,14 +192,14 @@ cpg:
     - ".*\\.orig$"
     - ".*\\.swp$"
     - ".*~$"
-    
+
     # IDE and editor files
     - ".*/\\.vscode/.*"
     - ".*/\\.idea/.*"
     - ".*/\\.eclipse/.*"
     - ".*\\.DS_Store$"
     - ".*Thumbs\\.db$"
-  
+
   languages_with_exclusions:
     - c
     - cpp
@@ -198,7 +214,7 @@ cpg:
     - swift
     - jimple
     - ghidra
-  
+
   taint_sources:
     c:
       - getenv

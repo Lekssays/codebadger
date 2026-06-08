@@ -6,12 +6,10 @@ This ensures a single source of truth for all configuration defaults, eliminatin
 duplication across config files and Python code.
 """
 
-# Server defaults
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 4242
 SERVER_LOG_LEVEL = "INFO"
 
-# Joern defaults
 JOERN_BINARY_PATH = "joern"
 JOERN_MEMORY_LIMIT = "4g"
 JOERN_JAVA_OPTS = "-Xmx4G -Xms2G -XX:+UseG1GC -XX:+UseStringDeduplication -Dfile.encoding=UTF-8"
@@ -30,25 +28,23 @@ HTTP_READ_TIMEOUT = 300.0
 HTTP_MAX_RETRIES = 3
 HTTP_BACKOFF_FACTOR = 0.3
 
-# CPG defaults
-CPG_GENERATION_TIMEOUT = 600
+# 30 min: c2cpg/frontends on large repos (v8, full wireshark) routinely exceed
+# 10 min. Scope the source path or lower this for small-only batches.
+CPG_GENERATION_TIMEOUT = 1800
 MAX_REPO_SIZE_MB = 1024
 MIN_CPG_FILE_SIZE = 1024
 OUTPUT_TRUNCATION_LENGTH = 2000
 
-# Supported languages for CPG generation
 SUPPORTED_LANGUAGES = [
     "java", "c", "cpp", "javascript", "python", "go",
     "kotlin", "csharp", "ghidra", "jimple", "php", "ruby", "swift"
 ]
 
-# Languages with exclusion pattern support
 LANGUAGES_WITH_EXCLUSIONS = [
     "c", "cpp", "java", "javascript", "python", "go",
     "kotlin", "csharp", "php", "ruby"
 ]
 
-# Default exclusion patterns for CPG generation
 EXCLUSION_PATTERNS = [
     ".*/\\..*", "\\..*",
     ".*/test.*", "test.*",
@@ -112,13 +108,15 @@ EXCLUSION_PATTERNS = [
     ".*Thumbs\\.db$"
 ]
 
-# Query defaults
 QUERY_TIMEOUT = 300
 CPG_LOAD_TIMEOUT = 300  # importCpg triggers overlay computation; kill if it exceeds this
 QUERY_CACHE_ENABLED = True
 QUERY_CACHE_TTL = 300
+# Don't cache tool outputs larger than this (bytes) — large query results (e.g.
+# full list_methods dumps) bloat the DB without much reuse benefit. Override via
+# MAX_CACHE_OUTPUT_BYTES. 0 disables the cap.
+MAX_CACHE_OUTPUT_BYTES = 262144
 
-# Storage defaults
 WORKSPACE_ROOT = "/tmp/codebadger"
 CLEANUP_ON_SHUTDOWN = True
 
@@ -126,11 +124,49 @@ CLEANUP_ON_SHUTDOWN = True
 MAX_ACTIVE_JOERN_SERVERS = 16
 JOERN_EVICTION_POLICY = "lru"
 
+# Worker mode (Phase 2). "shared" = run all Joern query servers as processes
+# inside the single codebadger-joern-server container (default; also the build
+# container). "pool" = run each CPG's Joern server in its OWN cgroup-capped
+# Docker container, so an OOM kills just that worker, not every server at once.
+JOERN_WORKER_MODE = "shared"
+# Image used for per-CPG worker containers in pool mode.
+JOERN_WORKER_IMAGE = "codebadger-joern-server:latest"
+# Port Joern binds INSIDE each pool worker container (published to a unique host
+# port from the worker range below). Fixed because each container has its own
+# network namespace.
+JOERN_WORKER_INTERNAL_PORT = 8080
+# Host-port range for pool workers. MUST be disjoint from JOERN_PORT_MIN/MAX
+# (which the shared container already publishes) to avoid bind conflicts.
+JOERN_WORKER_PORT_MIN = 14000
+JOERN_WORKER_PORT_MAX = 14999
+
+# Memory-aware admission (Phase 1). When > 0, the Joern pool admits servers
+# while the sum of their per-CPG heap *reservations* stays under this budget
+# (MB), evicting LRU servers to make room — instead of a fixed server count.
+# 0 = auto-derive from host RAM at startup (see src/utils/recommend.py); the
+# count cap above then acts only as a safety ceiling.
+JOERN_MEMORY_BUDGET_MB = 0
+
+# Evict the LRU server when the container's RSS exceeds this (MB). A backstop
+# on top of the reservation ledger. 0 = auto-derive from host RAM at startup.
+JOERN_RSS_EVICTION_THRESHOLD_MB = 0
+
 # MCP connection concurrency limit
 MAX_MCP_CONNECTIONS = 16
 
 # CPG build queue
 CPG_BUILD_WORKERS = 4
+# Max heap (GB) for each CPG-build frontend (c2cpg/javasrc2cpg/...). CRITICAL:
+# without this the frontend JVM defaults its heap to ~25% of the container limit
+# (~25 GB on a 100 GB cap), and N concurrent unbounded frontends exhaust host
+# RAM and trigger the OOM-killer. Keep build_workers * build_heap within the
+# generation reserve from scripts/recommend_config.py.
+CPG_BUILD_HEAP_GB = 6
+# Queue backend (Phase 3): "memory" = in-process asyncio.Queue (drops on full,
+# lost on restart). "durable" = DB-backed jobs table (survives restart, never
+# silently dropped, dedup + backpressure via the DB). Use "durable" for large
+# batches (e.g. 300 CVEs).
+CPG_QUEUE_BACKEND = "memory"
 
 # Language-specific Joern frontend binaries (full paths inside the container)
 LANGUAGE_COMMANDS = {

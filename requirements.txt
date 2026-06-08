@@ -11,6 +11,11 @@ gitpython==3.1.50
 PyYAML==6.0.3
 psutil==7.2.2
 
+# Optional: Postgres durable-queue backend (only used when DATABASE_URL=postgres://...)
+psycopg[binary]>=3.1
+# Optional: Redis cross-process coordination (only used when REDIS_URL is set)
+redis>=5.0
+
 # Telemetry (optional - OpenTelemetry)
 opentelemetry-api>=1.42.1
 opentelemetry-sdk>=1.42.1

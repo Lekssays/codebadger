@@ -28,11 +28,9 @@ def load_config(config_path: Optional[str] = None) -> Config:
     if config_path and os.path.exists(config_path):
         with open(config_path, "r") as f:
             config_data = yaml.safe_load(f)
-            # Process environment variable substitutions
             config_data = _substitute_env_vars(config_data)
         return _dict_to_config(config_data)
     else:
-        # Load from environment variables with centralized defaults
         return Config(
             server=ServerConfig(
                 host=os.getenv("MCP_HOST", defaults.SERVER_HOST),
@@ -52,6 +50,14 @@ def load_config(config_path: Optional[str] = None) -> Config:
                 server_init_sleep_time=float(os.getenv("JOERN_SERVER_INIT_SLEEP_TIME", str(defaults.JOERN_SERVER_INIT_SLEEP_TIME))),
                 server_startup_timeout=int(os.getenv("JOERN_SERVER_STARTUP_TIMEOUT", str(defaults.JOERN_SERVER_STARTUP_TIMEOUT))),
                 max_active_servers=int(os.getenv("MAX_ACTIVE_JOERN_SERVERS", str(defaults.MAX_ACTIVE_JOERN_SERVERS))),
+                memory_budget_mb=int(os.getenv("JOERN_MEMORY_BUDGET_MB", str(defaults.JOERN_MEMORY_BUDGET_MB))),
+                rss_eviction_threshold_mb=int(os.getenv("JOERN_RSS_EVICTION_THRESHOLD_MB", str(defaults.JOERN_RSS_EVICTION_THRESHOLD_MB))),
+                worker_mode=os.getenv("JOERN_WORKER_MODE", defaults.JOERN_WORKER_MODE),
+                worker_image=os.getenv("JOERN_WORKER_IMAGE", defaults.JOERN_WORKER_IMAGE),
+                worker_internal_port=int(os.getenv("JOERN_WORKER_INTERNAL_PORT", str(defaults.JOERN_WORKER_INTERNAL_PORT))),
+                worker_port_min=int(os.getenv("JOERN_WORKER_PORT_MIN", str(defaults.JOERN_WORKER_PORT_MIN))),
+                worker_port_max=int(os.getenv("JOERN_WORKER_PORT_MAX", str(defaults.JOERN_WORKER_PORT_MAX))),
+                playground_host_path=os.getenv("JOERN_PLAYGROUND_HOST_PATH", ""),
             ),
             cpg=CPGConfig(
                 generation_timeout=int(os.getenv("CPG_GENERATION_TIMEOUT", str(defaults.CPG_GENERATION_TIMEOUT))),
@@ -64,6 +70,8 @@ def load_config(config_path: Optional[str] = None) -> Config:
                 min_cpg_file_size=int(os.getenv("MIN_CPG_FILE_SIZE", str(defaults.MIN_CPG_FILE_SIZE))),
                 output_truncation_length=int(os.getenv("OUTPUT_TRUNCATION_LENGTH", str(defaults.OUTPUT_TRUNCATION_LENGTH))),
                 build_workers=int(os.getenv("CPG_BUILD_WORKERS", str(defaults.CPG_BUILD_WORKERS))),
+                build_heap_gb=int(os.getenv("CPG_BUILD_HEAP_GB", str(defaults.CPG_BUILD_HEAP_GB))),
+                queue_backend=os.getenv("CPG_QUEUE_BACKEND", defaults.CPG_QUEUE_BACKEND),
             ),
             query=QueryConfig(
                 timeout=int(os.getenv("QUERY_TIMEOUT", str(defaults.QUERY_TIMEOUT))),
@@ -133,7 +141,6 @@ def _dict_to_config(data: dict) -> Config:
             return value if isinstance(value, dict) else None
         return value
 
-    # Helper function to convert values based on dataclass field types
     def convert_config_section(config_class, values):
         if not values:
             return config_class()
@@ -144,9 +151,8 @@ def _dict_to_config(data: dict) -> Config:
                 converted[field_name] = _coerce(values[field_name], inner_type)
         return config_class(**converted)
 
-    # Get config sections with environment variable substitution
     cpg_data = data.get("cpg", {})
-    
+
     # Apply centralized defaults for missing CPG values
     if "max_repo_size_mb" not in cpg_data:
         cpg_data = {**cpg_data, "max_repo_size_mb": defaults.MAX_REPO_SIZE_MB}

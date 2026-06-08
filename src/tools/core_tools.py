@@ -125,7 +125,6 @@ def _get_git_commit_hash(path: str) -> Optional[str]:
     """
     try:
         import subprocess
-        # Run git rev-parse HEAD
         process = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             cwd=path,
@@ -143,7 +142,6 @@ def get_cpg_cache_key(source_type: str, source_path: str, language: str, commit_
     Generate a deterministic CPG cache key based on source type, path, language, and optional commit hash.
     """
     if source_type == "github":
-        # Extract owner/repo from GitHub URL
         if "github.com/" in source_path:
             parts = source_path.split("github.com/")[-1].split("/")
             if len(parts) >= 2:
@@ -155,7 +153,6 @@ def get_cpg_cache_key(source_type: str, source_path: str, language: str, commit_
         else:
             identifier = f"github:{source_path}:{language}"
     else:
-        # For local paths, use absolute path
         source_path = os.path.abspath(source_path)
         identifier = f"local:{source_path}:{language}"
 
@@ -240,7 +237,6 @@ def _estimate_processing_time(source_path: str, language: str, has_cpg: bool = F
         size_mb = 0
 
     if has_cpg:
-        # Only need to load CPG into Joern + warm cache
         if size_mb > 200:
             return "~3-8 minutes (loading large CPG into Joern server)"
         elif size_mb > 50:
@@ -248,7 +244,6 @@ def _estimate_processing_time(source_path: str, language: str, has_cpg: bool = F
         else:
             return "~30-60 seconds (loading CPG into Joern server)"
     else:
-        # Full pipeline: CPG generation + Joern load + cache warm-up
         if size_mb > 200:
             return "~5-15 minutes (large codebase: CPG generation + server loading)"
         elif size_mb > 50:
@@ -286,14 +281,12 @@ async def _restart_server_async(
         )
         logger.info(f"Async: CPG loaded into Joern server on port {joern_port}")
 
-        # Update DB
         codebase_tracker.update_codebase(
             codebase_hash=codebase_hash,
             joern_port=joern_port,
             metadata={"status": SessionStatus.READY}
         )
 
-        # Trigger cache warm-up
         if "code_browsing_service" in services:
             logger.info(f"Async: starting cache warm-up for {codebase_hash}")
             try:
@@ -331,7 +324,6 @@ async def _generate_cpg_async(
     try:
         logger.info(f"Starting async CPG generation for {codebase_hash}")
 
-        # Get services
         codebase_tracker = services["codebase_tracker"]
         joern_server_manager = services.get("joern_server_manager")
         config = services.get("config")
@@ -355,7 +347,6 @@ async def _generate_cpg_async(
                 )
                 return
 
-        # Use Docker API to generate CPG inside container
         docker_client = docker.from_env()
         container_name = (
             joern_server_manager.container_name
@@ -388,12 +379,9 @@ async def _generate_cpg_async(
         if not cmd_binary:
             raise ValueError(f"Unsupported language: {language}")
 
-        # Build command
         cmd = [cmd_binary, f"/playground/codebases/{codebase_hash}", "-o", container_cpg_path]
 
-        # Apply exclusion patterns if config is available
         if config and language in config.cpg.languages_with_exclusions and config.cpg.exclusion_patterns:
-            # Validate and combine exclusion patterns
             escaped_patterns = []
             for pattern in config.cpg.exclusion_patterns:
                 try:
@@ -407,7 +395,18 @@ async def _generate_cpg_async(
             cmd.extend(["--exclude-regex", combined_regex])
             logger.info(f"Applied {len(config.cpg.exclusion_patterns)} exclusion patterns")
 
-        logger.info(f"Executing CPG generation in container: {' '.join(cmd)}")
+        # CRITICAL: cap the frontend JVM heap. Without -Xmx the frontend defaults
+        # to ~25% of the container limit (~25 GB on a 100 GB cap); N concurrent
+        # unbounded frontends exhaust host RAM and trip the OOM-killer (it took
+        # the server down on a large batch). Pass JAVA_OPTS so each build is
+        # bounded and fits build_workers * build_heap within the budget.
+        build_heap_gb = config.cpg.build_heap_gb if config else 6
+        frontend_java_opts = (
+            f"-Xmx{build_heap_gb}G -XX:+UseG1GC -XX:+UseStringDeduplication -Dfile.encoding=UTF-8"
+        )
+        logger.info(
+            f"Executing CPG generation in container (frontend -Xmx{build_heap_gb}G): {' '.join(cmd)}"
+        )
 
         # exec_run is a synchronous blocking Docker SDK call.  Running it bare in an
         # async coroutine would freeze the entire asyncio event loop for the duration
@@ -418,7 +417,12 @@ async def _generate_cpg_async(
         loop = asyncio.get_running_loop()
         try:
             exec_result = await asyncio.wait_for(
-                loop.run_in_executor(None, lambda: container.exec_run(cmd=cmd, stream=False)),
+                loop.run_in_executor(
+                    None,
+                    lambda: container.exec_run(
+                        cmd=cmd, stream=False, environment={"JAVA_OPTS": frontend_java_opts}
+                    ),
+                ),
                 timeout=generation_timeout,
             )
         except asyncio.TimeoutError:
@@ -466,7 +470,6 @@ async def _generate_cpg_async(
             }
         )
 
-        # Step 4: Start Joern server with randomly assigned port (13371-13870)
         # spawn_server polls with time.sleep and load_cpg blocks on HTTP for up to
         # cpg_load_timeout seconds.  Both must run in the executor so they do not
         # freeze the event loop (which would drop SSE heartbeats and cause the
@@ -480,7 +483,7 @@ async def _generate_cpg_async(
                 )
                 logger.info(f"Joern server started on port {joern_port}")
 
-                # Load CPG into server (use container path, not host path)
+                # Load CPG using the container path, not the host path
                 loaded = await loop.run_in_executor(
                     None, joern_server_manager.load_cpg, codebase_hash, container_cpg_path
                 )
@@ -505,7 +508,7 @@ async def _generate_cpg_async(
             except Exception as e:
                 logger.error(f"Failed to start Joern server: {e}", exc_info=True)
 
-        # Update DB with final metadata (preserving container paths)
+        # Final metadata update preserves the container paths recorded above.
         codebase_tracker.update_codebase(
             codebase_hash=codebase_hash,
             cpg_path=cpg_path,
@@ -519,7 +522,6 @@ async def _generate_cpg_async(
         
         logger.info(f"CPG generation complete for {codebase_hash}, port: {joern_port}")
 
-        # Trigger cache warm-up
         if "code_browsing_service" in services:
             logger.info(f"Starting cache warm-up for {codebase_hash}")
             try:
@@ -585,6 +587,19 @@ class CPGGenerationQueue:
     def depth(self) -> int:
         return self._queue.qsize()
 
+    @property
+    def in_flight(self) -> int:
+        """Jobs currently queued or being generated (dedup set size)."""
+        return len(self._in_flight)
+
+    @property
+    def maxsize(self) -> int:
+        return self._maxsize
+
+    @property
+    def is_full(self) -> bool:
+        return bool(self._maxsize) and self._queue.qsize() >= self._maxsize
+
     async def _worker(self) -> None:
         while True:
             codebase_hash, job = await self._queue.get()
@@ -595,6 +610,103 @@ class CPGGenerationQueue:
             finally:
                 self._in_flight.discard(codebase_hash)
                 self._queue.task_done()
+
+
+class DurableCPGQueue:
+    """DB-backed CPG generation queue (Phase 3).
+
+    Same interface as CPGGenerationQueue, but jobs live in the durable `jobs`
+    table instead of an in-memory asyncio.Queue, so a 300-CVE batch survives a
+    restart and is never silently dropped. Workers poll the DB and claim jobs
+    atomically (one per worker). DB dedup (partial unique index) replaces the
+    in-flight set. Swapping the DBManager for a Postgres-backed one (with
+    FOR UPDATE SKIP LOCKED claims) makes this multi-process / multi-host.
+    """
+
+    SUBMITTED = "submitted"
+    DUPLICATE = "duplicate"
+    QUEUE_FULL = "queue_full"
+    JOB_TYPE = "generate_cpg"
+
+    def __init__(self, job_store, services: dict, workers: int = 2, maxsize: int = 0,
+                 poll_interval: float = 1.0):
+        # job_store implements the queue method surface (enqueue_job /
+        # claim_next_job / complete_job / fail_job / count_jobs /
+        # requeue_running_jobs): the SQLite DBManager or PostgresJobStore.
+        self.store = job_store
+        self.services = services
+        self._workers = workers
+        self._maxsize = maxsize
+        self._poll_interval = poll_interval
+        self._tasks: list = []
+        self._stopping = False
+
+    async def start(self) -> None:
+        # Recover jobs a previous run left mid-flight so they're retried.
+        try:
+            requeued = self.store.requeue_running_jobs()
+            if requeued:
+                logger.info(f"Requeued {requeued} interrupted CPG generation job(s)")
+        except Exception as e:
+            logger.warning(f"Could not requeue interrupted jobs: {e}")
+        for _ in range(self._workers):
+            self._tasks.append(asyncio.create_task(self._worker()))
+
+    async def stop(self) -> None:
+        self._stopping = True
+        for task in self._tasks:
+            task.cancel()
+        await asyncio.gather(*self._tasks, return_exceptions=True)
+        self._tasks.clear()
+
+    async def submit(self, codebase_hash: str, job: dict) -> str:
+        # `services` is the live process state — not serializable; the worker
+        # re-injects it. Persist only the plain job parameters.
+        payload = {k: v for k, v in job.items() if k != "services"}
+        loop = asyncio.get_running_loop()
+        _job_id, status = await loop.run_in_executor(
+            None, self.store.enqueue_job, codebase_hash, self.JOB_TYPE, payload, self._maxsize
+        )
+        if status == "error":
+            return self.QUEUE_FULL  # treat a DB error as backpressure; client retries
+        return status
+
+    async def _worker(self) -> None:
+        loop = asyncio.get_running_loop()
+        while not self._stopping:
+            try:
+                job = await loop.run_in_executor(None, self.store.claim_next_job, self.JOB_TYPE)
+            except Exception as e:
+                logger.error(f"Error claiming CPG job: {e}")
+                job = None
+            if not job:
+                await asyncio.sleep(self._poll_interval)
+                continue
+            job_id = job["id"]
+            payload = dict(job["payload"])
+            payload["services"] = self.services
+            try:
+                await _generate_cpg_async(**payload)
+                await loop.run_in_executor(None, self.store.complete_job, job_id)
+            except Exception as e:
+                logger.error(f"CPG generation job {job_id} for {job['codebase_hash']} failed: {e}", exc_info=True)
+                await loop.run_in_executor(None, self.store.fail_job, job_id, str(e))
+
+    @property
+    def depth(self) -> int:
+        return self.store.count_jobs("queued")
+
+    @property
+    def in_flight(self) -> int:
+        return self.store.count_jobs("queued") + self.store.count_jobs("running")
+
+    @property
+    def maxsize(self) -> int:
+        return self._maxsize
+
+    @property
+    def is_full(self) -> bool:
+        return bool(self._maxsize) and self.store.count_jobs("queued") >= self._maxsize
 
 
 def register_core_tools(mcp, services: dict):
@@ -657,7 +769,6 @@ Examples:
     ) -> Dict[str, Any]:
         """Create a Code Property Graph from source code for analysis."""
         try:
-            # Validate inputs
             validate_source_type(source_type)
             validate_language(language)
 
@@ -682,7 +793,8 @@ Examples:
                         ),
                     }
 
-            # Try to get git commit hash for local repos
+            # Git commit hash, when available, becomes part of the cache key so a
+            # checkout of a different revision produces a distinct CPG.
             commit_hash = None
             if source_type == "local":
                  try:
@@ -693,11 +805,9 @@ Examples:
                  except Exception as e:
                      logger.warning(f"Failed to get git commit hash: {e}")
 
-            # Generate CPG cache key (codebase_hash)
             codebase_hash = get_cpg_cache_key(source_type, source_path, language, commit_hash)
             logger.info(f"Processing codebase with hash: {codebase_hash}")
 
-            # Check if codebase already exists in DB
             existing_codebase = codebase_tracker.get_codebase(codebase_hash)
             if existing_codebase and existing_codebase.cpg_path and os.path.exists(existing_codebase.cpg_path):
                 logger.info(f"Found existing codebase in DB: {codebase_hash}")
@@ -720,7 +830,6 @@ Examples:
                         ),
                     }
 
-                # Check if Joern server is still running
                 joern_server_manager = services.get("joern_server_manager")
                 joern_port = existing_codebase.joern_port
                 server_running = False
@@ -734,7 +843,6 @@ Examples:
                         joern_port = None
 
                 if server_running:
-                    # Server is already running, return ready immediately
                     return {
                         "codebase_hash": codebase_hash,
                         "status": SessionStatus.READY,
@@ -775,7 +883,6 @@ Examples:
                     if not container_cpg_path:
                         container_cpg_path = f"/playground/cpgs/{codebase_hash}/cpg.bin"
 
-                    # Mark as loading in DB
                     codebase_tracker.update_codebase(
                         codebase_hash=codebase_hash,
                         joern_port=None,
@@ -788,7 +895,6 @@ Examples:
                         services=services,
                     )
 
-                    # Estimate time
                     codebase_dir = os.path.join(
                         os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "playground")),
                         "codebases", codebase_hash
@@ -813,27 +919,22 @@ Examples:
                         ),
                     }
 
-            # Get services
             git_manager = services["git_manager"]
-            
-            # Get playground path (absolute)
+
             playground_path = os.path.abspath(
                 os.path.join(os.path.dirname(__file__), "..", "..", "playground")
             )
 
-            # Step 1 & 2: Prepare source code - copy local path or clone repo
             codebase_dir = os.path.join(playground_path, "codebases", codebase_hash)
             container_codebase_path = f"/playground/codebases/{codebase_hash}"
-            
+
             logger.info(f"Preparing source code for {codebase_hash}")
-            
-            # Store repository URL if git
+
             repository_url = source_path if source_type == "github" else None
-            
+
             if source_type == "github":
                 validate_github_url(source_path)
-                
-                # Clone to playground/codebases/<hash>
+
                 if not os.path.exists(codebase_dir):
                     os.makedirs(codebase_dir, exist_ok=True)
                     await git_manager.clone_repository(
@@ -846,7 +947,6 @@ Examples:
                 else:
                     logger.info(f"Using existing cloned repository at {codebase_dir}")
             else:
-                # Local path - copy to playground/codebases/<hash>
                 host_path = resolve_host_path(source_path)
                 
                 if not os.path.exists(codebase_dir):
@@ -869,21 +969,20 @@ Examples:
                 else:
                     logger.info(f"Using existing source at {codebase_dir}")
 
-            # Step 3: Create CPG directory
             cpg_dir = os.path.join(playground_path, "cpgs", codebase_hash)
             cpg_path = os.path.join(cpg_dir, "cpg.bin")
             container_cpg_path = f"/playground/cpgs/{codebase_hash}/cpg.bin"
             os.makedirs(cpg_dir, exist_ok=True)
             logger.info(f"CPG directory ready: {cpg_dir}")
 
-            # Step 5: Store initial metadata in DB (before CPG generation)
+            # Store initial metadata in DB before CPG generation begins.
             codebase_tracker.save_codebase(
                 codebase_hash=codebase_hash,
                 source_type=source_type,
                 source_path=source_path,
                 language=language,
-                cpg_path=None,  # Will be updated after generation
-                joern_port=None,  # Will be updated after server starts
+                cpg_path=None,  # Updated after generation
+                joern_port=None,  # Updated after the server starts
                 metadata={
                     "container_codebase_path": container_codebase_path,
                     "container_cpg_path": container_cpg_path,
@@ -892,7 +991,7 @@ Examples:
                 }
             )
 
-            # Submit to bounded queue (B1 dedup + B3 concurrency limit)
+            # Submit to the bounded queue (dedup + concurrency limit).
             job = dict(
                 codebase_hash=codebase_hash,
                 codebase_dir=codebase_dir,
@@ -919,10 +1018,8 @@ Examples:
             else:
                 asyncio.create_task(_generate_cpg_async(**job))
 
-            # Estimate time
             estimate = _estimate_processing_time(codebase_dir, language, has_cpg=False)
 
-            # Return immediately with generating status
             return {
                 "codebase_hash": codebase_hash,
                 "status": SessionStatus.GENERATING,
@@ -980,10 +1077,9 @@ Examples:
         """Check CPG generation status or verify if a CPG exists and is ready."""
         try:
             codebase_tracker = services["codebase_tracker"]
-            
-            # Step 6: If codebase exists in DB, return metadata
+
             codebase_info = codebase_tracker.get_codebase(codebase_hash)
-            
+
             if not codebase_info:
                 return {
                     "codebase_hash": codebase_hash,
@@ -991,7 +1087,6 @@ Examples:
                     "message": "Codebase not found. Please generate CPG first.",
                 }
             
-            # Get status from metadata
             status = codebase_info.metadata.get("status", "unknown")
             if status == "unknown" and codebase_info.cpg_path and os.path.exists(codebase_info.cpg_path):
                 status = "ready"
@@ -1081,7 +1176,6 @@ delete_files=True:
             if not codebase_info:
                 return {"success": False, "error": f"Codebase {codebase_hash} not found"}
 
-            # Kill Joern process and release port
             if joern_server_manager and joern_server_manager.get_server_port(codebase_hash):
                 joern_server_manager.terminate_server(codebase_hash)
 

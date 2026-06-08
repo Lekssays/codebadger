@@ -1,6 +1,7 @@
 """Tests for DBManager cache TTL functionality and CacheCleanupScheduler"""
 
 import tempfile
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch, MagicMock
@@ -59,6 +60,88 @@ class TestCacheTTL:
             
             result = db.get_cached_tool_output("test_tool", "hash1", {"key": "value2"}, cache_ttl=300)
             assert result is None
+
+
+class TestUpdateCodebase:
+    """Test the atomic, row-locked update_codebase metadata merge."""
+
+    def _save(self, db, **overrides):
+        data = {
+            "hash": "h1",
+            "source_type": "github",
+            "source_path": "u/r",
+            "language": "c",
+            "joern_port": 13371,
+            "metadata": {"status": "ready"},
+        }
+        data.update(overrides)
+        db.save_codebase(data)
+
+    def test_merge_preserves_existing_metadata_keys(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = DBManager(f"{tmpdir}/test.db")
+            self._save(db, metadata={"status": "ready", "a": 1})
+
+            assert db.update_codebase("h1", {"metadata": {"b": 2}}) is True
+
+            meta = db.get_codebase("h1")["metadata"]
+            assert meta == {"status": "ready", "a": 1, "b": 2}
+
+    def test_update_only_writes_given_fields(self):
+        """A metadata-only update must not clobber untouched scalar columns."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = DBManager(f"{tmpdir}/test.db")
+            self._save(db, joern_port=13371)
+
+            db.update_codebase("h1", {"metadata": {"x": 1}})
+
+            row = db.get_codebase("h1")
+            assert row["joern_port"] == 13371  # left intact
+            assert row["metadata"]["x"] == 1
+
+    def test_set_scalar_field(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = DBManager(f"{tmpdir}/test.db")
+            self._save(db, joern_port=13371)
+
+            db.update_codebase("h1", {"joern_port": None})
+
+            assert db.get_codebase("h1")["joern_port"] is None
+
+    def test_returns_false_for_missing_row(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = DBManager(f"{tmpdir}/test.db")
+            assert db.update_codebase("nope", {"metadata": {"a": 1}}) is False
+
+    def test_concurrent_merges_do_not_lose_keys(self):
+        """Regression for the read-modify-write race: N threads each merge a
+        distinct metadata key concurrently; all keys must survive. Under the old
+        Python-side get/merge/save this dropped keys; the BEGIN IMMEDIATE
+        transaction serializes the writers so none are lost."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = DBManager(f"{tmpdir}/test.db")
+            self._save(db, metadata={})
+
+            n = 24
+            barrier = threading.Barrier(n)
+            errors = []
+
+            def worker(i):
+                try:
+                    barrier.wait()  # release all threads at once to maximize contention
+                    db.update_codebase("h1", {"metadata": {f"k{i}": i}})
+                except Exception as e:  # pragma: no cover - surfaced via assert below
+                    errors.append(e)
+
+            threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+            assert not errors, errors
+            meta = db.get_codebase("h1")["metadata"]
+            assert meta == {f"k{i}": i for i in range(n)}
 
 
 class TestCleanupExpiredCache:

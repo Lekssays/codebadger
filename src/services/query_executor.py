@@ -1,12 +1,12 @@
 import json
 import logging
 import re
-import threading
 import time
 from typing import Any, Dict, List, Optional, Union, TYPE_CHECKING
 
 from ..models import QueryResult, SessionStatus
 from ..exceptions import QueryExecutionError
+from .coordination import QueryLockTimeout
 from ..telemetry import get_tracer
 from .joern_server_manager import JoernServerManager
 
@@ -32,20 +32,18 @@ class QueryExecutor:
         joern_server_manager: Optional["JoernServerManager"] = None,
         config: Optional[Dict[str, Any]] = None,
         codebase_tracker: Optional["CodebaseTracker"] = None,
+        coordinator=None,
     ):
         self.joern_server_manager = joern_server_manager
         self.config = config or {}
         self.codebase_tracker = codebase_tracker
         # Serialize queries per codebase so a runaway query on one JVM doesn't
-        # cause a second thread to pile on and also burn a worker slot.
-        self._codebase_locks: Dict[str, threading.Semaphore] = {}
-        self._locks_mutex = threading.Lock()
-
-    def _get_codebase_lock(self, codebase_hash: str) -> threading.Semaphore:
-        with self._locks_mutex:
-            if codebase_hash not in self._codebase_locks:
-                self._codebase_locks[codebase_hash] = threading.Semaphore(1)
-            return self._codebase_locks[codebase_hash]
+        # cause a second request to pile on. The coordinator makes this lock hold
+        # across processes (Redis) when configured; defaults to in-process.
+        if coordinator is None:
+            from .coordination import InProcessCoordinator
+            coordinator = InProcessCoordinator()
+        self.coordinator = coordinator
 
     def execute_query(
         self,
@@ -73,12 +71,11 @@ class QueryExecutor:
                         execution_time=time.time() - start_time,
                     )
 
-                # Serialize queries per codebase: one JVM handles one query at a time.
-                lock = self._get_codebase_lock(codebase_hash)
-                with lock:
+                # Serialize queries per codebase: one JVM handles one query at a
+                # time. Cross-process when the coordinator is Redis-backed.
+                with self.coordinator.codebase_query_lock(codebase_hash):
                     port = self.joern_server_manager.get_server_port(codebase_hash)
                     if not port:
-                        # Auto-wake sleeping codebase
                         if self.codebase_tracker:
                             info = self.codebase_tracker.get_codebase(codebase_hash)
                             if info and info.metadata.get("status") == SessionStatus.SLEEPING and info.cpg_path:
@@ -145,6 +142,14 @@ class QueryExecutor:
 
                     return result
 
+            except QueryLockTimeout as e:
+                logger.warning(f"Query lock busy for {codebase_hash}: {e}")
+                return QueryResult(
+                    success=False,
+                    error="Server busy: another request is using this CPG. Try again shortly.",
+                    error_code="SERVER_BUSY",
+                    execution_time=time.time() - start_time,
+                )
             except Exception as e:
                 execution_time = time.time() - start_time
                 logger.error(f"Error executing query: {e}", exc_info=True)
@@ -158,16 +163,12 @@ class QueryExecutor:
         """Normalize query to ensure proper output format"""
         query = query.strip()
 
-        # Check if this is a block query that already produces its own output
-        # Block queries start with { and end with }
+        # Block queries (start with { and end with }) may already produce their
+        # own output; don't wrap those in another conversion.
         if query.startswith('{') and query.endswith('}'):
-            # Check if the block contains JSON output methods
             if '.toJsonPretty' in query or '.toJson' in query:
-                # Block already produces JSON, don't modify
                 return query
-            # Check if the block returns a string (.toString() at the end)
             if '.toString()' in query[-50:]:
-                # Block returns a string, don't add JSON conversion
                 return query
 
         # Remove existing output modifiers from the end
@@ -190,7 +191,6 @@ class QueryExecutor:
         if limit is not None and limit > 0 and not is_size_query:
             base_query = f"{base_query}.take({limit})"
 
-        # Add JSON output or string conversion for size results
         if is_size_query:
             return f"{base_query}.toString"
         return f"{base_query}.toJsonPretty"
@@ -234,14 +234,12 @@ class QueryExecutor:
         ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
         output = ansi_escape.sub('', output)
 
-        # First, check for codebadger_result markers (for text output queries)
+        # codebadger_result markers wrap text output from non-JSON queries
         marker_match = re.search(r'<codebadger_result>\s*(.*?)\s*</codebadger_result>', output, re.DOTALL)
         if marker_match:
-            # Return the extracted content as a string in a list
             return [marker_match.group(1).strip()]
 
-        # Try to extract JSON from Scala REPL output
-        # Look for JSON within triple quotes
+        # Extract JSON from Scala REPL output (wrapped in triple quotes)
         match = re.search(r'"""(\[.*?\]|\{.*?\})"""', output, re.DOTALL)
         if match:
             json_str = match.group(1)
@@ -266,18 +264,14 @@ class QueryExecutor:
             else:
                 return [{"value": str(data)}]
         except json.JSONDecodeError:
-            # Return as plain text
-            # If output looks like a simple number, return as primitive
+            # Not JSON: return a numeric primitive if it parses, else plain text.
             s = output.strip()
-            # Try int
             try:
                 return int(s)
             except Exception:
                 pass
-            # Try float
             try:
                 return float(s)
             except Exception:
                 pass
-            # If not numeric, return as string
             return s

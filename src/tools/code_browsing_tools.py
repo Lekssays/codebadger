@@ -205,12 +205,10 @@ Examples:
             codebase_tracker = services["codebase_tracker"]
             query_executor = services["query_executor"]
 
-            # Verify CPG exists for this codebase
             codebase_info = codebase_tracker.get_codebase(codebase_hash)
             if not codebase_info or not codebase_info.cpg_path:
                 raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
 
-            # Build query to get method metadata
             query_parts = [f'cpg.method.name("{escape_scala_string(method_name)}")']
 
             if filename:
@@ -248,10 +246,9 @@ Examples:
                 line_number = item.get("_3", -1)
                 line_number_end = item.get("_4", -1)
 
-                # Get the full source code using file reading logic
                 if method_filename and line_number > 0 and line_number_end > 0:
                     try:
-                        # Prevent path traversal
+                        # Prevent path traversal outside the source snapshot dir.
                         file_path = os.path.realpath(os.path.join(source_dir, method_filename))
                         real_source_dir = os.path.realpath(source_dir)
                         if not file_path.startswith(real_source_dir + os.sep):
@@ -438,12 +435,10 @@ Examples:
             codebase_tracker = services["codebase_tracker"]
             query_executor = services["query_executor"]
 
-            # Verify CPG exists for this codebase
             codebase_info = codebase_tracker.get_codebase(codebase_hash)
             if not codebase_info or not codebase_info.cpg_path:
                 raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
 
-            # Load query from external file
             query = QueryLoader.load(
                 "call_graph",
                 method_name=method_name,
@@ -466,7 +461,6 @@ Examples:
             if isinstance(result.data, str):
                 return result.data.strip()
             elif isinstance(result.data, list) and len(result.data) > 0:
-                # Extract string from list wrapper
                 output = result.data[0] if isinstance(result.data[0], str) else str(result.data[0])
                 return output.strip()
             else:
@@ -571,12 +565,11 @@ Examples:
             codebase_tracker = services["codebase_tracker"]
             query_executor = services["query_executor"]
 
-            # Verify CPG exists for this codebase
             codebase_info = codebase_tracker.get_codebase(codebase_hash)
             if not codebase_info or not codebase_info.cpg_path:
                 raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
 
-            # Robust query to get all stats in one go
+            # Single query gathers all stats in one round trip.
             stats_query = """
             {
                 val numFiles = cpg.file.size
@@ -740,14 +733,13 @@ Examples:
 
             codebase_tracker = services["codebase_tracker"]
 
-            # Verify CPG exists for this codebase
             codebase_info = codebase_tracker.get_codebase(codebase_hash)
             if not codebase_info or not codebase_info.cpg_path:
                 raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
 
             source_dir = _get_source_snapshot_dir(codebase_hash)
 
-            # Construct full file path and prevent path traversal
+            # Resolve and confine the path to prevent traversal outside the source dir.
             file_path = os.path.realpath(os.path.join(source_dir, filename))
             real_source_dir = os.path.realpath(source_dir)
             if not file_path.startswith(real_source_dir + os.sep):
@@ -755,7 +747,6 @@ Examples:
                     f"Path traversal denied: '{filename}' resolves outside source directory"
                 )
 
-            # Check if file exists
             if not os.path.exists(file_path):
                 raise ValidationError(
                     f"File '{filename}' not found in source directory"
@@ -764,11 +755,9 @@ Examples:
             if not os.path.isfile(file_path):
                 raise ValidationError(f"'{filename}' is not a file")
 
-            # Read the file
             with open(file_path, "r", encoding="utf-8", errors="replace") as f:
                 lines = f.readlines()
 
-            # Validate line numbers
             total_lines = len(lines)
             if start_line > total_lines:
                 raise ValidationError(
@@ -778,7 +767,7 @@ Examples:
             if end_line > total_lines:
                 end_line = total_lines
 
-            # Extract the code snippet (lines are 0-indexed in the list)
+            # lines is 0-indexed, so subtract 1 from the 1-indexed start_line.
             code_lines = lines[start_line - 1: end_line]
             code = "".join(code_lines)
 
@@ -848,12 +837,10 @@ Examples:
             codebase_tracker = services["codebase_tracker"]
             query_executor = services["query_executor"]
 
-            # Verify CPG exists for this codebase
             codebase_info = codebase_tracker.get_codebase(codebase_hash)
             if not codebase_info or not codebase_info.cpg_path:
                 raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
 
-            # Validate query if requested
             validation_result = None
             if validate:
                 validation_result = CPGQLValidator.validate_query(query.strip())
@@ -895,11 +882,9 @@ Examples:
             if not result.success and getattr(result, "error_code", None):
                 response["error_code"] = result.error_code
 
-            # If validation was requested, include it in response
             if validate and validation_result:
                 response["validation"] = validation_result
 
-            # If query failed, try to provide helpful suggestions from stderr (if available)
             if not response["success"] and result.error:
                 error_suggestion = CPGQLValidator.get_error_suggestion(result.error)
                 if error_suggestion:
@@ -953,7 +938,6 @@ Examples:
         try:
             validate_codebase_hash(codebase_hash)
 
-            # Parse the buffer access location
             if ":" not in buffer_access_location:
                 raise ValidationError(
                     "buffer_access_location must be in format 'filename:line'"
@@ -968,12 +952,10 @@ Examples:
             codebase_tracker = services["codebase_tracker"]
             query_executor = services["query_executor"]
 
-            # Verify CPG exists for this codebase
             codebase_info = codebase_tracker.get_codebase(codebase_hash)
             if not codebase_info or not codebase_info.cpg_path:
                 raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
 
-            # Load query from external file
             query = QueryLoader.load(
                 "bounds_checks",
                 filename=filename,
@@ -988,8 +970,7 @@ Examples:
             )
 
             if result.success and result.data:
-                # result.data is typically a list of results from the query
-                # for text queries, it's a list containing the text with <codebadger_result> tags
+                # Text queries return a single-element list wrapping the rendered text.
                 output = result.data[0] if isinstance(result.data, list) else str(result.data)
                 return output.strip()
             else:
@@ -1114,9 +1095,7 @@ Examples:
                 "error": str(e),
             }
 
-    # ============================================================================
-    # SEMANTIC ANALYSIS TOOLS
-    # ============================================================================
+    # Semantic analysis tools
 
     @mcp.tool(
         description="""Get control flow graph (CFG) for a method.
@@ -1162,7 +1141,6 @@ Examples:
             if not codebase_info or not codebase_info.cpg_path:
                 raise ValidationError(f"CPG not found for codebase {codebase_hash}")
 
-            # Load query from external file
             query = QueryLoader.load(
                 "cfg",
                 method_name=method_name,
@@ -1184,7 +1162,6 @@ Examples:
             if isinstance(result.data, str):
                 return result.data.strip()
             elif isinstance(result.data, list) and len(result.data) > 0:
-                # Extract string from list wrapper
                 output = result.data[0] if isinstance(result.data[0], str) else str(result.data[0])
                 return output.strip()
             else:
@@ -1241,7 +1218,6 @@ Examples:
             if not codebase_info or not codebase_info.cpg_path:
                 raise ValidationError(f"CPG not found for codebase {codebase_hash}")
 
-            # Load query from external file
             query = QueryLoader.load(
                 "type_definition",
                 type_name=type_name,
@@ -1335,7 +1311,6 @@ Examples:
             if not codebase_info or not codebase_info.cpg_path:
                 raise ValidationError(f"CPG not found for codebase {codebase_hash}")
 
-            # Load query from external file
             line_filter = f".lineNumber({line_number})" if line_number else ""
             query = QueryLoader.load(
                 "macro_expansion",
@@ -1364,15 +1339,14 @@ Examples:
                 for item in result.data:
                     if isinstance(item, dict):
                         name = item.get("_1", "")
-                        
-                        # Skip if already seen this name (deduplication)
+
                         if name in seen_names:
                             continue
                         seen_names.add(name)
-                        
+
                         dispatch = item.get("_5", "")
-                        
-                        # Multiple heuristics for macro detection
+
+                        # Macro detection combines several heuristics; any hit flags it.
                         hints = []
                         is_inlined = dispatch == "INLINED"
                         # ALL_CAPS: uppercase letters and underscores only, length > 1, not operators
@@ -1485,25 +1459,21 @@ Examples:
 
             codebase_tracker = services["codebase_tracker"]
 
-            # Verify CPG exists for this codebase
             codebase_info = codebase_tracker.get_codebase(codebase_hash)
             if not codebase_info:
                 raise ValidationError(f"Codebase {codebase_hash} not found. Generate it first using generate_cpg.")
 
             source_dir = _get_source_snapshot_dir(codebase_hash)
 
-            # Check if it's a git repository
             git_dir = os.path.join(source_dir, ".git")
             if not os.path.exists(git_dir):
                 return "Error: Source directory is not a git repository. This tool requires git history."
 
-            # Open the repository
             try:
                 repo = git.Repo(source_dir)
             except git.InvalidGitRepositoryError:
                 return "Error: Invalid git repository. Cannot analyze commit history."
 
-            # Use provided patterns or defaults
             vuln_patterns = patterns if patterns else DEFAULT_VULN_PATTERNS
             compiled_patterns = []
             for pattern in vuln_patterns:
@@ -1515,7 +1485,6 @@ Examples:
             if not compiled_patterns:
                 return "Error: No valid regex patterns to match against."
 
-            # Analyze commits
             discoveries = []
             commits_analyzed = 0
 
@@ -1523,8 +1492,7 @@ Examples:
                 for commit in repo.iter_commits(max_count=limit):
                     commits_analyzed += 1
                     message = commit.message.strip()
-                    
-                    # Check each pattern
+
                     matched_patterns = []
                     for pattern_str, pattern_re in compiled_patterns:
                         match = pattern_re.search(message)
@@ -1532,7 +1500,6 @@ Examples:
                             matched_patterns.append(match.group(0))
 
                     if matched_patterns:
-                        # Get files changed in this commit
                         try:
                             if commit.parents:
                                 diff = commit.parents[0].diff(commit)
@@ -1548,7 +1515,6 @@ Examples:
                             logger.debug(f"Could not get diff for commit {commit.hexsha[:7]}: {e}")
                             files_changed = []
 
-                        # Get first line of commit message for display
                         first_line = message.split('\n')[0][:80]
                         if len(message.split('\n')[0]) > 80:
                             first_line += "..."
@@ -1557,7 +1523,7 @@ Examples:
                             "sha": commit.hexsha[:7],
                             "message": first_line,
                             "matched": matched_patterns,
-                            "files": files_changed[:20],  # Limit files shown
+                            "files": files_changed[:20],
                             "total_files": len(files_changed),
                         })
 
@@ -1565,7 +1531,6 @@ Examples:
                 logger.error(f"Error iterating commits: {e}")
                 return f"Error: Failed to analyze git history: {str(e)}"
 
-            # Build output
             output_lines = [
                 "Discovered Vulnerability Fixes",
                 "=" * 60,

@@ -7,6 +7,10 @@ from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
+# Skip caching outputs larger than this (bytes); 0 disables the cap. Keeps the
+# tool_cache from bloating with rarely-reused multi-hundred-KB query dumps.
+MAX_CACHE_OUTPUT_BYTES = int(os.getenv("MAX_CACHE_OUTPUT_BYTES", "262144"))
+
 class DBManager:
     """SQLite database manager for CodeBadger"""
 
@@ -33,7 +37,6 @@ class DBManager:
         """Initialize database schema"""
         try:
             with self._get_connection() as conn:
-                # Codebases table
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS codebases (
                         hash TEXT PRIMARY KEY,
@@ -48,7 +51,6 @@ class DBManager:
                     )
                 """)
 
-                # Tool cache table
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS tool_cache (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -62,7 +64,6 @@ class DBManager:
                     )
                 """)
 
-                # Findings table for storing vulnerability findings
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS findings (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -83,7 +84,31 @@ class DBManager:
                     )
                 """)
 
-                # Create indexes for efficient querying
+                # Durable job queue (Phase 3): survives restarts so a 300-CVE
+                # batch is never dropped on a full in-memory queue. status is
+                # queued -> running -> done|failed.
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS jobs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        codebase_hash TEXT NOT NULL,
+                        job_type TEXT NOT NULL DEFAULT 'generate_cpg',
+                        status TEXT NOT NULL DEFAULT 'queued',
+                        payload TEXT,
+                        result TEXT,
+                        error TEXT,
+                        attempts INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                """)
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status, created_at)")
+                # At most one active (queued/running) job per codebase+type — the
+                # DB-level dedup that replaces the in-memory in-flight set.
+                conn.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_active_unique
+                    ON jobs(codebase_hash, job_type) WHERE status IN ('queued', 'running')
+                """)
+
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_codebase ON findings(codebase_hash)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_severity ON findings(severity)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_confidence ON findings(confidence)")
@@ -100,12 +125,11 @@ class DBManager:
         try:
             with self._get_connection() as conn:
                 now = datetime.now(timezone.utc).isoformat()
-                
-                # Ensure metadata is JSON string
+
                 if isinstance(data.get("metadata"), dict):
                     data["metadata"] = json.dumps(data["metadata"])
-                
-                # Check if exists to preserve created_at
+
+                # Preserve the original created_at on update.
                 cursor = conn.execute("SELECT created_at FROM codebases WHERE hash = ?", (data["hash"],))
                 existing = cursor.fetchone()
                 
@@ -134,6 +158,51 @@ class DBManager:
         except Exception as e:
             logger.error(f"Failed to save codebase: {e}")
             raise
+
+    _CODEBASE_COLUMNS = ("source_type", "source_path", "language", "cpg_path", "joern_port")
+
+    def update_codebase(self, codebase_hash: str, fields: Dict[str, Any]) -> bool:
+        """Atomically merge metadata and set scalar columns for one codebase.
+
+        Runs as a single BEGIN IMMEDIATE transaction so concurrent updates to the
+        same row serialize instead of racing on a read-modify-write of metadata,
+        which would silently drop one writer's keys. Returns False if the row is
+        absent. Only the keys present in `fields` are written; other columns are
+        left untouched (no stale-read overwrite)."""
+        conn = self._get_connection()
+        try:
+            conn.isolation_level = None  # manual transaction control
+            conn.execute("BEGIN IMMEDIATE")  # take the write lock up front
+            row = conn.execute(
+                "SELECT metadata FROM codebases WHERE hash = ?", (codebase_hash,)
+            ).fetchone()
+            if row is None:
+                conn.execute("ROLLBACK")
+                return False
+
+            sets, params = [], []
+            for col in self._CODEBASE_COLUMNS:
+                if col in fields:
+                    sets.append(f"{col} = ?")
+                    params.append(fields[col])
+            if isinstance(fields.get("metadata"), dict):
+                merged = json.loads(row["metadata"]) if row["metadata"] else {}
+                merged.update(fields["metadata"])
+                sets.append("metadata = ?")
+                params.append(json.dumps(merged))
+            sets.append("last_accessed = ?")
+            params.append(datetime.now(timezone.utc).isoformat())
+            params.append(codebase_hash)
+
+            conn.execute(f"UPDATE codebases SET {', '.join(sets)} WHERE hash = ?", params)
+            conn.commit()
+            return True
+        except Exception as e:
+            conn.execute("ROLLBACK")
+            logger.error(f"Failed to update codebase {codebase_hash}: {e}")
+            raise
+        finally:
+            conn.close()
 
     def get_codebase(self, codebase_hash: str) -> Optional[Dict[str, Any]]:
         """Get codebase information by hash"""
@@ -177,6 +246,174 @@ class DBManager:
             logger.error(f"Failed to list codebases: {e}")
             return []
 
+    def list_all(self) -> List[Dict[str, Any]]:
+        """Return ALL codebase rows in one query (read-only — no last_accessed write).
+
+        Used by /health and the status logger so they don't fan out into one
+        query per codebase (which on Postgres is one connection per codebase on
+        the event loop)."""
+        try:
+            with self._get_connection() as conn:
+                rows = conn.execute("SELECT * FROM codebases").fetchall()
+                out = []
+                for row in rows:
+                    d = dict(row)
+                    if d.get("metadata"):
+                        try:
+                            d["metadata"] = json.loads(d["metadata"])
+                        except (json.JSONDecodeError, TypeError):
+                            d["metadata"] = {}
+                    out.append(d)
+                return out
+        except Exception as e:
+            logger.error(f"Failed to list all codebases: {e}")
+            return []
+
+    # job queue (Phase 3)
+
+    def enqueue_job(
+        self,
+        codebase_hash: str,
+        job_type: str,
+        payload: Dict[str, Any],
+        max_queued: int = 0,
+    ) -> tuple:
+        """Enqueue a durable job. Returns (job_id|None, status).
+
+        status is 'submitted', 'duplicate' (an active job for this
+        codebase+type already exists — enforced by the partial unique index),
+        or 'queue_full' (queued count >= max_queued, when max_queued > 0).
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            with self._get_connection() as conn:
+                # Dedup takes precedence over backpressure: re-submitting a job
+                # that's already active is a 'duplicate', never 'queue_full'.
+                existing = conn.execute(
+                    "SELECT id FROM jobs WHERE codebase_hash = ? AND job_type = ? "
+                    "AND status IN ('queued', 'running') LIMIT 1",
+                    (codebase_hash, job_type),
+                ).fetchone()
+                if existing:
+                    return existing["id"], "duplicate"
+                if max_queued and max_queued > 0:
+                    queued = conn.execute(
+                        "SELECT COUNT(*) AS c FROM jobs WHERE status = 'queued'"
+                    ).fetchone()["c"]
+                    if queued >= max_queued:
+                        return None, "queue_full"
+                try:
+                    cur = conn.execute(
+                        "INSERT INTO jobs (codebase_hash, job_type, status, payload, "
+                        "attempts, created_at, updated_at) VALUES (?, ?, 'queued', ?, 0, ?, ?)",
+                        (codebase_hash, job_type, json.dumps(payload), now, now),
+                    )
+                    conn.commit()
+                    return cur.lastrowid, "submitted"
+                except sqlite3.IntegrityError:
+                    # Active job already exists (unique index violation).
+                    row = conn.execute(
+                        "SELECT id FROM jobs WHERE codebase_hash = ? AND job_type = ? "
+                        "AND status IN ('queued', 'running') LIMIT 1",
+                        (codebase_hash, job_type),
+                    ).fetchone()
+                    return (row["id"] if row else None), "duplicate"
+        except Exception as e:
+            logger.error(f"Failed to enqueue job for {codebase_hash}: {e}")
+            return None, "error"
+
+    def claim_next_job(self, job_type: str) -> Optional[Dict[str, Any]]:
+        """Atomically claim the oldest queued job of job_type (queued -> running).
+
+        Uses a single UPDATE ... RETURNING so concurrent workers each claim a
+        distinct row under SQLite's write lock (Postgres backend would use
+        FOR UPDATE SKIP LOCKED). Returns the claimed job dict, or None if none.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            with self._get_connection() as conn:
+                row = conn.execute(
+                    "UPDATE jobs SET status = 'running', attempts = attempts + 1, updated_at = ? "
+                    "WHERE id = (SELECT id FROM jobs WHERE status = 'queued' AND job_type = ? "
+                    "ORDER BY created_at LIMIT 1) "
+                    "RETURNING id, codebase_hash, job_type, payload, attempts",
+                    (now, job_type),
+                ).fetchone()
+                conn.commit()
+                if not row:
+                    return None
+                job = dict(row)
+                job["payload"] = json.loads(job["payload"]) if job["payload"] else {}
+                return job
+        except Exception as e:
+            logger.error(f"Failed to claim job: {e}")
+            return None
+
+    def complete_job(self, job_id: int, result: Optional[Any] = None) -> None:
+        self._finish_job(job_id, "done", result=result)
+
+    def fail_job(self, job_id: int, error: str) -> None:
+        self._finish_job(job_id, "failed", error=error)
+
+    def _finish_job(self, job_id: int, status: str, result: Any = None, error: str = None) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            with self._get_connection() as conn:
+                conn.execute(
+                    "UPDATE jobs SET status = ?, result = ?, error = ?, updated_at = ? WHERE id = ?",
+                    (status, json.dumps(result) if result is not None else None, error, now, job_id),
+                )
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Failed to finish job {job_id}: {e}")
+
+    def get_job(self, job_id: int) -> Optional[Dict[str, Any]]:
+        try:
+            with self._get_connection() as conn:
+                row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+                if not row:
+                    return None
+                job = dict(row)
+                if job.get("payload"):
+                    job["payload"] = json.loads(job["payload"])
+                return job
+        except Exception as e:
+            logger.error(f"Failed to get job {job_id}: {e}")
+            return None
+
+    def count_jobs(self, status: Optional[str] = None) -> int:
+        try:
+            with self._get_connection() as conn:
+                if status:
+                    row = conn.execute(
+                        "SELECT COUNT(*) AS c FROM jobs WHERE status = ?", (status,)
+                    ).fetchone()
+                else:
+                    row = conn.execute("SELECT COUNT(*) AS c FROM jobs").fetchone()
+                return row["c"]
+        except Exception as e:
+            logger.error(f"Failed to count jobs: {e}")
+            return 0
+
+    def requeue_running_jobs(self) -> int:
+        """Reset jobs left 'running' by a crashed worker back to 'queued'.
+
+        Called at startup so interrupted CPG builds are retried rather than
+        stuck. Returns the number of jobs requeued.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            with self._get_connection() as conn:
+                cur = conn.execute(
+                    "UPDATE jobs SET status = 'queued', updated_at = ? WHERE status = 'running'",
+                    (now,),
+                )
+                conn.commit()
+                return cur.rowcount
+        except Exception as e:
+            logger.error(f"Failed to requeue running jobs: {e}")
+            return 0
+
     def delete_codebase(self, codebase_hash: str) -> bool:
         """Delete a codebase record and its associated findings."""
         try:
@@ -195,14 +432,22 @@ class DBManager:
         """Cache tool output"""
         try:
             import hashlib
-            
-            # Create a stable hash of parameters
+
+            # sort_keys makes the hash stable across dict orderings.
             param_str = json.dumps(parameters, sort_keys=True)
             param_hash = hashlib.sha256(param_str.encode()).hexdigest()
-            
+
+            output_str = json.dumps(output)
+            if MAX_CACHE_OUTPUT_BYTES and len(output_str) > MAX_CACHE_OUTPUT_BYTES:
+                logger.debug(
+                    f"Skipping cache for {tool_name} ({len(output_str)} bytes > "
+                    f"{MAX_CACHE_OUTPUT_BYTES} cap)"
+                )
+                return
+
             with self._get_connection() as conn:
                 now = datetime.now(timezone.utc).isoformat()
-                
+
                 conn.execute("""
                     INSERT OR REPLACE INTO tool_cache (
                         tool_name, codebase_hash, parameters_hash, parameters, output, created_at
@@ -212,13 +457,13 @@ class DBManager:
                     codebase_hash,
                     param_hash,
                     param_str,
-                    json.dumps(output),
+                    output_str,
                     now
                 ))
                 conn.commit()
         except Exception as e:
+            # Caching is best-effort; never fail the caller on a cache write error.
             logger.error(f"Failed to cache tool output: {e}")
-            # Don't raise, just log error as caching is optional
 
     def get_cached_tool_output(self, tool_name: str, codebase_hash: str, parameters: Dict[str, Any], cache_ttl: int = 300) -> Optional[Any]:
         """Get cached tool output if not expired.
@@ -246,9 +491,8 @@ class DBManager:
                 
                 row = cursor.fetchone()
                 if row:
-                    # Check if entry is expired
                     created_at = datetime.fromisoformat(row["created_at"])
-                    # Ensure created_at is timezone-aware
+                    # Older rows may lack tzinfo; treat naive timestamps as UTC.
                     if created_at.tzinfo is None:
                         created_at = created_at.replace(tzinfo=timezone.utc)
                     now = datetime.now(timezone.utc)
@@ -316,7 +560,6 @@ class DBManager:
             with self._get_connection() as conn:
                 now = datetime.now(timezone.utc).isoformat()
 
-                # Ensure metadata and flow_data are JSON strings
                 if isinstance(finding_data.get("metadata"), dict):
                     finding_data["metadata"] = json.dumps(finding_data["metadata"])
                 if isinstance(finding_data.get("flow_data"), dict):
@@ -364,7 +607,6 @@ class DBManager:
                 count = 0
 
                 for finding_data in findings:
-                    # Ensure metadata and flow_data are JSON strings
                     if isinstance(finding_data.get("metadata"), dict):
                         finding_data["metadata"] = json.dumps(finding_data["metadata"])
                     if isinstance(finding_data.get("flow_data"), dict):
@@ -417,7 +659,7 @@ class DBManager:
                 query = "SELECT * FROM findings WHERE codebase_hash = ?"
                 params = [codebase_hash]
 
-                # Build severity filter if provided
+                # min_severity is a floor: expand it to every level at or above it.
                 severity_order = {"critical": 4, "high": 3, "medium": 2, "low": 1}
                 if min_severity and min_severity in severity_order:
                     min_sev_val = severity_order[min_severity]
@@ -426,7 +668,6 @@ class DBManager:
                         query += f" AND severity IN ({','.join(['?'] * len(severity_levels))})"
                         params.extend(severity_levels)
 
-                # Build confidence filter if provided
                 if min_confidence and min_confidence in ("high", "medium", "low"):
                     conf_order = {"high": 3, "medium": 2, "low": 1}
                     min_conf_val = conf_order[min_confidence]
@@ -435,7 +676,6 @@ class DBManager:
                         query += f" AND confidence IN ({','.join(['?'] * len(confidence_levels))})"
                         params.extend(confidence_levels)
 
-                # Filter by type if provided
                 if finding_type:
                     query += " AND finding_type = ?"
                     params.append(finding_type)
@@ -446,7 +686,6 @@ class DBManager:
                 results = []
                 for row in cursor.fetchall():
                     data = dict(row)
-                    # Parse JSON fields
                     if data.get("metadata"):
                         try:
                             data["metadata"] = json.loads(data["metadata"])
@@ -478,7 +717,6 @@ class DBManager:
                 row = cursor.fetchone()
                 if row:
                     data = dict(row)
-                    # Parse JSON fields
                     if data.get("metadata"):
                         try:
                             data["metadata"] = json.loads(data["metadata"])
@@ -524,26 +762,22 @@ class DBManager:
         """
         try:
             with self._get_connection() as conn:
-                # Total count
                 cursor = conn.execute("SELECT COUNT(*) as count FROM findings WHERE codebase_hash = ?",
                                     (codebase_hash,))
                 total = cursor.fetchone()["count"]
 
-                # Count by severity
                 cursor = conn.execute("""
                     SELECT severity, COUNT(*) as count FROM findings
                     WHERE codebase_hash = ? GROUP BY severity
                 """, (codebase_hash,))
                 by_severity = {row["severity"]: row["count"] for row in cursor.fetchall()}
 
-                # Count by type
                 cursor = conn.execute("""
                     SELECT finding_type, COUNT(*) as count FROM findings
                     WHERE codebase_hash = ? GROUP BY finding_type
                 """, (codebase_hash,))
                 by_type = {row["finding_type"]: row["count"] for row in cursor.fetchall()}
 
-                # Count by confidence
                 cursor = conn.execute("""
                     SELECT confidence, COUNT(*) as count FROM findings
                     WHERE codebase_hash = ? GROUP BY confidence

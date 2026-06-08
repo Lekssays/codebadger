@@ -29,10 +29,6 @@ from src.tools.mcp_tools import register_tools
 from fastmcp import FastMCP, Client
 
 
-# ---------------------------------------------------------------------------
-# Shared helper
-# ---------------------------------------------------------------------------
-
 def _make_services(text_output: str) -> dict:
     """Build a fake-services dict whose query executor returns *text_output*."""
     codebase_tracker = MagicMock()
@@ -68,10 +64,6 @@ def _make_services(text_output: str) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# Section A — Original tests
-# ---------------------------------------------------------------------------
-
 @pytest.fixture
 def fake_services_slice():
     """Create mock services for program slice tests."""
@@ -97,7 +89,6 @@ def fake_services_slice():
         elif len(args) > 2:
             query_executor.last_query = args[2]
 
-        # Return realistic text output (backward slice)
         text_output = """Program Slice for memcpy at tree.c:195
 ============================================================
 Code: memcpy(&ret[0], prefix, lenp)
@@ -215,7 +206,6 @@ async def test_get_program_slice_backward(fake_services_slice):
             "max_depth": 5
         })).content[0].text
 
-        # Check text output contains key information
         assert "Program Slice for memcpy" in res_text
         assert "at tree.c:195" in res_text
         assert "[BACKWARD SLICE]" in res_text
@@ -295,7 +285,6 @@ async def test_get_program_slice_depth_limiting(fake_services_slice):
             "max_depth": 3
         })
 
-        # Verify the query contains the depth limit
         query = fake_services_slice["query_executor"].last_query
         assert "maxDepth = 3" in query
 
@@ -334,16 +323,9 @@ async def test_get_program_slice_invalid_location_format(fake_services_slice):
         assert "location must be" in res_text
 
 
-# ---------------------------------------------------------------------------
-# Section B — Anchor-type coverage (Points 1a / 1b / 1c)
-#
-# Source: playground/codebases/core/src/slice_scenarios.c
-#
-# Old logic only anchored on CALL nodes; these three functions expose:
-#   1a — compound assignment  (&=)        fill_runs():20
-#   1b — pointer-write        (*op++=val) fill_buffer():33
-#   1c — pure shift           (1L<<n)     compute_top():43
-# ---------------------------------------------------------------------------
+# Old logic only anchored on CALL nodes; these tests exercise anchors that are
+# not named function calls (Points 1a/1b/1c), mirroring real CVE crash sites in
+# playground/codebases/core/src/slice_scenarios.c.
 
 @pytest.mark.asyncio
 async def test_slice_compound_assignment_anchor():
@@ -387,17 +369,14 @@ Variables: cp, fillmasks, run, bx
             "direction": "backward",
         })).content[0].text
 
-    # Anchor is a compound-assignment operator, not a named function call
     assert "assignmentAnd" in res_text
     assert "cp[0] &=" in res_text
     assert "fill_runs" in res_text
     assert "[BACKWARD SLICE]" in res_text
-    # All four parameters traced back
     assert "cp" in res_text
     assert "fillmasks" in res_text
     assert "run" in res_text
     assert "bx" in res_text
-    # Must NOT be an error
     assert "ERROR" not in res_text
 
 
@@ -488,16 +467,10 @@ Variables: top, bitspersample
     assert "ERROR" not in res_text
 
 
-# ---------------------------------------------------------------------------
-# Section C — Header-file inline functions (Point 2)
-#
-# Source: playground/codebases/core/include/slice_inline.h
-#
 # c2cpg assigns "static inline" header functions to <global>; the old
 # filterNot(_.name == "<global>") guard silently dropped them, producing
-# "ERROR: No method found".  The improved targetMethodOpt falls back to
-# include <global> when no enclosing non-global method is found.
-# ---------------------------------------------------------------------------
+# "ERROR: No method found". The improved targetMethodOpt falls back to <global>
+# when no enclosing non-global method is found (Point 2).
 
 @pytest.mark.asyncio
 async def test_slice_header_inline_backward():
@@ -534,7 +507,6 @@ Variables: red_green, pixel
             "direction": "backward",
         })).content[0].text
 
-    # <global> fallback must surface the method — not an error
     assert "ERROR: No method found" not in res_text
     assert "is_pixel_gray" in res_text
     assert "pixel" in res_text
@@ -582,15 +554,9 @@ Variables: atom, type
     assert "m_Type" in res_text
 
 
-# ---------------------------------------------------------------------------
-# Section D — C++ virtual dispatch (Point 3)
-#
-# Source: playground/codebases/core/src/slice_cpp.cpp
-#
-# c2cpg handles C++ but method.callIn on a virtual method finds no callers;
-# the improved backwardTrace also scans cpg.call where dispatchType ==
-# "DYNAMIC_DISPATCH" to pick up virtual call sites.
-# ---------------------------------------------------------------------------
+# method.callIn on a C++ virtual method finds no callers; the improved
+# backwardTrace also scans cpg.call where dispatchType == "DYNAMIC_DISPATCH" to
+# pick up virtual call sites (Point 3).
 
 @pytest.mark.asyncio
 async def test_slice_cpp_virtual_dispatch():
@@ -640,16 +606,10 @@ Variables: m_SttsAtom, index, dts, duration
     assert "ERROR" not in res_text
 
 
-# ---------------------------------------------------------------------------
-# Section E — Struct-field and typed-declaration tracking (Points 6a / 6b)
-#
-# Source: playground/codebases/core/src/slice_scenarios.c
-#
-# 6a — seed variable "lyrno" must match assignment target "pi->lyrno"
-#      via the endsWith("->" + varName) filter added to backwardTrace.
+# 6a — seed variable "lyrno" must match assignment target "pi->lyrno" via the
+#      endsWith("->" + varName) filter added to backwardTrace.
 # 6b — typed declaration "OJPEGState *sp = expr" may not emit an
 #      <operator>.assignment CALL; tracked via method.local fallback.
-# ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_slice_struct_field_seed():
@@ -697,7 +657,6 @@ Variables: pi, lyrno, maxlyrno
     # Assignment target pi->lyrno = 0 at line 56 must be in dependencies
     assert "pi->lyrno = 0" in res_text
     assert "slice_scenarios.c:56" in res_text
-    # Control structure spanning the loop
     assert "FOR" in res_text
     assert "ERROR" not in res_text
 
@@ -751,16 +710,10 @@ Variables: cc, sp, bytes_per_line
     assert "ERROR" not in res_text
 
 
-# ---------------------------------------------------------------------------
-# Section F — Macro-expansion anchor (Point 7)
-#
-# Source: playground/codebases/core/src/slice_scenarios.c
-#
-# SLICE_GET32 expands to a cast+deref — only operator nodes, no CALL.
-# findAnchor() first tries the exact line; if it finds only operator-calls
-# it falls through all tiers.  The ±3-line fallback then locates the
-# surrounding assignment node as the anchor.
-# ---------------------------------------------------------------------------
+# SLICE_GET32 expands to a cast+deref — only operator nodes, no CALL. When
+# findAnchor() finds only operator-calls on the exact line it falls through all
+# tiers; the ±3-line fallback then locates the surrounding assignment node as the
+# anchor (Point 7).
 
 @pytest.mark.asyncio
 async def test_slice_macro_fallback():
@@ -810,17 +763,10 @@ Variables: diskstart, block, off
     assert "[BACKWARD SLICE]" in res_text
 
 
-# ---------------------------------------------------------------------------
-# Section G — Forward slice for patch differentiation (Point 9)
-#
-# Source: playground/codebases/core/src/slice_scenarios.c
-#
-# vulnerable_init() assigns sp->bytes_per_line = w (line 104) then
-# crashes at the modulo check (line 105).
-# A forward slice from the patch site (line 104) shows how bytes_per_line
-# propagates to the crash site — providing the data-flow diff between
-# the vulnerable and patched versions.
-# ---------------------------------------------------------------------------
+# vulnerable_init() assigns sp->bytes_per_line = w (line 104) then crashes at the
+# modulo check (line 105). A forward slice from the patch site shows how
+# bytes_per_line propagates to the crash site — the data-flow diff between the
+# vulnerable and patched versions (Point 9).
 
 @pytest.mark.asyncio
 async def test_slice_forward_patch_differentiation():
@@ -912,14 +858,9 @@ Variables: w, sp, bytes_per_line
     assert "slice_scenarios.c:104" in res_text
 
 
-# ---------------------------------------------------------------------------
-# Section H — Error surfacing (Point 5)
-#
-# When no anchor is found (wrong line, method not in CPG, etc.) the Scala
-# query emits an ERROR: ... message.  The Python tool must surface this
-# verbatim instead of silently writing an empty-dependencies JSON and
-# printing "[ok]".
-# ---------------------------------------------------------------------------
+# When no anchor is found (wrong line, method not in CPG, etc.) the Scala query
+# emits an ERROR: ... message. The Python tool must surface this verbatim instead
+# of silently writing an empty-dependencies JSON and printing "[ok]" (Point 5).
 
 @pytest.mark.asyncio
 async def test_slice_error_text_surfaced():

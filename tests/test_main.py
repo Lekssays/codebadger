@@ -48,7 +48,7 @@ class TestLifespan:
         ), patch(
             "main.register_tools"
         ), patch(
-            "main.DBManager"
+            "main.PostgresDBManager"
         ), patch(
             "main.PortManager"
         ), patch(
@@ -124,7 +124,7 @@ class TestLifespan:
         ), patch(
             "main.register_tools"
         ), patch(
-            "main.DBManager"
+            "main.PostgresDBManager"
         ), patch(
             "main.PortManager"
         ), patch(
@@ -205,16 +205,16 @@ class TestEndpoints:
         mock_request = AsyncMock()
 
         tracker = MagicMock()
-        tracker.list_codebases.return_value = ["553642871dd4251d"]
-        tracker.get_codebase.return_value = CodebaseInfo(
+        tracker.list_codebases_full.return_value = [CodebaseInfo(
             codebase_hash="553642871dd4251d",
             source_type="local",
             source_path="/Users/example/private-repo",
             language="python",
             cpg_path="/tmp/test.cpg",
             metadata={"status": "ready"},
-        )
+        )]
         main.services["codebase_tracker"] = tracker
+        main.services["joern_server_manager"] = None
 
         with patch("main._check_joern_container_status", return_value={"status": "running", "running": True}), \
              patch("main._get_active_servers", return_value={"count": 0, "servers": {}}), \
@@ -240,22 +240,83 @@ class TestHealthHelpers:
         from src.models import CodebaseInfo
 
         tracker = MagicMock()
-        tracker.list_codebases.return_value = ["553642871dd4251d"]
-        tracker.get_codebase.return_value = CodebaseInfo(
+        tracker.list_codebases_full.return_value = [CodebaseInfo(
             codebase_hash="553642871dd4251d",
             source_type="github",
             source_path="https://github.com/acme/private-repo",
             language="python",
             cpg_path="/tmp/test.cpg",
             metadata={"status": "ready"},
-        )
+        )]
         main.services["codebase_tracker"] = tracker
+        main.services["joern_server_manager"] = None
 
         redacted = main._get_codebase_list()
         detailed = main._get_codebase_list(include_sensitive=True)
 
         assert redacted[0]["source"] == "<redacted:github>"
         assert detailed[0]["source"] == "https://github.com/acme/private-repo"
+
+
+class TestEffectiveConfigSelfCheck:
+    """The startup self-check logs resolved config and flags env-vs-effective drift."""
+
+    def _config(self, worker_mode="shared", queue_backend="memory"):
+        cfg = MagicMock()
+        cfg.joern.worker_mode = worker_mode
+        cfg.joern.memory_budget_mb = 8192
+        cfg.cpg.queue_backend = queue_backend
+        cfg.cpg.build_heap_gb = 6
+        cfg.cpg.build_workers = 4
+        return cfg
+
+    def test_logs_effective_config_without_drift(self):
+        coordinator = MagicMock()
+        coordinator.backend = "in-process"
+        main.services["coordinator"] = coordinator
+        main.services["cpg_queue"] = MagicMock()
+        main.services["joern_server_manager"] = None
+
+        with patch("main.logger") as mock_logger, patch.dict(
+            "os.environ", {}, clear=True
+        ):
+            main._log_effective_config(self._config())
+
+        infos = " ".join(str(c.args[0]) for c in mock_logger.info.call_args_list)
+        assert "Effective runtime configuration" in infos
+        mock_logger.warning.assert_not_called()
+
+    def test_flags_queue_backend_env_drift(self):
+        """CPG_QUEUE_BACKEND=durable but effective memory → a warning."""
+        coordinator = MagicMock()
+        coordinator.backend = "in-process"
+        main.services["coordinator"] = coordinator
+        main.services["cpg_queue"] = MagicMock()
+        main.services["joern_server_manager"] = None
+
+        with patch("main.logger") as mock_logger, patch.dict(
+            "os.environ", {"CPG_QUEUE_BACKEND": "durable"}, clear=True
+        ):
+            main._log_effective_config(self._config(queue_backend="memory"))
+
+        warnings = " ".join(str(c.args[0]) for c in mock_logger.warning.call_args_list)
+        assert "CPG_QUEUE_BACKEND=durable" in warnings
+        assert "queue_backend=memory" in warnings
+
+    def test_flags_redis_set_but_unused(self):
+        coordinator = MagicMock()
+        coordinator.backend = "in-process"
+        main.services["coordinator"] = coordinator
+        main.services["cpg_queue"] = MagicMock()
+        main.services["joern_server_manager"] = None
+
+        with patch("main.logger") as mock_logger, patch.dict(
+            "os.environ", {"REDIS_URL": "redis://localhost:56379/0"}, clear=True
+        ):
+            main._log_effective_config(self._config(worker_mode="shared"))
+
+        warnings = " ".join(str(c.args[0]) for c in mock_logger.warning.call_args_list)
+        assert "REDIS_URL is set" in warnings
 
 
 class TestShutdown:
