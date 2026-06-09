@@ -102,27 +102,48 @@ def _get_active_restart_task(services: dict, codebase_hash: str) -> Optional[asy
 
 
 def _schedule_restart_server_task(codebase_hash: str, container_cpg_path: str, services: dict) -> bool:
-    if _get_active_restart_task(services, codebase_hash):
-        return False
+    """Schedule a background Joern-server restart.
 
-    task = asyncio.create_task(
-        _restart_server_async(
-            codebase_hash=codebase_hash,
-            container_cpg_path=container_cpg_path,
-            services=services,
-        )
-    )
+    Returns True if a restart task was started (or is already running), False if
+    no event loop was available to run it. Sync MCP tools (get_cpg_status) run in
+    a worker thread with no running loop, so we fall back to scheduling onto the
+    captured main loop via run_coroutine_threadsafe — otherwise the coroutine is
+    dropped and the codebase is stranded in "loading" forever.
+    """
+    if _get_active_restart_task(services, codebase_hash):
+        return True
 
     registry = _get_restart_task_registry(services)
-    registry[codebase_hash] = task
 
-    def _cleanup(done_task: asyncio.Task) -> None:
-        current_task = registry.get(codebase_hash)
-        if current_task is done_task:
+    def _cleanup(done_handle) -> None:
+        if registry.get(codebase_hash) is done_handle:
             registry.pop(codebase_hash, None)
 
-    task.add_done_callback(_cleanup)
-    return True
+    coro = _restart_server_async(
+        codebase_hash=codebase_hash,
+        container_cpg_path=container_cpg_path,
+        services=services,
+    )
+
+    try:
+        # Fast path: we're already on the event loop (async caller).
+        task = asyncio.get_running_loop().create_task(coro)
+        registry[codebase_hash] = task
+        task.add_done_callback(_cleanup)
+        return True
+    except RuntimeError:
+        # No running loop in this thread — schedule onto the main server loop.
+        main_loop = services.get("event_loop")
+        if main_loop is None or main_loop.is_closed():
+            coro.close()  # avoid "coroutine was never awaited" warning
+            logger.warning(
+                f"No usable event loop to restart Joern server for {codebase_hash}"
+            )
+            return False
+        future = asyncio.run_coroutine_threadsafe(coro, main_loop)
+        registry[codebase_hash] = future
+        future.add_done_callback(_cleanup)
+        return True
 
 
 def _get_git_commit_hash(path: str) -> Optional[str]:
@@ -350,9 +371,24 @@ async def _restart_server_async(
         )
         logger.info(f"Async: Joern server started on port {joern_port}, loading CPG...")
 
-        await loop.run_in_executor(
+        loaded = await loop.run_in_executor(
             None, joern_server_manager.load_cpg, codebase_hash, container_cpg_path
         )
+        if not loaded:
+            # The reload failed (load_cpg already terminated the server). Mark
+            # FAILED so we don't leave a "ready" codebase whose server is dead —
+            # that caused the restart-fail churn (server not running for ready
+            # codebase -> retry -> fail -> repeat).
+            logger.error(f"Async: CPG reload failed for {codebase_hash}; marking failed")
+            codebase_tracker.update_codebase(
+                codebase_hash=codebase_hash,
+                joern_port=None,
+                metadata={
+                    "status": SessionStatus.FAILED,
+                    "error": "CPG exists but failed to reload into a Joern server",
+                },
+            )
+            return
         logger.info(f"Async: CPG loaded into Joern server on port {joern_port}")
 
         codebase_tracker.update_codebase(
@@ -1213,36 +1249,58 @@ Examples:
             joern_port = codebase_info.joern_port
             joern_server_manager = services.get("joern_server_manager")
 
+            # Reconcile a stranded "loading": a codebase left in LOADING with a
+            # recorded error, or with no active restart task behind it, is a
+            # zombie from a restart that never ran (e.g. the old sync-thread
+            # create_task drop). Surface it as failed so callers stop polling
+            # forever instead of waiting on a load that will never complete.
+            if status in ("loading", SessionStatus.LOADING):
+                has_error = bool(codebase_info.metadata.get("error"))
+                if has_error or not _get_active_restart_task(services, codebase_hash):
+                    status = "failed"
+                    if not codebase_info.metadata.get("error"):
+                        codebase_info.metadata["error"] = (
+                            "Joern server load was interrupted and never completed"
+                        )
+                    codebase_tracker.update_codebase(
+                        codebase_hash=codebase_hash,
+                        joern_port=None,
+                        metadata={**codebase_info.metadata, "status": SessionStatus.FAILED},
+                    )
+
             # Sleeping means CPG on disk but server evicted — treat like ready-but-not-running
             needs_restart = status in ("ready", "sleeping")
             if needs_restart and joern_server_manager:
                 is_running = bool(joern_port and joern_server_manager.is_server_running(codebase_hash))
 
                 if not is_running:
-                    logger.info(f"Joern server not running for {status} codebase {codebase_hash}, restarting in background...")
-                    joern_port = None
-                    status = "loading"
-
                     container_cpg_path = codebase_info.metadata.get("container_cpg_path")
                     if not container_cpg_path:
                         container_cpg_path = f"/playground/cpgs/{codebase_hash}/cpg.bin"
 
-                    if not _get_active_restart_task(services, codebase_hash):
+                    # Only report/persist "loading" if a background restart
+                    # actually started — otherwise leave the prior status so the
+                    # next poll retries instead of stranding it in "loading".
+                    scheduled = _schedule_restart_server_task(
+                        codebase_hash=codebase_hash,
+                        container_cpg_path=container_cpg_path,
+                        services=services,
+                    )
+                    if scheduled:
+                        logger.info(f"Joern server not running for {status} codebase {codebase_hash}, restarting in background...")
+                        joern_port = None
+                        status = "loading"
                         codebase_tracker.update_codebase(
                             codebase_hash=codebase_hash,
                             joern_port=None,
                             metadata={"status": SessionStatus.LOADING, **{k: v for k, v in codebase_info.metadata.items() if k != "status"}}
                         )
+                    else:
+                        logger.warning(
+                            f"Could not start background restart for {codebase_hash}; "
+                            f"reporting '{status}' so the next poll retries"
+                        )
 
-                        try:
-                            _schedule_restart_server_task(
-                                codebase_hash=codebase_hash,
-                                container_cpg_path=container_cpg_path,
-                                services=services,
-                            )
-                        except RuntimeError:
-                            logger.warning(f"No event loop for async restart of {codebase_hash}")
-            
             response = {
                 "codebase_hash": codebase_hash,
                 "status": status,

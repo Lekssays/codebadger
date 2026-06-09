@@ -484,6 +484,10 @@ async def app_lifespan(server: FastMCP):
 
         services['config'] = config
         services['db_manager'] = db_manager
+        # The main server event loop. Sync MCP tools (e.g. get_cpg_status) run in
+        # worker threads with no running loop, so they schedule background work
+        # (Joern server restarts) onto this loop via run_coroutine_threadsafe.
+        services['event_loop'] = asyncio.get_running_loop()
         services['startup_issues'] = []
         services['codebase_tracker'] = CodebaseTracker(db_manager)
         services['git_manager'] = GitManager(config.storage.workspace_root)
