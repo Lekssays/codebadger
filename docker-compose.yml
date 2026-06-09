@@ -43,6 +43,11 @@ services:
       DATABASE_URL: postgresql://codebadger:codebadger@localhost:${POSTGRES_PORT:-55432}/codebadger
       REDIS_URL: redis://localhost:${REDIS_PORT:-56379}/0
       CPG_QUEUE_BACKEND: ${CPG_QUEUE_BACKEND:-durable}
+      # Large-project guard: set CPG_LARGE_PROJECT_GUARD=false for unattended/batch
+      # drivers that always intend to build (they can't pass force=True per call).
+      CPG_LARGE_PROJECT_GUARD: ${CPG_LARGE_PROJECT_GUARD:-true}
+      CPG_LARGE_PROJECT_MAX_MB: ${CPG_LARGE_PROJECT_MAX_MB:-2000}
+      CPG_LARGE_PROJECT_MAX_LOC: ${CPG_LARGE_PROJECT_MAX_LOC:-2000000}
       # Memory sizing — run scripts/recommend_config.py for your host. JOERN_MEM_LIMIT
       # MUST match the joern-server build cap below so the MCP's over-commit guard
       # leaves the right amount for the query-worker pool. 0 = auto-derive the budget.
