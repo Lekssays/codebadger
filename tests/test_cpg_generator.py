@@ -206,3 +206,82 @@ class TestCPGGenerator:
         container_path = "/playground/cpgs/hash123/cpg.bin"
         result = generator._host_to_container_path(container_path)
         assert result == "/playground/cpgs/hash123/cpg.bin"
+
+
+class TestApplyOverlays:
+    """Tests for #7: persisting Joern overlays into cpg.bin at build time.
+
+    Overlays must be applied once in the big-heap build container so that memory-
+    capped query workers can deserialize the CPG instead of recomputing the dataflow
+    overlay (which OOMs tier-S workers -> "No projects loaded").
+    """
+
+    def _gen(self):
+        from src.models import (
+            Config, CPGConfig, JoernConfig, ServerConfig, QueryConfig, StorageConfig,
+        )
+        cfg = Config(
+            server=ServerConfig(),
+            joern=JoernConfig(),
+            cpg=CPGConfig(generation_timeout=600, build_heap_gb=32),
+            query=QueryConfig(),
+            storage=StorageConfig(),
+        )
+        return CPGGenerator(cfg)
+
+    def test_apply_overlays_success_builds_correct_command(self):
+        gen = self._gen()
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            m = Mock()
+            m.returncode = 0
+            m.stdout = "OVERLAY_OK bytes=108748947\n"
+            m.stderr = ""
+            return m
+
+        with patch("src.services.cpg_generator.subprocess.run", side_effect=fake_run):
+            ok = gen._apply_overlays("/playground/cpgs/deadbeefdeadbeef/cpg.bin",
+                                     "deadbeefdeadbeef", 32)
+        assert ok is True
+        cmd = captured["cmd"]
+        # Runs in the Joern build container via bash -lc, with the build heap.
+        assert cmd[0:2] == ["docker", "exec"]
+        assert "codebadger-joern-server" in cmd
+        assert "bash" in cmd and "-lc" in cmd
+        joined = " ".join(cmd)
+        assert "-Xmx32G" in joined
+        assert "/opt/joern/joern-cli/joern --script" in joined
+        # Imports the built cpg and promotes the overlaid result back over it.
+        assert 'importCpg' in joined
+        assert "/playground/cpgs/deadbeefdeadbeef/cpg.bin" in joined
+
+    def test_apply_overlays_failure_is_best_effort(self):
+        gen = self._gen()
+
+        def fake_run(cmd, **kwargs):
+            if "rm" in cmd and "-rf" in cmd:  # cleanup call
+                m = Mock(); m.returncode = 0; m.stdout = ""; m.stderr = ""; return m
+            m = Mock(); m.returncode = 3; m.stdout = "OVERLAY_NO_OUTPUT\n"; m.stderr = ""
+            return m
+
+        with patch("src.services.cpg_generator.subprocess.run", side_effect=fake_run):
+            ok = gen._apply_overlays("/playground/cpgs/deadbeefdeadbeef/cpg.bin",
+                                     "deadbeefdeadbeef", 32)
+        # Failure must NOT raise (base CPG kept; worker falls back to recompute).
+        assert ok is False
+
+    def test_apply_overlays_timeout_is_best_effort(self):
+        import subprocess as _sp
+        gen = self._gen()
+
+        def fake_run(cmd, **kwargs):
+            if "rm" in cmd and "-rf" in cmd:
+                m = Mock(); m.returncode = 0; m.stdout = ""; m.stderr = ""; return m
+            raise _sp.TimeoutExpired(cmd, 600)
+
+        with patch("src.services.cpg_generator.subprocess.run", side_effect=fake_run):
+            ok = gen._apply_overlays("/playground/cpgs/deadbeefdeadbeef/cpg.bin",
+                                     "deadbeefdeadbeef", 32)
+        assert ok is False

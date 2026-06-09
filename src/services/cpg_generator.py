@@ -90,8 +90,16 @@ class CPGGenerator:
 
                 logger.info(f"Container paths: src={container_source_path}, cpg={container_cpg_path}")
 
-                # Get Java opts from config
-                java_opts = self.config.joern.java_opts or "-Xmx2G -Xms512M"
+                # Size the build JVM from CPG_BUILD_HEAP_GB. The frontend (c2cpg)
+                # and the overlay pass both run here in the build container; the
+                # dataflow overlay (ReachingDefPass) is memory-heavy on real C/C++
+                # trees, so the small default -Xmx would OOM it. build_heap_gb is
+                # budgeted against JOERN_MEM_LIMIT (build_workers * build_heap_gb).
+                build_heap_gb = max(1, int(self.config.cpg.build_heap_gb or 4))
+                java_opts = (
+                    f"-Xmx{build_heap_gb}G -Xms2G -XX:+UseG1GC "
+                    f"-XX:+UseStringDeduplication -Dfile.encoding=UTF-8"
+                )
 
                 # Build command arguments (base_cmd is already the full path in container)
                 cmd_args = [base_cmd, container_source_path, "-o", container_cpg_path]
@@ -134,6 +142,13 @@ class CPGGenerator:
                     # Validate CPG was created on disk using host path
                     if self._validate_cpg(cpg_path):
                         logger.info(f"CPG generation completed: {cpg_path}")
+
+                        # Persist the dataflow overlay INTO the cpg.bin now, in the
+                        # build container (large heap). Otherwise importCpg recomputes
+                        # ReachingDefPass on every load, which OOMs the memory-capped
+                        # query workers -> "No projects loaded". Best-effort: on
+                        # failure we keep the base CPG and let the worker try.
+                        self._apply_overlays(container_cpg_path, codebase_hash, build_heap_gb)
 
                         # Spawn Joern server and load CPG if manager is available
                         joern_port = None
@@ -245,6 +260,89 @@ class CPGGenerator:
             return f"/playground/{parts[-1]}"
         
         return host_path
+
+    def _apply_overlays(self, container_cpg_path: str, codebase_hash: str, heap_gb: int) -> bool:
+        """Apply and persist Joern's default overlays (incl. OSS dataflow) into the
+        cpg.bin, in the build container where a large heap is available.
+
+        importCpg applies the dataflow overlay (ReachingDefPass) the first time a CPG
+        is opened and re-saves it INTO the project's cpg.bin. By doing that once here
+        — instead of on every load in a memory-capped query worker — later importCpg
+        calls print "Overlay dataflowOss already exists - skipping" and just
+        deserialize, so even a tiny tier-S (2 GB) worker loads a large CPG reliably.
+
+        Best-effort: returns True on success; on any failure logs and leaves the base
+        CPG untouched (the worker falls back to the old recompute-on-load behavior).
+        """
+        # codebase_hash is validated upstream as [0-9a-f]{16}; the cpg path is derived
+        # from it, so these interpolations carry no untrusted input.
+        cpg_dir = container_cpg_path.rsplit("/", 1)[0]
+        script = (
+            "set -euo pipefail; "
+            f'SRC="{container_cpg_path}"; WS="{cpg_dir}/_ovlws"; '
+            'rm -rf "$WS"; mkdir -p "$WS"; cd "$WS"; '
+            'printf \'importCpg("%s", "ovl")\\n\' "$SRC" > ovl.sc; '
+            "/opt/joern/joern-cli/joern --script ovl.sc; "
+            # The overlaid project cpg lands under the per-hash workspace; promote it.
+            "OUT=\"$(find \"$WS\" -name cpg.bin -printf '%s\\t%p\\n' | sort -rn | head -1 | cut -f2)\"; "
+            'if [ -z "$OUT" ] || [ ! -f "$OUT" ]; then echo OVERLAY_NO_OUTPUT; rm -rf "$WS"; exit 3; fi; '
+            'mv -f "$OUT" "$SRC"; rm -rf "$WS"; '
+            'echo "OVERLAY_OK bytes=$(stat -c %s "$SRC")"'
+        )
+        env = os.environ.copy()
+        env["JAVA_OPTS"] = (
+            f"-Xmx{heap_gb}G -Xms2G -XX:+UseG1GC -XX:+UseStringDeduplication -Dfile.encoding=UTF-8"
+        )
+        container_name = os.getenv("JOERN_CONTAINER_NAME", "codebadger-joern-server")
+        docker_cmd = ["docker", "exec"]
+        for key, value in env.items():
+            if key not in os.environ or env[key] != os.environ[key]:
+                docker_cmd.extend(["-e", f"{key}={value}"])
+        docker_cmd.append(container_name)
+        docker_cmd.extend(["bash", "-lc", script])
+
+        logger.info(f"Applying+persisting overlays for {codebase_hash} (heap {heap_gb}G)")
+        try:
+            result = subprocess.run(
+                docker_cmd,
+                capture_output=True,
+                text=True,
+                timeout=self.config.cpg.generation_timeout,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                f"Overlay persistence timed out for {codebase_hash}; keeping base CPG "
+                f"(worker will recompute overlays on load)"
+            )
+            self._cleanup_overlay_workspace(cpg_dir)
+            return False
+        except Exception as e:
+            logger.warning(f"Overlay persistence error for {codebase_hash}: {e}; keeping base CPG")
+            self._cleanup_overlay_workspace(cpg_dir)
+            return False
+
+        if result.returncode == 0 and "OVERLAY_OK" in (result.stdout + result.stderr):
+            logger.info(f"Overlays persisted for {codebase_hash}: {result.stdout.strip().splitlines()[-1:]}")
+            return True
+
+        tail = (result.stdout + result.stderr)[-1000:]
+        logger.warning(
+            f"Overlay persistence failed for {codebase_hash} (rc={result.returncode}); "
+            f"keeping base CPG. Output tail: {tail}"
+        )
+        self._cleanup_overlay_workspace(cpg_dir)
+        return False
+
+    def _cleanup_overlay_workspace(self, cpg_dir: str) -> None:
+        """Remove a leftover overlay workspace so a failed run can't strand disk."""
+        container_name = os.getenv("JOERN_CONTAINER_NAME", "codebadger-joern-server")
+        try:
+            subprocess.run(
+                ["docker", "exec", container_name, "rm", "-rf", f"{cpg_dir}/_ovlws"],
+                capture_output=True, text=True, timeout=60,
+            )
+        except Exception:
+            pass
 
     def _exec_command_sync(self, cmd_args: list, env: dict, timeout: int) -> str:
         """Execute command synchronously INSIDE Docker container with timeout"""
