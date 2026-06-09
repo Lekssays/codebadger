@@ -233,6 +233,37 @@ def _count_lines_of_code(source_path: str) -> int:
         return 0
 
 
+_OOM_MARKERS = (
+    "OutOfMemoryError",
+    "java.lang.OutOfMemoryError",
+    "GC overhead limit exceeded",
+    "unable to create new native thread",
+    "Cannot allocate memory",
+    "There is insufficient memory",
+    "Killed",
+)
+
+
+def _classify_cpg_build_failure(exit_code, output: str, build_heap_gb: int) -> tuple:
+    """Map a failed c2cpg/frontend run to (error_code, human message).
+
+    Distinguishes an out-of-memory build (the dominant large-project failure) from a
+    generic build error, and bounds the stored output so a multi-MB frontend dump
+    doesn't bloat the DB / response. Exit 137 = SIGKILL, which for a build is almost
+    always the cgroup OOM-killer.
+    """
+    text = output or ""
+    tail = text[-2000:]
+    is_oom = exit_code == 137 or any(m in text for m in _OOM_MARKERS)
+    if is_oom:
+        return "OOM", (
+            f"CPG generation ran out of memory (build heap -Xmx{build_heap_gb}G, exit {exit_code}). "
+            f"Raise CPG_BUILD_HEAP_GB / JOERN_MEM_LIMIT, lower CPG_BUILD_WORKERS, or analyze a "
+            f"sub-component. Frontend tail: {tail}"
+        )
+    return "BUILD_ERROR", f"CPG generation failed (exit {exit_code}). Frontend tail: {tail}"
+
+
 def _copy_local_source_tree(host_path: str, codebase_dir: str) -> None:
     """Copy a local source tree into the playground snapshot dir.
 
@@ -486,16 +517,19 @@ async def _generate_cpg_async(
                 logger.warning(f"Failed to kill hung frontend in container: {kill_err}")
             codebase_tracker.update_codebase(
                 codebase_hash=codebase_hash,
-                metadata={"status": SessionStatus.FAILED, "error": error_msg}
+                metadata={"status": SessionStatus.FAILED, "error_code": "TIMEOUT", "error": error_msg}
             )
             return
 
         if exec_result.exit_code != 0:
-            error_msg = f"CPG generation failed: {exec_result.output.decode('utf-8')}"
-            logger.error(error_msg)
+            output = exec_result.output.decode("utf-8", errors="replace") if exec_result.output else ""
+            error_code, error_msg = _classify_cpg_build_failure(
+                exec_result.exit_code, output, build_heap_gb
+            )
+            logger.error(f"CPG generation failed for {codebase_hash} [{error_code}]: {error_msg}")
             codebase_tracker.update_codebase(
                 codebase_hash=codebase_hash,
-                metadata={"status": SessionStatus.FAILED, "error": error_msg}
+                metadata={"status": SessionStatus.FAILED, "error_code": error_code, "error": error_msg}
             )
             return
 
@@ -1209,7 +1243,7 @@ Examples:
                         except RuntimeError:
                             logger.warning(f"No event loop for async restart of {codebase_hash}")
             
-            return {
+            response = {
                 "codebase_hash": codebase_hash,
                 "status": status,
                 "joern_port": joern_port,
@@ -1225,6 +1259,17 @@ Examples:
                 "created_at": codebase_info.created_at.isoformat(),
                 "last_accessed": codebase_info.last_accessed.isoformat(),
             }
+
+            # Surface the failure cause so a failed build is debuggable via the API
+            # (e.g. error_code "OOM" / "TIMEOUT" / "BUILD_ERROR") rather than a bare
+            # "failed" status that forces digging through container logs.
+            if status in (SessionStatus.FAILED, "failed"):
+                if codebase_info.metadata.get("error_code"):
+                    response["error_code"] = codebase_info.metadata["error_code"]
+                if codebase_info.metadata.get("error"):
+                    response["error"] = codebase_info.metadata["error"]
+
+            return response
 
         except Exception as e:
             logger.error(f"Failed to get CPG status: {e}", exc_info=True)

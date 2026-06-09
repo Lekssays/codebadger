@@ -1336,3 +1336,46 @@ class TestLargeProjectGuard:
                 )
             import json; d = json.loads(result.content[0].text)
             assert d["status"] == "generating"          # guard off -> built, not declined
+
+
+class TestCpgBuildFailureLabeling:
+    """Fix #4: failed CPG builds carry a labeled cause (OOM/TIMEOUT/BUILD_ERROR)."""
+
+    def test_classifier_oom_by_exit_137(self):
+        from src.tools.core_tools import _classify_cpg_build_failure
+        code, msg = _classify_cpg_build_failure(137, "killed", 28)
+        assert code == "OOM" and "-Xmx28G" in msg
+
+    def test_classifier_oom_by_marker(self):
+        from src.tools.core_tools import _classify_cpg_build_failure
+        code, _ = _classify_cpg_build_failure(1, "x java.lang.OutOfMemoryError: Java heap space", 28)
+        assert code == "OOM"
+
+    def test_classifier_generic_build_error(self):
+        from src.tools.core_tools import _classify_cpg_build_failure
+        code, _ = _classify_cpg_build_failure(2, "parse error", 28)
+        assert code == "BUILD_ERROR"
+
+    def test_classifier_bounds_output(self):
+        from src.tools.core_tools import _classify_cpg_build_failure
+        _, msg = _classify_cpg_build_failure(1, "X" * 9000, 28)
+        assert len(msg) < 2300   # frontend dump tail-bounded
+
+    @pytest.mark.asyncio
+    async def test_get_cpg_status_surfaces_failure_cause(self, mock_services):
+        from src.tools.core_tools import register_core_tools
+        mock_services["codebase_tracker"].get_codebase.return_value = CodebaseInfo(
+            codebase_hash="0123456789abcdef",
+            source_type="local",
+            source_path="/x",
+            language="c",
+            cpg_path=None,
+            metadata={"status": "failed", "error_code": "OOM", "error": "ran out of memory"},
+        )
+        mcp = FastMCP("t"); register_core_tools(mcp, mock_services)
+        async with Client(mcp) as client:
+            result = await client.call_tool("get_cpg_status", {"codebase_hash": "0123456789abcdef"})
+        import json; d = json.loads(result.content[0].text)
+        assert d["status"] == "failed"
+        assert d["error_code"] == "OOM"
+        assert "memory" in d["error"]

@@ -53,6 +53,14 @@ services:
       # leaves the right amount for the query-worker pool. 0 = auto-derive the budget.
       JOERN_MEM_LIMIT: ${JOERN_MEM_LIMIT:-100g}
       JOERN_MEMORY_BUDGET_MB: ${JOERN_MEMORY_BUDGET_MB:-0}
+      # Build sizing — fewer concurrent builds with a larger per-build c2cpg heap so
+      # large C/C++ projects don't OOM. CPG_BUILD_WORKERS * CPG_BUILD_HEAP_GB must
+      # stay <= JOERN_MEM_LIMIT (the build container's cap).
+      CPG_BUILD_WORKERS: ${CPG_BUILD_WORKERS:-4}
+      CPG_BUILD_HEAP_GB: ${CPG_BUILD_HEAP_GB:-6}
+      # Scale knobs: HTTP in-flight cap (503 past this) and the pre-build repo-size cap.
+      MAX_MCP_CONNECTIONS: ${MAX_MCP_CONNECTIONS:-16}
+      MAX_REPO_SIZE_MB: ${MAX_REPO_SIZE_MB:-1024}
     depends_on:
       codebadger-postgres:
         condition: service_healthy
