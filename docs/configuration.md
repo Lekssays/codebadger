@@ -21,12 +21,13 @@ cp config.example.yaml config.yaml   # start from the template
 | `joern.worker_mode` | `JOERN_WORKER_MODE` | `shared` | `shared` or `pool` - see [Deployment](deployment.md#shared-vs-pool-mode). |
 | `cpg.generation_timeout` | - | `1800` | Max seconds for a CPG build. |
 | `cpg.build_workers` | `CPG_BUILD_WORKERS` | `4` | Concurrent CPG builds. |
-| `cpg.queue_backend` | `CPG_QUEUE_BACKEND` | `memory` | `memory` or `durable` (DB-backed). |
+| `cpg.queue_backend` | `CPG_QUEUE_BACKEND` | `durable` | `durable` (Postgres-backed) or `memory` (throwaway single-process). |
 | `cpg.max_repo_size_mb` | `MAX_REPO_SIZE_MB` | `1024` | Soft cap before `generate_cpg` requires `force`. |
 | `query.timeout` | `QUERY_TIMEOUT` | `30` | CPGQL query timeout (seconds). |
 | `query.cache_ttl` | `QUERY_CACHE_TTL` | `300` | Tool-result cache TTL (seconds). |
-| - | `DATABASE_URL` | SQLite | Set a `postgresql://…` DSN to move the whole store to Postgres. |
-| - | `REDIS_URL` | unset | Enables cross-process coordination. |
+| - | `DATABASE_URL` | Compose Postgres (`…@localhost:55432/codebadger`) | **Required.** Postgres DSN for the whole store. Boot fails if unreachable. |
+| - | `REDIS_URL` | Compose Redis (`redis://localhost:56379/0`) | **Required.** Redis for cross-process coordination + pool ledger. Boot fails if unreachable. |
+| - | `JOERN_IDLE_TTL_SECONDS` | `600` | Offload a Joern worker idle this long; next query reactivates it. |
 
 Memory-related settings are deliberately `0` (auto-derive from host RAM). Run
 `python scripts/recommend_config.py` to see what they resolve to and why - see

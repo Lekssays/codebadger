@@ -57,6 +57,9 @@ class TestLifespan:
             "main.QueryExecutor"
         ), patch(
             "main.CodeBrowsingService"
+        ), patch(
+            "src.services.coordination.make_coordinator",
+            return_value=MagicMock(backend="redis"),
         ):
 
             # Setup mocks
@@ -137,6 +140,9 @@ class TestLifespan:
         ), patch(
             "main.CodeBrowsingService"
         ), patch(
+            "src.services.coordination.make_coordinator",
+            return_value=MagicMock(backend="redis"),
+        ), patch(
             "main._check_joern_container_status",
             return_value={"running": False, "status": "docker_unavailable", "error": "daemon down"},
         ):
@@ -168,71 +174,110 @@ class TestLifespan:
 class TestEndpoints:
     """Test custom HTTP endpoints"""
 
+    @staticmethod
+    def _install_healthy_services():
+        """Populate main.services with mocks so /health reports status=up."""
+        db = MagicMock()
+        db.ping.return_value = {"ok": True, "latency_ms": 1.0}
+        coord = MagicMock(backend="redis")
+        coord.ping.return_value = {"ok": True, "latency_ms": 0.4, "backend": "redis"}
+        joern = MagicMock()
+        joern.worker_mode = "pool"
+        joern._max_active = 8
+        joern._lru_eviction_count = 0
+        joern.get_memory_stats.return_value = {
+            "mode": "memory", "reserved_mb": 0, "budget_mb": 24000,
+            "utilization_pct": 0.0, "container_rss_mb": 10.0,
+        }
+        joern.get_running_servers.return_value = {}
+        cpq = MagicMock(depth=0, in_flight=0, maxsize=8, is_full=False)
+        cfg = MagicMock()
+        cfg.cpg.build_workers = 2
+        cfg.cpg.queue_backend = "durable"
+        main.services.update({
+            "db_manager": db, "coordinator": coord, "joern_server_manager": joern,
+            "cpg_queue": cpq, "config": cfg,
+            "joern_container_name": "codebadger-joern-server", "startup_issues": [],
+        })
+
     @pytest.mark.asyncio
     async def test_health_endpoint(self):
-        """Test the /health endpoint returns correct response"""
+        """/health returns up + mcp + a dependencies map when everything is healthy."""
         from main import health_check, VERSION
-        from starlette.requests import Request
         from starlette.responses import JSONResponse
-
-        # Mock request
-        mock_request = AsyncMock(spec=Request)
-
-        # Patch helpers that access the global services dict
-        with patch("main._check_joern_container_status", return_value={"status": "running", "running": True}), \
-             patch("main._get_active_servers", return_value={"count": 0, "servers": {}}), \
-             patch("main._get_port_utilization", return_value={"allocated_count": 0, "available_count": 29}), \
-             patch("main._get_disk_usage", return_value={"total_gb": 100, "used_gb": 50, "free_gb": 50}), \
-             patch("main._get_cache_size", return_value={"cache_path": "/tmp", "size_mb": 0, "exists": True}):
-
-            # Call the health endpoint
-            response = await health_check(mock_request)
-
-        # Verify response
-        assert isinstance(response, JSONResponse)
-        response_data = response.body
-        # JSONResponse.body is bytes, so we need to decode it
         import json
-        response_dict = json.loads(response_data.decode('utf-8'))
 
-        assert response_dict["status"] == "healthy"
-        assert response_dict["service"] == "codebadger"
-        assert response_dict["version"] == VERSION
-
-    @pytest.mark.asyncio
-    async def test_health_endpoint_redacts_codebase_sources(self):
-        """Health responses should not expose raw repository locations."""
-        from main import health_check
-        from src.models import CodebaseInfo
-
+        self._install_healthy_services()
         mock_request = AsyncMock()
 
-        tracker = MagicMock()
-        tracker.list_codebases_full.return_value = [CodebaseInfo(
-            codebase_hash="553642871dd4251d",
-            source_type="local",
-            source_path="/Users/example/private-repo",
-            language="python",
-            cpg_path="/tmp/test.cpg",
-            metadata={"status": "ready"},
-        )]
-        main.services["codebase_tracker"] = tracker
-        main.services["joern_server_manager"] = None
-
-        with patch("main._check_joern_container_status", return_value={"status": "running", "running": True}), \
-             patch("main._get_active_servers", return_value={"count": 0, "servers": {}}), \
+        with patch("main._check_joern_container_status",
+                   return_value={"status": "running", "running": True,
+                                 "container_name": "codebadger-joern-server"}), \
              patch("main._get_port_utilization", return_value={"allocated_count": 0, "available_count": 29}), \
              patch("main._get_disk_usage", return_value={"total_gb": 100, "used_gb": 50, "free_gb": 50}), \
+             patch("main._get_codebase_list", return_value=[]), \
              patch("main._get_cache_size", return_value={"cache_path": "/tmp", "size_mb": 0, "exists": True}):
             response = await health_check(mock_request)
 
+        assert isinstance(response, JSONResponse)
+        assert response.status_code == 200
+        body = json.loads(response.body.decode("utf-8"))
+
+        assert body["status"] == "up"
+        assert body["mcp"] == "codebadger"
+        assert body["version"] == VERSION
+        assert body["dependencies"] == {
+            "joern": "up", "postgres": "up", "redis": "up",
+            "docker": "up", "cpg_queue": "up",
+        }
+
+    @pytest.mark.asyncio
+    async def test_health_endpoint_down_when_postgres_unreachable(self):
+        """A failing Postgres ping makes the overall status down (HTTP 503)."""
+        from main import health_check
         import json
 
-        response_dict = json.loads(response.body.decode("utf-8"))
-        codebase_entry = response_dict["codebases"]["list"][0]
-        assert codebase_entry["source"] == "<redacted:local>"
-        assert codebase_entry["source_type"] == "local"
-        assert "/Users/example/private-repo" not in response.body.decode("utf-8")
+        self._install_healthy_services()
+        main.services["db_manager"].ping.return_value = {"ok": False, "error": "connection refused"}
+        mock_request = AsyncMock()
+
+        with patch("main._check_joern_container_status",
+                   return_value={"status": "running", "running": True}), \
+             patch("main._get_port_utilization", return_value={"allocated_count": 0, "available_count": 29}), \
+             patch("main._get_disk_usage", return_value={"total_gb": 100, "used_gb": 50, "free_gb": 50}), \
+             patch("main._get_cache_size", return_value={"size_mb": 0}):
+            response = await health_check(mock_request)
+
+        assert response.status_code == 503
+        body = json.loads(response.body.decode("utf-8"))
+        assert body["status"] == "down"
+        assert body["dependencies"]["postgres"] == "down"
+
+    @pytest.mark.asyncio
+    async def test_health_endpoint_does_not_expose_codebase_sources(self):
+        """The public /health response must not include the codebase list/sources."""
+        from main import health_check
+        import json
+
+        self._install_healthy_services()
+        mock_request = AsyncMock()
+
+        with patch("main._check_joern_container_status",
+                   return_value={"status": "running", "running": True}), \
+             patch("main._get_port_utilization", return_value={"allocated_count": 0, "available_count": 29}), \
+             patch("main._get_disk_usage", return_value={"total_gb": 100, "used_gb": 50, "free_gb": 50}), \
+             patch("main._get_codebase_list",
+                   return_value=[{"hash": "h", "language": "python", "status": "ready",
+                                  "joern_port": None, "source_type": "local",
+                                  "source": "/Users/example/private-repo"}]), \
+             patch("main._get_cache_size", return_value={"size_mb": 0}):
+            response = await health_check(mock_request)
+
+        raw = response.body.decode("utf-8")
+        body = json.loads(raw)
+        # Public health exposes counts only — never the per-codebase list or paths.
+        assert "list" not in body["codebases"]
+        assert "/Users/example/private-repo" not in raw
 
 
 class TestHealthHelpers:
@@ -275,7 +320,7 @@ class TestEffectiveConfigSelfCheck:
 
     def test_logs_effective_config_without_drift(self):
         coordinator = MagicMock()
-        coordinator.backend = "in-process"
+        coordinator.backend = "redis"
         main.services["coordinator"] = coordinator
         main.services["cpg_queue"] = MagicMock()
         main.services["joern_server_manager"] = None
@@ -292,7 +337,7 @@ class TestEffectiveConfigSelfCheck:
     def test_flags_queue_backend_env_drift(self):
         """CPG_QUEUE_BACKEND=durable but effective memory → a warning."""
         coordinator = MagicMock()
-        coordinator.backend = "in-process"
+        coordinator.backend = "redis"
         main.services["coordinator"] = coordinator
         main.services["cpg_queue"] = MagicMock()
         main.services["joern_server_manager"] = None
@@ -305,22 +350,6 @@ class TestEffectiveConfigSelfCheck:
         warnings = " ".join(str(c.args[0]) for c in mock_logger.warning.call_args_list)
         assert "CPG_QUEUE_BACKEND=durable" in warnings
         assert "queue_backend=memory" in warnings
-
-    def test_flags_redis_set_but_unused(self):
-        coordinator = MagicMock()
-        coordinator.backend = "in-process"
-        main.services["coordinator"] = coordinator
-        main.services["cpg_queue"] = MagicMock()
-        main.services["joern_server_manager"] = None
-
-        with patch("main.logger") as mock_logger, patch.dict(
-            "os.environ", {"REDIS_URL": "redis://localhost:56379/0"}, clear=True
-        ):
-            main._log_effective_config(self._config(worker_mode="shared"))
-
-        warnings = " ".join(str(c.args[0]) for c in mock_logger.warning.call_args_list)
-        assert "REDIS_URL is set" in warnings
-
 
 class TestShutdown:
     """Test graceful shutdown behavior."""

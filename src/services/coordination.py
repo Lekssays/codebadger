@@ -1,57 +1,24 @@
 """
-Cross-process coordination primitives (Phase 3c).
+Cross-process coordination primitives.
 
 The query path serializes work per CPG so two requests never hammer the same
-Joern JVM at once. In a single process that's a threading.Semaphore; to run
-*multiple* stateless API worker processes against one Joern pool, that lock must
-hold across processes — hence a Redis-backed implementation.
+Joern JVM at once. To run multiple stateless API worker processes against one
+Joern pool, that lock must hold across processes — so coordination is
+Redis-backed.
 
-`InProcessCoordinator` preserves the original single-process behavior and is the
-default. `RedisCoordinator` (selected when REDIS_URL is set) uses a Redis lock
-with an expiry, so a crashed holder's lock auto-releases instead of deadlocking.
-
-This is the first coordination primitive; the reservation ledger and warm-worker
-registry that a full scheduler/stateless-API split needs will layer on the same
-abstraction.
+`RedisCoordinator` uses a Redis lock with an expiry, so a crashed holder's lock
+auto-releases instead of deadlocking.
 """
 
 import logging
-import threading
 from contextlib import contextmanager
-from typing import Dict, Iterator, Optional
+from typing import Iterator, Optional
 
 logger = logging.getLogger(__name__)
 
 
 class QueryLockTimeout(Exception):
     """Raised when a per-CPG query lock can't be acquired in time."""
-
-
-class InProcessCoordinator:
-    """Default coordinator: per-CPG locks live in this process only."""
-
-    def __init__(self):
-        self._codebase_locks: Dict[str, threading.Semaphore] = {}
-        self._locks_mutex = threading.Lock()
-
-    def _get_codebase_lock(self, codebase_hash: str) -> threading.Semaphore:
-        with self._locks_mutex:
-            if codebase_hash not in self._codebase_locks:
-                self._codebase_locks[codebase_hash] = threading.Semaphore(1)
-            return self._codebase_locks[codebase_hash]
-
-    @contextmanager
-    def codebase_query_lock(self, codebase_hash: str) -> Iterator[None]:
-        lock = self._get_codebase_lock(codebase_hash)
-        lock.acquire()
-        try:
-            yield
-        finally:
-            lock.release()
-
-    @property
-    def backend(self) -> str:
-        return "in-process"
 
 
 class RedisCoordinator:
@@ -97,17 +64,27 @@ class RedisCoordinator:
     def backend(self) -> str:
         return "redis"
 
+    def ping(self) -> dict:
+        """Liveness probe for /health: round-trip PING with latency (ms)."""
+        import time
+        start = time.monotonic()
+        try:
+            self._redis.ping()
+            return {"ok": True, "latency_ms": round((time.monotonic() - start) * 1000, 2),
+                    "backend": "redis"}
+        except Exception as e:
+            return {"ok": False, "error": str(e), "backend": "redis"}
+
 
 def make_coordinator(redis_url: Optional[str], lock_timeout: int = 660):
-    """Build the coordinator: Redis when redis_url is set, else in-process.
+    """Build the Redis-backed coordinator.
 
-    Falls back to in-process (with a warning) if Redis can't be reached, so a
-    misconfigured REDIS_URL degrades to single-process rather than failing boot.
+    Raises if ``redis_url`` is empty or Redis can't be reached, so a missing or
+    misconfigured Redis fails the server's boot loudly (the caller's lifespan
+    catches it, logs, and exits non-zero).
     """
     if not redis_url:
-        return InProcessCoordinator()
-    try:
-        return RedisCoordinator(redis_url, lock_timeout=lock_timeout, blocking_timeout=lock_timeout)
-    except Exception as e:
-        logger.warning(f"Could not initialize Redis coordinator ({e}); falling back to in-process")
-        return InProcessCoordinator()
+        raise RuntimeError(
+            "REDIS_URL is required. Start Redis with `docker compose up -d` or set REDIS_URL."
+        )
+    return RedisCoordinator(redis_url, lock_timeout=lock_timeout, blocking_timeout=lock_timeout)

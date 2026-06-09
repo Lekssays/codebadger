@@ -12,10 +12,11 @@ services:
     restart: unless-stopped
     mem_limit: ${JOERN_MEM_LIMIT:-100g}
 
+  # Postgres and Redis are the backing services and start by default with
+  # `docker compose up -d`. CodeBadger fails to boot if they're unreachable.
   codebadger-postgres:
     image: postgres:16
     container_name: codebadger-postgres
-    profiles: ["postgres"]
     environment:
       POSTGRES_USER: codebadger
       POSTGRES_PASSWORD: codebadger
@@ -26,13 +27,22 @@ services:
     volumes:
       - ./playground/pgdata:/var/lib/postgresql/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U codebadger -d codebadger"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   codebadger-redis:
     image: redis:7
     container_name: codebadger-redis
-    profiles: ["redis"]
     ports:
       # Non-default host port (override REDIS_PORT) to avoid clashing with a system Redis.
       - "127.0.0.1:${REDIS_PORT:-56379}:6379"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 

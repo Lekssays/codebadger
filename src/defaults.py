@@ -132,7 +132,7 @@ CLEANUP_ON_SHUTDOWN = True
 MAX_ACTIVE_JOERN_SERVERS = 16
 JOERN_EVICTION_POLICY = "lru"
 
-# Worker mode (Phase 2). "shared" = run all Joern query servers as processes
+# Worker mode. "shared" = run all Joern query servers as processes
 # inside the single codebadger-joern-server container (default; also the build
 # container). "pool" = run each CPG's Joern server in its OWN cgroup-capped
 # Docker container, so an OOM kills just that worker, not every server at once.
@@ -148,7 +148,7 @@ JOERN_WORKER_INTERNAL_PORT = 8080
 JOERN_WORKER_PORT_MIN = 14000
 JOERN_WORKER_PORT_MAX = 14999
 
-# Memory-aware admission (Phase 1). When > 0, the Joern pool admits servers
+# Memory-aware admission. When > 0, the Joern pool admits servers
 # while the sum of their per-CPG heap *reservations* stays under this budget
 # (MB), evicting LRU servers to make room — instead of a fixed server count.
 # 0 = auto-derive from host RAM at startup (see src/utils/recommend.py); the
@@ -179,11 +179,11 @@ CPG_BUILD_WORKERS = 4
 # RAM and trigger the OOM-killer. Keep build_workers * build_heap within the
 # generation reserve from scripts/recommend_config.py.
 CPG_BUILD_HEAP_GB = 6
-# Queue backend (Phase 3): "memory" = in-process asyncio.Queue (drops on full,
-# lost on restart). "durable" = DB-backed jobs table (survives restart, never
-# silently dropped, dedup + backpressure via the DB). Use "durable" for large
-# batches (e.g. 300 CVEs).
-CPG_QUEUE_BACKEND = "memory"
+# Queue backend: "durable" = Postgres-backed jobs table (survives restart, never
+# silently dropped, dedup + backpressure via the DB) — the default. "memory" =
+# in-process asyncio.Queue (drops on full, lost on restart); use only for a
+# throwaway single-process run.
+CPG_QUEUE_BACKEND = "durable"
 
 # Language-specific Joern frontend binaries (full paths inside the container)
 LANGUAGE_COMMANDS = {

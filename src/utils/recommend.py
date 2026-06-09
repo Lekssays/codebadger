@@ -19,7 +19,7 @@ fixed server count.  It is consumed in two places:
 
 The numbers map onto the constants that exist today (a single global query
 heap + a count cap).  The per-CPG size tiers (S/M/L/XL) are informational and
-describe the Phase-1 memory-budget scheduler; see docs / the README.
+describe the memory-budget scheduler; see docs / the README.
 """
 
 from __future__ import annotations
@@ -87,7 +87,7 @@ class Tier:
 
 
 # CPG on-disk size is a good proxy for the memory importCpg's overlay passes
-# need.  These tiers are the Phase-1 memory-budget scheduler's placement sizes.
+# need.  These tiers are the memory-budget scheduler's placement sizes.
 DEFAULT_TIERS: List[Tier] = [
     Tier("S", 1.0, 2, 3, "libsoup, small libxml2 modules"),
     Tier("M", 4.0, 6, 8, "ImageMagick, php, wireshark dissectors"),
@@ -184,7 +184,7 @@ def compute(
     max_mcp = max_active + build_workers + 8
 
     # Evict under memory pressure at 90% of the Joern budget (belt-and-braces on
-    # top of the count cap, until the Phase-1 reservation ledger lands).
+    # top of the reservation ledger).
     rss_threshold_mb = int(joern_budget * 0.90 * 1024)
 
     # Per-tier "how many fit if every live CPG were this size" -- gives a feel for
@@ -317,7 +317,7 @@ def render(rec: Recommendation, current: Optional[Dict[str, object]] = None) -> 
             f"mem_limit to {rec.build_container_cap_gb}g (JOERN_MEM_LIMIT) — NOT the full budget."
         )
     lines.append("-" * 70)
-    lines.append("Per-CPG size tiers (Phase-1 memory-budget scheduler):")
+    lines.append("Per-CPG size tiers (memory-budget scheduler):")
     lines.append(f"  {'tier':<5}{'CPG .bin':<14}{'heap':<7}{'cap':<7}{'fit*':<6}example")
     for t in rec.tiers:
         bound = "<=%g GB" % t.cpg_max_gb if t.cpg_max_gb is not None else "> prev"

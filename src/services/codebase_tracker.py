@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from ..models import CodebaseInfo
-from ..utils.db_manager import DBManager
+from ..utils.postgres_db_manager import PostgresDBManager
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 class CodebaseTracker:
     """Tracks codebase information by hash"""
 
-    def __init__(self, db_manager: DBManager):
+    def __init__(self, db_manager: PostgresDBManager):
         self.db = db_manager
 
     def save_codebase(

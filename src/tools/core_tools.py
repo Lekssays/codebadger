@@ -613,14 +613,14 @@ class CPGGenerationQueue:
 
 
 class DurableCPGQueue:
-    """DB-backed CPG generation queue (Phase 3).
+    """Postgres-backed CPG generation queue.
 
     Same interface as CPGGenerationQueue, but jobs live in the durable `jobs`
     table instead of an in-memory asyncio.Queue, so a 300-CVE batch survives a
     restart and is never silently dropped. Workers poll the DB and claim jobs
-    atomically (one per worker). DB dedup (partial unique index) replaces the
-    in-flight set. Swapping the DBManager for a Postgres-backed one (with
-    FOR UPDATE SKIP LOCKED claims) makes this multi-process / multi-host.
+    atomically (one per worker) via FOR UPDATE SKIP LOCKED, so this is
+    multi-process / multi-host. DB dedup (partial unique index) replaces the
+    in-flight set.
     """
 
     SUBMITTED = "submitted"
@@ -632,7 +632,7 @@ class DurableCPGQueue:
                  poll_interval: float = 1.0):
         # job_store implements the queue method surface (enqueue_job /
         # claim_next_job / complete_job / fail_job / count_jobs /
-        # requeue_running_jobs): the SQLite DBManager or PostgresJobStore.
+        # requeue_running_jobs): a PostgresJobStore / PostgresDBManager.
         self.store = job_store
         self.services = services
         self._workers = workers

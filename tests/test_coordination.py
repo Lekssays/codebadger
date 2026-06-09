@@ -1,7 +1,8 @@
-"""Tests for Phase-3c coordination: per-CPG query lock (in-process + Redis).
+"""Tests for cross-process coordination: per-CPG query lock (Redis).
 
-The Redis tests need a real server — set CODEBADGER_TEST_REDIS_URL
-(e.g. redis://localhost:56379/0) to run them; skipped otherwise.
+Redis is mandatory, so the only coordinator is RedisCoordinator. The Redis tests
+need a real server — set CODEBADGER_TEST_REDIS_URL (e.g. redis://localhost:56379/0)
+to run them; skipped otherwise.
 """
 
 import os
@@ -10,69 +11,24 @@ import time
 
 import pytest
 
-from src.services.coordination import (
-    InProcessCoordinator,
-    QueryLockTimeout,
-    make_coordinator,
-)
+from src.services.coordination import QueryLockTimeout, make_coordinator
 
 REDIS_URL = os.getenv("CODEBADGER_TEST_REDIS_URL")
 redis_only = pytest.mark.skipif(not REDIS_URL, reason="set CODEBADGER_TEST_REDIS_URL to run Redis tests")
 
 
-def _mutual_exclusion_probe(coord, codebase_hash="h1"):
-    """Two threads contend for the same lock; record max concurrent holders."""
-    state = {"current": 0, "max": 0}
-    mutex = threading.Lock()
-
-    def worker():
-        with coord.codebase_query_lock(codebase_hash):
-            with mutex:
-                state["current"] += 1
-                state["max"] = max(state["max"], state["current"])
-            time.sleep(0.1)
-            with mutex:
-                state["current"] -= 1
-
-    threads = [threading.Thread(target=worker) for _ in range(3)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    return state["max"]
+def test_make_coordinator_requires_redis_url():
+    # Redis is mandatory: an empty URL fails fast instead of degrading silently.
+    with pytest.raises(RuntimeError, match="REDIS_URL is required"):
+        make_coordinator("")
+    with pytest.raises(RuntimeError, match="REDIS_URL is required"):
+        make_coordinator(None)
 
 
-def test_inprocess_serializes_same_codebase():
-    coord = InProcessCoordinator()
-    assert _mutual_exclusion_probe(coord) == 1  # never two holders at once
-
-
-def test_inprocess_different_codebases_dont_block():
-    coord = InProcessCoordinator()
-    order = []
-
-    def worker(h):
-        with coord.codebase_query_lock(h):
-            order.append(h)
-            time.sleep(0.05)
-
-    a = threading.Thread(target=worker, args=("a",))
-    b = threading.Thread(target=worker, args=("b",))
-    start = time.time()
-    a.start(); b.start(); a.join(); b.join()
-    # Both ran concurrently -> total < 2x the hold time.
-    assert time.time() - start < 0.09
-    assert set(order) == {"a", "b"}
-
-
-def test_make_coordinator_defaults_in_process():
-    assert make_coordinator("").backend == "in-process"
-    assert make_coordinator(None).backend == "in-process"
-
-
-def test_make_coordinator_bad_redis_falls_back():
-    # Unreachable Redis -> graceful in-process fallback, not a crash.
-    assert make_coordinator("redis://127.0.0.1:1/0").backend == "in-process"
+def test_make_coordinator_unreachable_redis_raises():
+    # Unreachable Redis -> raise (fail-fast boot), no in-process fallback.
+    with pytest.raises(Exception):
+        make_coordinator("redis://127.0.0.1:1/0")
 
 
 @redis_only

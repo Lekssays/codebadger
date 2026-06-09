@@ -37,8 +37,11 @@ from src.utils import setup_logging
 from src.utils import compute_recommendation, current_from_config, render_recommendation
 from src.utils.postgres_db_manager import PostgresDBManager
 
-# Postgres is the store (SQLite removed). Override with the DATABASE_URL env var.
+# Postgres and Redis are the backing services. Both default to the docker-compose
+# services and are overridable via env. A missing or unreachable Postgres/Redis
+# fails the boot (fail-fast), see app_lifespan.
 DEFAULT_DATABASE_URL = "postgresql://codebadger:codebadger@localhost:55432/codebadger"
+DEFAULT_REDIS_URL = "redis://localhost:56379/0"
 from src.tools import register_tools
 
 VERSION = "0.3.4-beta"
@@ -208,7 +211,7 @@ def _log_effective_config(config) -> None:
 
         database_url = os.getenv("DATABASE_URL") or DEFAULT_DATABASE_URL
         db_target = database_url.split("@")[-1]
-        redis_url = os.getenv("REDIS_URL", "")
+        redis_url = os.getenv("REDIS_URL") or DEFAULT_REDIS_URL
 
         worker_mode = getattr(config.joern, "worker_mode", "shared")
         queue_backend = getattr(config.cpg, "queue_backend", "memory")
@@ -220,8 +223,8 @@ def _log_effective_config(config) -> None:
 
         logger.info("=" * 60)
         logger.info("Effective runtime configuration:")
-        logger.info(f"  Database     : postgres @ {db_target}")
-        logger.info(f"  Redis        : {redis_url or '(not set — single-process)'}")
+        logger.info(f"  Database     : postgres @ {db_target} (required)")
+        logger.info(f"  Redis        : {redis_url.split('@')[-1]} (required)")
         logger.info(f"  Coordinator  : {coord_backend}")
         logger.info(f"  Joern mode   : {worker_mode}")
         logger.info(f"  CPG queue    : {queue_backend} ({queue_type})")
@@ -237,7 +240,7 @@ def _log_effective_config(config) -> None:
                 logger.warning(
                     f"  ⚠ JOERN_MEM_LIMIT={intended} (≈{intended_mb}MB) != live container cap "
                     f"{actual_mb}MB. A running container's mem_limit is fixed at compose-up; "
-                    f"recreate it: `JOERN_MEM_LIMIT={intended} docker compose --profile postgres "
+                    f"recreate it: `JOERN_MEM_LIMIT={intended} docker compose "
                     f"up -d --force-recreate {container_name}`."
                 )
         logger.info("=" * 60)
@@ -253,13 +256,6 @@ def _log_effective_config(config) -> None:
 
         _drift("CPG_QUEUE_BACKEND", os.getenv("CPG_QUEUE_BACKEND", ""), queue_backend, "queue_backend")
         _drift("JOERN_WORKER_MODE", os.getenv("JOERN_WORKER_MODE", ""), worker_mode, "worker_mode")
-
-        # Redis set but neither coordinator nor pool actually using it.
-        if redis_url and coord_backend != "redis" and worker_mode != "pool":
-            logger.warning(
-                f"  ⚠ REDIS_URL is set but coordinator={coord_backend} and worker_mode={worker_mode} "
-                f"— Redis is not being used for coordination or the worker pool."
-            )
 
         # Durable queue requested but jobs table never engaged is worth a hint.
         if queue_backend == "durable" and "Durable" not in queue_type:
@@ -468,17 +464,20 @@ async def app_lifespan(server: FastMCP):
     logger.info("Created required directories")
 
     try:
-        # Initialize DB Manager — Postgres only (shared catalog/cache/findings/jobs
-        # for multi-process). Defaults to the Compose Postgres; override via
-        # DATABASE_URL. Start it with: docker compose --profile postgres up -d
+        # Postgres and Redis are the backing services (shared catalog/cache/
+        # findings/jobs + cross-process coordination). Both default to the
+        # docker-compose services; override via DATABASE_URL / REDIS_URL. An
+        # unreachable Postgres or Redis fails the boot (fail-fast) so the
+        # orchestrator restarts us instead of running half-degraded.
         database_url = os.getenv("DATABASE_URL") or DEFAULT_DATABASE_URL
+        redis_url = os.getenv("REDIS_URL") or DEFAULT_REDIS_URL
         try:
             db_manager = PostgresDBManager(database_url)
             db_manager.init_schema()
         except Exception as e:
             logger.error(
                 f"Cannot reach Postgres at {database_url.split('@')[-1]}: {e}. "
-                f"Start it with `docker compose --profile postgres up -d` or set DATABASE_URL."
+                f"Start it with `docker compose up -d` or set DATABASE_URL."
             )
             raise
         logger.info(f"DB Manager initialized (postgres: {database_url.split('@')[-1]})")
@@ -504,7 +503,7 @@ async def app_lifespan(server: FastMCP):
                     config=config,
                     codebase_tracker=services['codebase_tracker'],
                     max_active_servers=config.joern.max_active_servers,
-                    redis_url=os.getenv("REDIS_URL", ""),
+                    redis_url=redis_url,
                 )
                 logger.info(f"Docker container '{container_name}' is running")
             except Exception as e:
@@ -527,16 +526,23 @@ async def app_lifespan(server: FastMCP):
             else PortManager(port_min=config.joern.port_min, port_max=config.joern.port_max)
         )
 
-        # Cross-process coordinator (Phase 3c). Redis-backed when REDIS_URL is set
-        # so the per-CPG query lock holds across multiple API worker processes;
-        # otherwise in-process (single-process behavior).
+        # Cross-process coordinator. Redis-backed so the per-CPG query lock holds
+        # across multiple API worker processes. An unreachable Redis makes
+        # make_coordinator raise → fail-fast boot.
         from src.services.coordination import make_coordinator
         try:
             qt = int(getattr(config.query, "timeout", 300))
         except (TypeError, ValueError):
             qt = 300
         query_lock_timeout = max(qt, 300) + 60
-        coordinator = make_coordinator(os.getenv("REDIS_URL", ""), lock_timeout=query_lock_timeout)
+        try:
+            coordinator = make_coordinator(redis_url, lock_timeout=query_lock_timeout)
+        except Exception as e:
+            logger.error(
+                f"Cannot reach Redis at {redis_url.split('@')[-1]}: {e}. "
+                f"Start it with `docker compose up -d` or set REDIS_URL."
+            )
+            raise
         services['coordinator'] = coordinator
         logger.info(f"Coordinator backend: {coordinator.backend}")
 
@@ -790,42 +796,98 @@ def _get_codebase_list(include_sensitive: bool = False) -> list:
         return []
 
 
-def _build_health(include_sensitive: bool = False) -> dict:
-    """Collect all health metrics and return a structured dict."""
+# Overall status / dependency vocabulary: up | partial | down.
+_CRITICAL_DEPS = ("postgres", "redis", "docker", "joern")
+
+
+def _aggregate_status(dependencies: dict) -> str:
+    """Roll per-dependency statuses into one overall up/partial/down value.
+
+    `down` if any CRITICAL dependency is down — Joern is the analysis engine, so
+    losing it (or Postgres/Redis/Docker) is a full outage. Otherwise `partial`
+    if anything is degraded, else `up`.
+    """
+    if any(dependencies.get(dep) == "down" for dep in _CRITICAL_DEPS):
+        return "down"
+    # A non-critical dependency that is down (or any degraded one) is partial,
+    # not a full outage — the core service still functions.
+    if any(status in ("partial", "down") for status in dependencies.values()):
+        return "partial"
+    return "up"
+
+
+async def _run_probe(fn, timeout: float = 2.0) -> dict:
+    """Run a blocking liveness probe in a thread with a hard timeout.
+
+    Never raises: a hung backend (dead socket, no connect timeout) resolves to
+    {"ok": False, "error": ...} so /health always answers promptly instead of
+    blocking the event loop. Returns whatever `fn` returns on success.
+    """
+    loop = asyncio.get_running_loop()
+    try:
+        return await asyncio.wait_for(loop.run_in_executor(None, fn), timeout=timeout)
+    except asyncio.TimeoutError:
+        return {"ok": False, "error": f"probe timed out after {timeout}s"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+async def _const(value):
+    return value
+
+
+async def _build_health(include_sensitive: bool = False) -> dict:
+    """Collect dependency-aware health and return the structured response.
+
+    Probes Postgres, Redis, Docker and the Joern pool concurrently with bounded
+    timeouts, then rolls them into an up/partial/down status plus a
+    `dependencies` map for the devops admin. DB-backed detail (codebase catalog,
+    cache size) is only queried when Postgres is up, so a dead Postgres can't
+    hang the endpoint.
+    """
     joern_mgr = services.get("joern_server_manager")
+    db_manager = services.get("db_manager")
+    coordinator = services.get("coordinator")
+    config = services.get("config")
+    cpq = services.get("cpg_queue")
     project_root = os.path.dirname(os.path.abspath(__file__))
+    database_url = os.getenv("DATABASE_URL") or DEFAULT_DATABASE_URL
+    redis_url = os.getenv("REDIS_URL") or DEFAULT_REDIS_URL
 
-    container_info = _check_joern_container_status(services.get("joern_container_name"), joern_mgr)
+    # Probe the backing services concurrently and time-bounded so one hung
+    # dependency can't stall the whole endpoint.
+    pg_probe, redis_probe, container_info, memory_info = await asyncio.gather(
+        _run_probe(db_manager.ping) if db_manager else _const({"ok": False, "error": "db_manager not initialized"}),
+        _run_probe(coordinator.ping) if coordinator else _const({"ok": False, "error": "coordinator not initialized"}),
+        _run_probe(lambda: _check_joern_container_status(services.get("joern_container_name"), joern_mgr)),
+        _run_probe(joern_mgr.get_memory_stats) if joern_mgr else _const({}),
+    )
+    if not isinstance(memory_info, dict):
+        memory_info = {}
 
-    active_servers_info = _get_active_servers()
-    active_servers = active_servers_info.get("servers", {})
+    # --- Per-dependency status ---
+    postgres_status = "up" if pg_probe.get("ok") else "down"
+    redis_status = "up" if redis_probe.get("ok") else "down"
 
-    sleeping = 0
-    codebases = _get_codebase_list(include_sensitive=include_sensitive)
-    by_status: dict = {}
-    for cb in codebases:
-        s = cb["status"]
-        by_status[s] = by_status.get(s, 0) + 1
-        if s == "sleeping":
-            sleeping += 1
+    # Docker is down only when the daemon itself is unreachable; not_found/exited
+    # still mean the daemon answered (that's a Joern problem, not a Docker one).
+    cstatus = container_info.get("status")
+    docker_status = "down" if (container_info.get("ok") is False
+                               or cstatus in ("docker_unavailable", "error")) else "up"
 
     port_usage = _get_port_utilization()
     port_info = {
         "allocated": port_usage.get("allocated_count", 0),
         "available": port_usage.get("available_count", 0),
     }
-
-    cpq = services.get("cpg_queue")
-    config = services.get("config")
-    cache_info = _get_cache_size()
-
-    # Memory-admission ledger (Phase 1)
-    memory_info: dict = {}
-    if joern_mgr:
-        try:
-            memory_info = joern_mgr.get_memory_stats()
-        except Exception as e:
-            memory_info = {"error": str(e)}
+    mem_util = memory_info.get("utilization_pct")
+    container_running = bool(container_info.get("running"))
+    if joern_mgr is None or not container_running:
+        joern_status = "down"
+    elif port_info["available"] <= 0 or (isinstance(mem_util, (int, float)) and mem_util >= 95):
+        joern_status = "partial"
+    else:
+        joern_status = "up"
 
     queue_info = {
         "depth": cpq.depth if cpq else 0,
@@ -833,68 +895,123 @@ def _build_health(include_sensitive: bool = False) -> dict:
         "maxsize": cpq.maxsize if cpq else 0,
         "full": cpq.is_full if cpq else False,
         "workers": config.cpg.build_workers if config else 0,
+        "backend": getattr(config.cpg, "queue_backend", "memory") if config else "memory",
     }
+    if cpq is None:
+        cpg_queue_status = "down"
+    elif queue_info["full"]:
+        cpg_queue_status = "partial"
+    else:
+        cpg_queue_status = "up"
 
-    mem_util = memory_info.get("utilization_pct")
-    can_accept_query = bool(joern_mgr) and container_info.get("running", False)
+    dependencies = {
+        "joern": joern_status,
+        "postgres": postgres_status,
+        "redis": redis_status,
+        "docker": docker_status,
+        "cpg_queue": cpg_queue_status,
+    }
+    overall = _aggregate_status(dependencies)
+
+    # --- DB-backed detail (only when Postgres is up, so a dead DB can't hang) ---
+    active_servers_info = _get_active_servers()
+    active_servers = active_servers_info.get("servers", {})
+    sleeping = 0
+    codebases: list = []
+    by_status: dict = {}
+    cpg_cache_mb = -1.0
+    if postgres_status == "up":
+        codebases = _get_codebase_list(include_sensitive=include_sensitive)
+        for cb in codebases:
+            s = cb["status"]
+            by_status[s] = by_status.get(s, 0) + 1
+            if s == "sleeping":
+                sleeping += 1
+        cpg_cache_mb = _get_cache_size().get("size_mb", -1.0)
+
+    can_accept_query = joern_status != "down" and postgres_status == "up" and redis_status == "up"
     can_accept_generation = can_accept_query and not queue_info["full"]
 
+    # --- Operator-facing issues (human-readable supplements to the status) ---
     issues = list(services.get("startup_issues", []))
     container_issue = _describe_joern_container_issue(container_info)
     if container_issue and container_issue not in issues:
         issues.append(container_issue)
+    if postgres_status == "down":
+        issues.append(f"Postgres unreachable at {database_url.split('@')[-1]}: {pg_probe.get('error', 'unknown')}")
+    if redis_status == "down":
+        issues.append(f"Redis unreachable at {redis_url.split('@')[-1]}: {redis_probe.get('error', 'unknown')}")
     if _get_system_memory_available_gb() < 1.0:
         issues.append("System memory critically low (<1 GB available)")
     if isinstance(mem_util, (int, float)) and mem_util >= 95:
         issues.append(f"Joern memory budget nearly exhausted ({mem_util}% reserved)")
-    if port_info["available"] <= 0:
+    if port_info["available"] <= 0 and joern_mgr is not None:
         issues.append("Joern port pool exhausted")
     if queue_info["full"]:
         issues.append("CPG generation queue is full — new generate_cpg calls will be rejected")
 
     uptime = _uptime_seconds()
-    return {
-        "status": "unhealthy" if container_issue else ("degraded" if issues else "healthy"),
-        "issues": issues,
-        "service": "codebadger",
+    health = {
+        "status": overall,
+        "mcp": "codebadger",
         "version": VERSION,
         "uptime": {
             "seconds": uptime,
             "human": _format_uptime(uptime),
         },
+        "dependencies": dependencies,
         "capacity": {
             "accept_query": can_accept_query,
             "accept_generation": can_accept_generation,
         },
-        "joern": {
-            "container": container_info,
-            "servers": {
-                "worker_mode": joern_mgr.worker_mode if joern_mgr else "shared",
-                # In "memory" admission mode the real cap is the memory budget +
-                # port pool, not a fixed count; count_cap is only used as the
-                # ceiling in legacy "count" mode.
-                "admission": memory_info.get("mode", "count"),
-                "active": len(active_servers),
-                "sleeping": sleeping,
-                "count_cap": joern_mgr._max_active if joern_mgr else 0,
-                "lru_evictions": joern_mgr._lru_eviction_count if joern_mgr else 0,
-                "port_pool": port_info,
+        "checks": {
+            "joern": {
+                "status": joern_status,
+                "container": container_info,
+                "servers": {
+                    "worker_mode": joern_mgr.worker_mode if joern_mgr else "shared",
+                    "admission": memory_info.get("mode", "count"),
+                    "active": len(active_servers),
+                    "sleeping": sleeping,
+                    "count_cap": joern_mgr._max_active if joern_mgr else 0,
+                    "lru_evictions": joern_mgr._lru_eviction_count if joern_mgr else 0,
+                    "port_pool": port_info,
+                },
+                "memory": memory_info,
             },
-            "memory": memory_info,
+            "postgres": {
+                "status": postgres_status,
+                "target": database_url.split("@")[-1],
+                **{k: v for k, v in pg_probe.items() if k in ("latency_ms", "error")},
+            },
+            "redis": {
+                "status": redis_status,
+                "target": redis_url.split("@")[-1],
+                "backend": getattr(coordinator, "backend", "unknown") if coordinator else "none",
+                **{k: v for k, v in redis_probe.items() if k in ("latency_ms", "error")},
+            },
+            "docker": {
+                "status": docker_status,
+                "container_name": container_info.get("container_name"),
+                "container_status": cstatus,
+            },
+            "cpg_queue": {"status": cpg_queue_status, **queue_info},
         },
-        "cpg_queue": queue_info,
         "codebases": {
             "total": len(codebases),
             "by_status": by_status,
-            "list": codebases,
         },
         "resources": {
             "process_memory_mb": _get_process_memory_mb(),
             "system_memory_available_gb": _get_system_memory_available_gb(),
             "disk": _get_disk_usage(project_root),
-            "cpg_cache_mb": cache_info.get("size_mb", -1.0),
+            "cpg_cache_mb": cpg_cache_mb,
         },
+        "issues": issues,
     }
+    if include_sensitive:
+        health["codebases"]["list"] = codebases
+    return health
 
 
 async def _periodic_status_log(interval_secs: int) -> None:
@@ -902,37 +1019,43 @@ async def _periodic_status_log(interval_secs: int) -> None:
     while True:
         await asyncio.sleep(interval_secs)
         try:
-            h = _build_health(include_sensitive=True)
+            h = await _build_health(include_sensitive=True)
+            joern = h['checks']['joern']
+            srv = joern['servers']
+            mem = joern['memory']
+            q = h['checks']['cpg_queue']
             now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
             sep = "=" * 60
+            deps = "  ".join(f"{k}={v}" for k, v in h['dependencies'].items())
             lines = [
                 sep,
                 f"CodeBadger Status  [{now}]  uptime {h['uptime']['human']}",
                 sep,
                 f"Status : {h['status'].upper()}" + (f"  issues={h['issues']}" if h['issues'] else ""),
+                f"Deps   : {deps}",
                 f"Memory : process={h['resources']['process_memory_mb']} MB  "
                 f"system_avail={h['resources']['system_memory_available_gb']} GB",
-                f"Joern  : mode={h['joern']['servers']['worker_mode']}  "
-                f"active={h['joern']['servers']['active']}  "
-                f"sleeping={h['joern']['servers']['sleeping']}  "
-                f"count_cap={h['joern']['servers']['count_cap']}  "
-                f"evictions={h['joern']['servers']['lru_evictions']}  "
-                f"ports={h['joern']['servers']['port_pool']['available']} free",
-                f"Budget : {h['joern']['memory'].get('reserved_mb', 0)}/"
-                f"{h['joern']['memory'].get('budget_mb', 0)} MB reserved"
-                + (f" ({h['joern']['memory'].get('utilization_pct')}%)"
-                   if h['joern']['memory'].get('utilization_pct') is not None else "")
-                + f"  rss={h['joern']['memory'].get('container_rss_mb', '?')} MB",
-                f"Queue  : depth={h['cpg_queue']['depth']}  "
-                f"in_flight={h['cpg_queue']['in_flight']}  "
-                f"max={h['cpg_queue']['maxsize']}  "
-                f"workers={h['cpg_queue']['workers']}",
+                f"Joern  : mode={srv['worker_mode']}  "
+                f"active={srv['active']}  "
+                f"sleeping={srv['sleeping']}  "
+                f"count_cap={srv['count_cap']}  "
+                f"evictions={srv['lru_evictions']}  "
+                f"ports={srv['port_pool']['available']} free",
+                f"Budget : {mem.get('reserved_mb', 0)}/"
+                f"{mem.get('budget_mb', 0)} MB reserved"
+                + (f" ({mem.get('utilization_pct')}%)"
+                   if mem.get('utilization_pct') is not None else "")
+                + f"  rss={mem.get('container_rss_mb', '?')} MB",
+                f"Queue  : depth={q['depth']}  "
+                f"in_flight={q['in_flight']}  "
+                f"max={q['maxsize']}  "
+                f"workers={q['workers']}",
                 f"CPGs   : {h['codebases']['total']} registered  "
                 + "  ".join(f"{k}={v}" for k, v in h['codebases']['by_status'].items()),
             ]
             # Only list ACTIVE servers (those with a port) — listing every
             # registered codebase floods the log with thousands of lines per tick.
-            active = [cb for cb in h['codebases']['list'] if cb['joern_port']]
+            active = [cb for cb in h['codebases'].get('list', []) if cb['joern_port']]
             for cb in active:
                 src = cb['source']
                 if len(src) > 40:
@@ -951,16 +1074,20 @@ async def _periodic_status_log(interval_secs: int) -> None:
 
 @mcp.custom_route("/health", methods=["GET"])
 async def health_check(request):
-    """Health check endpoint"""
+    """Dependency-aware health check. status ∈ {up, partial, down}.
+
+    HTTP 200 for up/partial (the server is still serving), 503 for down so an
+    orchestrator/load-balancer takes the instance out of rotation.
+    """
     try:
-        h = _build_health()
-        status_code = 200 if h["status"] != "unhealthy" else 503
+        h = await _build_health()
+        status_code = 503 if h["status"] == "down" else 200
         return JSONResponse(h, status_code=status_code)
     except Exception as e:
         logger.error(f"Error in health check: {e}", exc_info=True)
         return JSONResponse({
-            "status": "unhealthy",
-            "service": "codebadger",
+            "status": "down",
+            "mcp": "codebadger",
             "version": VERSION,
             "error": str(e),
         }, status_code=500)

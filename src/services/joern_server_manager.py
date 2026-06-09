@@ -40,7 +40,7 @@ class JoernServerManager:
         self.config = config
         self.codebase_tracker = codebase_tracker
 
-        # Worker mode (Phase 2). "shared": Joern servers are processes inside the
+        # Worker mode. "shared": Joern servers are processes inside the
         # single build container. "pool": each CPG gets its own cgroup-capped
         # container so an OOM isolates to one worker. Pool workers publish to a
         # disjoint host-port range so they don't collide with the shared
@@ -84,7 +84,7 @@ class JoernServerManager:
         self._lru: OrderedDict[str, None] = OrderedDict()
         self._lru_eviction_count: int = 0
 
-        # Memory-aware admission (Phase 1). When _memory_budget_mb > 0, servers
+        # Memory-aware admission. When _memory_budget_mb > 0, servers
         # are admitted while the sum of per-CPG heap reservations stays under the
         # budget, evicting LRU to make room — memory, not a fixed count, is the
         # real concurrency limit. _reservations maps codebase_hash -> reserved MB.
@@ -99,9 +99,9 @@ class JoernServerManager:
         # call chain on one thread doesn't self-deadlock.
         self._state_lock = threading.RLock()
 
-        # Phase 3c: shared pool state in Redis so several processes coordinate
-        # spawn/evict without over-committing or double-spawning. Only in pool
-        # mode (worker containers are discoverable by name/port across processes).
+        # Shared pool state in Redis so several processes coordinate spawn/evict
+        # without over-committing or double-spawning. Only in pool mode (worker
+        # containers are discoverable by name/port across processes).
         self._redis_pool = None
         if self.worker_mode == "pool" and redis_url:
             try:
@@ -190,13 +190,20 @@ class JoernServerManager:
             # budget loop can't leak a reservation and spin / under-admit.
             self._lru.pop(codebase_hash, None)
             self._reservations.pop(codebase_hash, None)
+            self._last_touch.pop(codebase_hash, None)
             self._lru_eviction_count += 1
+            # Always return the host port to the pool on eviction. _cleanup_server
+            # frees it on the normal path, but when terminate_server no-ops (hash
+            # out of sync with _exec_ids) that never runs — release here so an
+            # evicted CPG can never strand its port. release_port is idempotent.
+            if not terminated and self.port_manager.get_port(codebase_hash) is not None:
+                self.port_manager.release_port(codebase_hash)
         # In Redis pool mode the make-room loops drive eviction off the SHARED
         # ledger (rp.oldest()/total_reserved_mb()), but a stale LRU/reservation
         # entry with no matching registry port makes terminate_server return
         # False before _cleanup_server runs -> the shared entry is never purged
         # and the loop re-picks the same victim forever ("No server found" spin).
-        # Purge it directly here; release() is idempotent.
+        # Purge it directly here (frees the registry port too); release() is idempotent.
         if self._redis_pool and not terminated:
             self._redis_pool.release(codebase_hash)
         if self.codebase_tracker:

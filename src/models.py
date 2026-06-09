@@ -123,7 +123,7 @@ class JoernConfig:
     server_startup_timeout: int = 120
     cpg_load_timeout: int = 300  # seconds before importCpg is abandoned and the server killed
     max_active_servers: int = 3
-    # Worker mode (Phase 2): "shared" (one container, servers as processes) or
+    # Worker mode: "shared" (one container, servers as processes) or
     # "pool" (one cgroup-capped container per CPG for OOM isolation).
     worker_mode: str = "shared"
     worker_image: str = "codebadger-joern-server:latest"

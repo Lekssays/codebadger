@@ -1,5 +1,5 @@
 """
-Redis-backed shared pool state for multi-process pool mode (Phase 3c).
+Redis-backed shared pool state for multi-process pool mode.
 
 In pool mode every CPG runs in its own container named `codebadger-joern-<hash>`
 publishing a host port, so any process on the host can discover and connect to a

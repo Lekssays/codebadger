@@ -25,8 +25,8 @@ flowchart TB
 
     JM -->|exec / containers| JC[(Joern container/s)]
     CG -->|build CPG| JC
-    QE --> STORE[(Catalog + cache + findings + jobs<br/>SQLite or Postgres)]
-    JM -.pool state.-> REDIS[(Redis - optional)]
+    QE --> STORE[(Catalog + cache + findings + jobs<br/>Postgres)]
+    JM -.pool state.-> REDIS[(Redis)]
     CO -.cross-process locks.-> REDIS
 ```
 
@@ -35,9 +35,11 @@ flowchart TB
 - **`QueryExecutor`** - serializes requests per CPG (one Joern JVM per CPG), caches
   successful results, and triggers auto-wake.
 - **`JoernServerManager`** - the heart: spawns query servers, sizes their heaps,
-  enforces the memory budget, sleeps idle servers, and evicts under pressure.
-- **Storage** - SQLite by default; a `DATABASE_URL` swaps in Postgres for the whole
-  store. **Redis** (optional) holds cross-process locks and pool state.
+  enforces the memory budget, offloads idle servers (idle-TTL reaper), and evicts
+  under pressure. Ports return to the pool on every eviction/offload.
+- **Storage** - **Postgres** holds the whole store: catalog, tool cache,
+  findings, and the durable job queue. **Redis** holds the cross-process query
+  locks and the pool ledger. The server fails to boot if either is unreachable.
 
 ## Query flow (with auto-wake)
 
@@ -71,7 +73,7 @@ stateDiagram-v2
     [*] --> generating: generate_cpg
     generating --> ready: build + load OK
     generating --> failed: build error / timeout
-    ready --> sleeping: idle / evicted (LRU or RSS)
+    ready --> sleeping: idle 10min (reaper) / evicted (LRU or RSS)
     sleeping --> ready: query auto-wakes (importCpg)
     failed --> generating: retry
     ready --> [*]: delete
@@ -102,7 +104,9 @@ flowchart TD
 - **Tiers** - heap is sized to the CPG's on-disk size (S/M/L/XL), so a batch of
   small CPGs runs far more servers concurrently than a few large ones.
 - **Eviction** - least-recently-used servers are put to sleep to make room; an
-  RSS-pressure backstop evicts before the kernel OOM-kills.
+  RSS-pressure backstop evicts before the kernel OOM-kills. A background reaper
+  also offloads servers idle past `JOERN_IDLE_TTL_SECONDS` (default 600s) so a
+  finished codebase stops pinning RAM; the next query reactivates it.
 - **Cross-process** (`pool` mode + Redis) - the reservation ledger, warm-worker
   registry, global LRU, and per-CPG spawn lock live in Redis, so many processes
   admit/evict against one shared budget. See [Deployment](deployment.md#shared-vs-pool-mode).
@@ -124,6 +128,26 @@ flowchart TD
   a startup guard clamps (and warns) rather than letting build + query pools
   jointly over-commit the host.
 
+## Health & observability
+
+`GET /health` is the operator's single view of the deployment. It probes every
+dependency concurrently (bounded timeout, so a hung backend can't stall the
+endpoint) and rolls them into one status:
+
+- `status` ∈ `up | partial | down`, plus `mcp: "codebadger"` and a
+  `dependencies` map: `joern`, `postgres`, `redis`, `docker`, `cpg_queue` (each
+  `up`/`partial`/`down`). Per-dependency detail (ping latency, port pool, memory
+  ledger, queue depth) lives under `checks`.
+- **Aggregation**: `down` if any of postgres/redis/docker/joern is down (Joern is
+  the analysis engine, so its loss is a full outage); `partial` for softer
+  degradation (e.g. queue full, memory budget near-exhausted); else `up`.
+- **HTTP codes**: 200 for `up`/`partial`, 503 for `down` — so a load balancer or
+  orchestrator takes a `down` instance out of rotation.
+
+Every run also writes a per-run file log (`logs/codebadger-<ts>-<pid>.log`, with
+a `codebadger-latest.log` symlink) alongside stdout, and a compact status block
+logs on an interval.
+
 ## Repository layout
 
 ```text
@@ -133,8 +157,8 @@ src/
   tools/        core_tools, code_browsing_tools, taint_analysis_tools, custom_tools, queries/*.scala
   services/     joern_server_manager, query_executor, cpg_generator, codebase_tracker,
                 coordination, pool_store, port_manager, git_manager
-  utils/        db_manager (SQLite), postgres_db_manager, postgres_job_store,
-                recommend, validators, cpgql_validator, cache_cleanup
+  utils/        postgres_db_manager, postgres_job_store, recommend,
+                validators, cpgql_validator, cache_cleanup, logging
 scripts/        recommend_config.py
 tests/          unit + integration suites
 ```

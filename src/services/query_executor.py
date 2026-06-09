@@ -38,11 +38,10 @@ class QueryExecutor:
         self.config = config or {}
         self.codebase_tracker = codebase_tracker
         # Serialize queries per codebase so a runaway query on one JVM doesn't
-        # cause a second request to pile on. The coordinator makes this lock hold
-        # across processes (Redis) when configured; defaults to in-process.
+        # cause a second request to pile on. The (Redis-backed) coordinator makes
+        # this lock hold across processes.
         if coordinator is None:
-            from .coordination import InProcessCoordinator
-            coordinator = InProcessCoordinator()
+            raise ValueError("QueryExecutor requires a coordinator")
         self.coordinator = coordinator
 
     def execute_query(

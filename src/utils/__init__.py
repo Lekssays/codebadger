@@ -3,7 +3,6 @@ Utilities package
 """
 
 from .logging import get_logger, setup_logging
-from .db_manager import DBManager
 from .validators import (
     hash_query,
     sanitize_path,
@@ -27,7 +26,6 @@ from .recommend import (
 __all__ = [
     "get_logger",
     "setup_logging",
-    "DBManager",
     "compute_recommendation",
     "current_from_config",
     "detect_host",

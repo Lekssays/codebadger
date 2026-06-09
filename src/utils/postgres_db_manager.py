@@ -1,30 +1,31 @@
 """
-Postgres-backed catalog/cache/findings store (Phase 3c).
+Postgres-backed catalog/cache/findings store.
 
-Drop-in for the SQLite DBManager when DATABASE_URL points at Postgres, so the
-codebase catalog, tool cache, findings AND the durable job queue all live in one
-shared Postgres — the last piece needed for genuinely multi-process operation
-(multiple API/scheduler processes reading/writing one catalog instead of a local
-SQLite file). Subclasses PostgresJobStore to inherit the job-queue methods and
-the connection helper.
+The codebase catalog, tool cache, findings AND the durable job queue all live in
+one shared Postgres, so several API/scheduler processes can read/write one
+catalog concurrently. Subclasses PostgresJobStore to inherit the job-queue
+methods and the connection helper.
 
-Postgres dialect notes vs the SQLite manager: %s placeholders, BIGSERIAL ids,
-INSERT ... ON CONFLICT upserts, RETURNING for generated ids. Large TEXT (cache
-output, flow_data) is TOAST-compressed out-of-line by Postgres automatically, so
-the SQLite-style inline bloat doesn't accrue; the MAX_CACHE_OUTPUT_BYTES cap
-still applies.
+Dialect notes: %s placeholders, BIGSERIAL ids, INSERT ... ON CONFLICT upserts,
+RETURNING for generated ids. Large TEXT (cache output, flow_data) is
+TOAST-compressed out-of-line by Postgres automatically; the MAX_CACHE_OUTPUT_BYTES
+cap still applies.
 """
 
 import hashlib
 import json
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from .db_manager import MAX_CACHE_OUTPUT_BYTES
 from .postgres_job_store import PostgresJobStore
 
 logger = logging.getLogger(__name__)
+
+# Skip caching outputs larger than this (bytes); 0 disables the cap. Keeps the
+# tool_cache from bloating with rarely-reused multi-hundred-KB query dumps.
+MAX_CACHE_OUTPUT_BYTES = int(os.getenv("MAX_CACHE_OUTPUT_BYTES", "262144"))
 
 
 def _now() -> str:
@@ -32,11 +33,22 @@ def _now() -> str:
 
 
 class PostgresDBManager(PostgresJobStore):
-    """Same method surface as DBManager, backed by Postgres."""
+    """Catalog/cache/findings + durable job queue, backed by Postgres."""
 
     def close(self):
         """No-op: connections are opened per operation."""
         pass
+
+    def ping(self) -> dict:
+        """Liveness probe for /health: SELECT 1 round-trip with latency (ms)."""
+        import time
+        start = time.monotonic()
+        try:
+            with self._connect() as conn:
+                conn.execute("SELECT 1")
+            return {"ok": True, "latency_ms": round((time.monotonic() - start) * 1000, 2)}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
 
     def init_schema(self) -> None:
         super().init_schema()  # jobs table + indexes

@@ -1,12 +1,9 @@
 """
-Postgres-backed durable job store (Phase 3b).
+Postgres-backed durable job store.
 
-Exposes the same job-queue method surface as DBManager (enqueue_job /
+Exposes the job-queue method surface used by DurableCPGQueue (enqueue_job /
 claim_next_job / complete_job / fail_job / get_job / count_jobs /
-requeue_running_jobs), so DurableCPGQueue is backend-agnostic — pass this
-instead of the SQLite DBManager when DATABASE_URL points at Postgres.
-
-The win over SQLite: claim_next_job uses `FOR UPDATE SKIP LOCKED`, so many
+requeue_running_jobs). claim_next_job uses `FOR UPDATE SKIP LOCKED`, so many
 generation workers across multiple processes / hosts can pull from one shared
 queue concurrently without blocking each other or double-claiming.
 

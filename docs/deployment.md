@@ -4,53 +4,56 @@
 
 ```mermaid
 flowchart TB
-    subgraph single[Single process - default]
-        M1[main.py] --> S1[(SQLite<br/>catalog + cache + queue)]
-        M1 --> J1[codebadger-joern-server]
-    end
-    subgraph multi[Multi-process - shared state]
-        M2[main.py #1] --> PG[(Postgres<br/>catalog + cache + findings + jobs)]
-        M3[main.py #2] --> PG
-        M2 --> R[(Redis<br/>pool ledger + locks)]
-        M3 --> R
-        M2 --> W[Joern workers]
-        M3 --> W
-    end
+    M2[main.py #1] --> PG[(Postgres<br/>catalog + cache + findings + jobs)]
+    M3[main.py #2] --> PG
+    M2 --> R[(Redis<br/>pool ledger + locks)]
+    M3 --> R
+    M2 --> W[Joern workers]
+    M3 --> W
 ```
 
-The default single-process setup needs only the Joern container. To run several
-API/scheduler processes against one shared catalog and queue, add **Postgres**
-(state) and **Redis** (coordination). Both sit behind Compose **profiles**, so a
-plain `docker compose up -d` will *not* start them - you must pass the profile.
+CodeBadger needs three backing services: the **Joern** container, **Postgres**
+(catalog, tool cache, findings, and the durable job queue), and **Redis** (the
+per-CPG query lock and the shared pool ledger, so several API/scheduler processes
+coordinate without over-committing). All three start with `docker compose up -d`;
+the server **fails to boot** if Postgres or Redis is unreachable.
+
+### 1. Start the backing services
 
 ```bash
-docker compose up -d                                       # Joern only (default)
-docker compose --profile postgres up -d                    # + Postgres (host port 55432)
-docker compose --profile redis up -d                       # + Redis (host port 56379)
-docker compose --profile postgres --profile redis up -d    # Joern + Postgres + Redis together
-```
-
-Verify all three are up, then tear down (profiles needed for `down` too):
-
-```bash
-docker compose --profile postgres --profile redis ps
-docker compose --profile postgres --profile redis down
+docker compose up -d            # Joern + Postgres (55432) + Redis (56379)
+docker compose ps               # confirm all three are healthy
+docker compose down             # tear down
 ```
 
 > Postgres publishes on **55432** and Redis on **56379** (non-default ports) to
 > avoid clashing with system services; override with `POSTGRES_PORT` / `REDIS_PORT`.
 
-Point the server at them (it creates the Postgres schema on first start):
+### 2. Start the server
+
+It defaults to the Compose Postgres/Redis and creates the Postgres schema on first
+start, so a local run needs no extra env:
 
 ```bash
+python main.py
+# equivalent to the built-in defaults:
 DATABASE_URL=postgresql://codebadger:codebadger@localhost:55432/codebadger \
-REDIS_URL=redis://localhost:56379/0 \
-CPG_QUEUE_BACKEND=durable python main.py
+REDIS_URL=redis://localhost:56379/0 python main.py
 ```
 
-`DATABASE_URL` moves the **entire store** - catalog, tool cache, findings, *and*
-the job queue (`FOR UPDATE SKIP LOCKED`) - to Postgres. `REDIS_URL` makes the
-per-CPG query lock and (in `pool` mode) the shared pool state cross-process.
+Override `DATABASE_URL` / `REDIS_URL` to point at managed instances. The CPG queue
+is `durable` (Postgres-backed, `FOR UPDATE SKIP LOCKED`) by default.
+
+### 3. Verify it's healthy
+
+`GET /health` reports `status` (`up`/`partial`/`down`), `mcp: "codebadger"`, and a
+`dependencies` map (joern, postgres, redis, docker, cpg_queue). It returns HTTP
+200 for `up`/`partial` and 503 for `down`, so it works directly as an
+orchestrator liveness/readiness probe.
+
+```bash
+curl -s http://localhost:4242/health | python -m json.tool
+```
 
 ## Sizing for your host
 

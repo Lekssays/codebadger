@@ -31,7 +31,7 @@ class CacheCleanupScheduler:
         """Initialize the cache cleanup scheduler.
         
         Args:
-            db_manager: DBManager instance for database operations
+            db_manager: PostgresDBManager instance for database operations
             cleanup_interval_seconds: How often to run cleanup (default: 3600 = 1 hour)
             max_age_seconds: Maximum age of cache entries to keep (default: 3600 = 1 hour)
         """

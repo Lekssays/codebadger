@@ -145,6 +145,34 @@ def test_make_room_purges_stale_pool_entry_without_spinning(pool, monkeypatch):
     assert "stale" not in store.resv
 
 
+def test_evict_releases_port_back_to_pool(pool, monkeypatch):
+    """Evicting a CPG must return its host port to the pool (no port leak)."""
+    m, fake = pool
+    monkeypatch.setattr(m, "_plan_server", lambda h: (2, 3072))
+    total = m.port_manager.available_count()
+    port = m.spawn_server("abc")
+    assert m.port_manager.available_count() == total - 1
+    assert m.port_manager.get_port("abc") == port
+
+    m._evict("abc")
+
+    assert m.port_manager.get_port("abc") is None
+    assert m.port_manager.available_count() == total  # port returned
+
+
+def test_evict_releases_port_even_when_terminate_noops(pool):
+    """Defensive: a port allocated but out of sync with _exec_ids is still freed."""
+    m, fake = pool
+    total = m.port_manager.available_count()
+    port = m.port_manager.allocate_port("orphan")  # allocated, but never registered in _exec_ids
+    assert m.port_manager.available_count() == total - 1
+
+    m._evict("orphan")  # terminate_server no-ops (not in _exec_ids)
+
+    assert m.port_manager.get_port("orphan") is None
+    assert m.port_manager.available_count() == total
+
+
 def test_idle_candidates_local_mode_picks_stale_only(pool, monkeypatch):
     """Local mode: only workers untouched beyond the TTL are reap candidates."""
     m, fake = pool
