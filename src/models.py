@@ -187,6 +187,11 @@ class CPGConfig:
     build_heap_gb: int = 6
     # "memory" (in-process queue) or "durable" (DB-backed jobs table).
     queue_backend: str = "memory"
+    # Large-project guard (generate_cpg declines local sources above either
+    # threshold unless force=True). Turn off for unattended/batch drivers.
+    large_project_guard: bool = True
+    large_project_max_mb: int = 2000
+    large_project_max_loc: int = 2_000_000
 
 
 @dataclass

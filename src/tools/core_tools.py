@@ -828,14 +828,21 @@ Examples:
                 source_path = validate_snippet_label(source_path)
 
             codebase_tracker = services["codebase_tracker"]
+            config = services.get("config")
 
             # Large-project guard: warn before committing to an expensive full-project CPG.
-            # resolve + scan are blocking FS work — run them off the event loop so a big
-            # project's tree walk can't freeze every other concurrent generate_cpg call.
-            if source_type == "local" and not force:
+            # Thresholds are configurable and the whole guard can be turned off
+            # (CPG_LARGE_PROJECT_GUARD=false) for unattended/batch drivers that always
+            # intend to build and can't pass force=True per call. resolve + scan are
+            # blocking FS work — run them off the event loop so a big project's tree
+            # walk can't freeze every other concurrent generate_cpg call.
+            guard_on = config.cpg.large_project_guard if config else True
+            if source_type == "local" and not force and guard_on:
+                max_mb = config.cpg.large_project_max_mb if config else 2000
+                max_loc = config.cpg.large_project_max_loc if config else 2_000_000
                 resolved = await asyncio.to_thread(resolve_host_path, source_path)
                 size_mb, loc = await asyncio.to_thread(_scan_repo, resolved)
-                if size_mb > 150 or loc > 15000:
+                if size_mb > max_mb or loc > max_loc:
                     return {
                         "status": "large_project_warning",
                         "size_mb": size_mb,

@@ -229,6 +229,16 @@ CPG_BUILD_HEAP_GB = 6
 # throwaway single-process run.
 CPG_QUEUE_BACKEND = "durable"
 
+# Large-project guard: generate_cpg returns a "large_project_warning" (instead of
+# building) for a local source above either threshold, unless force=True. Meant to
+# stop an interactive user from accidentally committing to a giant full-project
+# build. Thresholds are deliberately high so only genuinely enormous trees warn;
+# set CPG_LARGE_PROJECT_GUARD=false for unattended/batch drivers that always intend
+# to build (they can't pass force=True per call).
+CPG_LARGE_PROJECT_GUARD = True
+CPG_LARGE_PROJECT_MAX_MB = 2000
+CPG_LARGE_PROJECT_MAX_LOC = 2_000_000
+
 # Language-specific Joern frontend binaries (full paths inside the container)
 LANGUAGE_COMMANDS = {
     "java":       "/opt/joern/joern-cli/javasrc2cpg",

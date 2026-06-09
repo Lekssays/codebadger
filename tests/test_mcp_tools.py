@@ -1290,3 +1290,49 @@ class TestCopyLocalSourceTree:
         _copy_local_source_tree(str(src), str(dst))
         assert (dst / "ok.c").exists()
         assert not (dst / "leak").exists()            # escaping symlink not copied
+
+
+class TestLargeProjectGuard:
+    """generate_cpg large-project guard: configurable + toggleable (fix #2)."""
+
+    @pytest.mark.asyncio
+    async def test_warns_when_guard_on_and_over_threshold(self, mock_services, tmp_path):
+        from src.tools.core_tools import register_core_tools
+        mock_services["codebase_tracker"].get_codebase.return_value = None
+        src = tmp_path / "src"; src.mkdir()
+        # default config: guard on, thresholds 2000 MB / 2M LOC -> 3M LOC trips it
+        with patch("src.tools.core_tools.resolve_host_path", return_value=str(src)), \
+             patch("src.tools.core_tools._scan_repo", return_value=(3000, 3_000_000)):
+            mcp = FastMCP("t"); register_core_tools(mcp, mock_services)
+            async with Client(mcp) as client:
+                result = await client.call_tool(
+                    "generate_cpg",
+                    {"source_type": "local", "source_path": str(src), "language": "c"},
+                )
+            import json; d = json.loads(result.content[0].text)
+            assert d["status"] == "large_project_warning"
+            assert d["lines_of_code"] == 3_000_000
+
+    @pytest.mark.asyncio
+    async def test_guard_off_skips_warning_and_builds(self, mock_services, tmp_path):
+        from unittest.mock import AsyncMock
+        from src.tools.core_tools import register_core_tools
+        mock_services["codebase_tracker"].get_codebase.return_value = None
+        mock_services["config"].cpg.large_project_guard = False   # batch driver
+        mock_services["cpg_queue"] = MagicMock()
+        mock_services["cpg_queue"].submit = AsyncMock(return_value="queued")
+        src = tmp_path / "src"; src.mkdir()
+        with patch("src.tools.core_tools.resolve_host_path", return_value=str(src)), \
+             patch("src.tools.core_tools._get_git_commit_hash", return_value=None), \
+             patch("src.tools.core_tools._copy_local_source_tree"), \
+             patch("src.tools.core_tools.os.path.abspath", return_value=str(tmp_path)), \
+             patch("src.tools.core_tools.os.path.dirname", return_value=str(tmp_path)), \
+             patch("src.tools.core_tools.os.path.join", side_effect=os.path.join):
+            mcp = FastMCP("t"); register_core_tools(mcp, mock_services)
+            async with Client(mcp) as client:
+                result = await client.call_tool(
+                    "generate_cpg",
+                    {"source_type": "local", "source_path": str(src), "language": "c"},
+                )
+            import json; d = json.loads(result.content[0].text)
+            assert d["status"] == "generating"          # guard off -> built, not declined

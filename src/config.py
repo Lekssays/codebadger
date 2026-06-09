@@ -78,6 +78,11 @@ def load_config(config_path: Optional[str] = None) -> Config:
                 build_workers=int(os.getenv("CPG_BUILD_WORKERS", str(defaults.CPG_BUILD_WORKERS))),
                 build_heap_gb=int(os.getenv("CPG_BUILD_HEAP_GB", str(defaults.CPG_BUILD_HEAP_GB))),
                 queue_backend=os.getenv("CPG_QUEUE_BACKEND", defaults.CPG_QUEUE_BACKEND),
+                large_project_guard=os.getenv(
+                    "CPG_LARGE_PROJECT_GUARD", str(defaults.CPG_LARGE_PROJECT_GUARD)
+                ).lower() not in ("false", "0", "no", "off"),
+                large_project_max_mb=int(os.getenv("CPG_LARGE_PROJECT_MAX_MB", str(defaults.CPG_LARGE_PROJECT_MAX_MB))),
+                large_project_max_loc=int(os.getenv("CPG_LARGE_PROJECT_MAX_LOC", str(defaults.CPG_LARGE_PROJECT_MAX_LOC))),
             ),
             query=QueryConfig(
                 timeout=int(os.getenv("QUERY_TIMEOUT", str(defaults.QUERY_TIMEOUT))),

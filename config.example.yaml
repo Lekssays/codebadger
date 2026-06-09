@@ -45,6 +45,12 @@ cpg:
   # CRITICAL: caps each build frontend's JVM heap. Without it a frontend grabs ~25% of the
   # container (~25GB) and N concurrent builds OOM the host. Raise it, lower build_workers, for v8.
   build_heap_gb: ${CPG_BUILD_HEAP_GB:6}
+  # Large-project guard: generate_cpg declines a local source above either threshold
+  # (returns large_project_warning) unless force=True. Set false for unattended/batch
+  # drivers that always intend to build. Thresholds high so only enormous trees warn.
+  large_project_guard: ${CPG_LARGE_PROJECT_GUARD:true}
+  large_project_max_mb: ${CPG_LARGE_PROJECT_MAX_MB:2000}
+  large_project_max_loc: ${CPG_LARGE_PROJECT_MAX_LOC:2000000}
   supported_languages:
     - java
     - c
