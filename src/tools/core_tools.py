@@ -1102,10 +1102,13 @@ Examples:
             }
 
     @mcp.tool(
-        description="""Get the status of a CPG generation or check if CPG exists.
+        description="""Get the current status of a CPG and its Joern server.
 
-Check if the analysis for a given codebase hash is complete and the CPG is ready.
-Also retrieves the connection port for the Joern server if running.
+USE THIS TO WAIT FOR generate_cpg: generate_cpg starts the build in the background
+and returns immediately with status 'generating'. Poll this tool with the returned
+codebase_hash until status becomes 'ready' (or 'failed') — that is the intended way
+to wait for a CPG to finish generating. It returns the CPG's current status and, once
+ready, the Joern server port to use for queries.
 
 Args:
     codebase_hash: The unique hash identifier returned by generate_cpg.
@@ -1113,19 +1116,24 @@ Args:
 Returns:
     {
         "codebase_hash": "hash",
-        "status": "ready" | "generating" | "failed" | "not_found",
+        "status": "generating" | "loading" | "ready" | "sleeping" | "failed" | "not_found",
         "cpg_path": "path to CPG if exists",
         "joern_port": port number or null,
         "language": "programming language"
     }
 
 Notes:
-    - If status is 'ready', the CPG is available for queries.
-    - If status is 'generating', wait and retry.
+    - 'generating'/'loading' → build or server startup in progress; wait briefly and poll again.
+    - 'ready' → the CPG is loaded and available for queries (use joern_port).
+    - 'sleeping' → CPG exists on disk but the server was evicted; it auto-wakes on the next query
+      (polling also triggers a restart).
+    - 'failed' → generation or load failed; regenerate with generate_cpg.
+    - 'not_found' → no such codebase; call generate_cpg first.
     - Filesystem paths in responses are redacted.
 
 Examples:
-    get_cpg_status(codebase_hash="abc123456789")""",
+    # Poll until ready after generate_cpg:
+    get_cpg_status(codebase_hash="abc123456789")  # repeat while status is 'generating'""",
     )
     def get_cpg_status(
         codebase_hash: Annotated[str, Field(description="The hash identifier of the codebase")]
