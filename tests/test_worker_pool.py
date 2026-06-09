@@ -122,6 +122,9 @@ class _FakePoolStore:
         if h in self.lru:
             self.lru.remove(h)
 
+    def idle(self, ttl_seconds):  # tests inject the idle set directly
+        return list(getattr(self, "_idle", []))
+
 
 def test_make_room_purges_stale_pool_entry_without_spinning(pool, monkeypatch):
     """A stale Redis ledger entry (reserved + LRU, no registry port) must be
@@ -140,6 +143,33 @@ def test_make_room_purges_stale_pool_entry_without_spinning(pool, monkeypatch):
     assert store.total_reserved_mb() == 0
     assert store.oldest() is None
     assert "stale" not in store.resv
+
+
+def test_idle_candidates_local_mode_picks_stale_only(pool, monkeypatch):
+    """Local mode: only workers untouched beyond the TTL are reap candidates."""
+    m, fake = pool
+    m._idle_ttl_seconds = 600
+    now = 1_000_000.0
+    monkeypatch.setattr(jsm.time, "time", lambda: now)
+    m._ports = {"old": 14000, "fresh": 14001}
+    m._last_touch = {"old": now - 700, "fresh": now - 60}
+    assert m._idle_candidates() == ["old"]
+
+
+def test_idle_candidates_redis_mode_delegates(pool):
+    """Redis (pool) mode reads idle candidates from the shared LRU ledger."""
+    m, fake = pool
+    store = _FakePoolStore()
+    store._idle = ["h1", "h2"]
+    m._redis_pool = store
+    assert m._idle_candidates() == ["h1", "h2"]
+
+
+def test_reaper_disabled_when_ttl_zero(pool):
+    m, fake = pool
+    m._idle_ttl_seconds = 0
+    m.start_reaper()
+    assert m._reaper_task is None
 
 
 def test_shared_mode_does_not_touch_worker_containers(monkeypatch):

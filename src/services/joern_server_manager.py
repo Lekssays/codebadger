@@ -112,7 +112,15 @@ class JoernServerManager:
                 logger.warning(f"Redis pool store unavailable ({e}); using in-process pool state")
                 self._redis_pool = None
 
+        # Idle reaping: offload a worker not queried for _idle_ttl_seconds so it
+        # stops pinning RAM; the next query reactivates it. _last_touch tracks the
+        # local (non-Redis) last-query time; Redis mode reads the LRU ZSET score.
+        self._idle_ttl_seconds: int = (config.joern.idle_ttl_seconds if config else 600)
+        self._reaper_interval: int = (config.joern.reaper_interval_seconds if config else 60)
+        self._last_touch: Dict[str, float] = {}
+
         self._watchdog_task: Optional[asyncio.Task] = None
+        self._reaper_task: Optional[asyncio.Task] = None
         # Injected by main.py after tools are registered so the watchdog goes
         # through the shared dedup registry instead of spawning its own tasks.
         self._restart_callback: Optional[Callable[[str, str], bool]] = None
@@ -142,6 +150,7 @@ class JoernServerManager:
         with self._state_lock:
             self._lru.pop(codebase_hash, None)
             self._lru[codebase_hash] = None
+            self._last_touch[codebase_hash] = time.time()
 
     def _container_memory_mb(self) -> float:
         """Return the Docker container's current RSS in MB (0.0 on any error)."""
@@ -804,6 +813,55 @@ class JoernServerManager:
         self._watchdog_task = asyncio.create_task(self._watchdog_loop())
         logger.info("Joern server watchdog started")
 
+    # idle reaper
+
+    def start_reaper(self) -> None:
+        """Start the background idle-worker reaper (no-op if disabled)."""
+        if self._idle_ttl_seconds <= 0:
+            logger.info("Idle reaper disabled (idle_ttl_seconds <= 0)")
+            return
+        self._reaper_task = asyncio.create_task(self._reaper_loop())
+        logger.info(
+            f"Joern idle reaper started (offload after {self._idle_ttl_seconds}s idle, "
+            f"scan every {self._reaper_interval}s)"
+        )
+
+    def _idle_candidates(self) -> list:
+        """Hashes that haven't served a query within the idle TTL."""
+        if self._redis_pool:
+            return self._redis_pool.idle(self._idle_ttl_seconds)
+        cutoff = time.time() - self._idle_ttl_seconds
+        with self._state_lock:
+            # Only consider live servers; a missing _last_touch (e.g. just spawned,
+            # not yet queried) is stamped on spawn via _touch, so default to "now".
+            return [h for h in list(self._ports.keys())
+                    if self._last_touch.get(h, time.time()) <= cutoff]
+
+    async def _reaper_loop(self) -> None:
+        loop = asyncio.get_running_loop()
+        while True:
+            try:
+                await asyncio.sleep(self._reaper_interval)
+                idle = self._idle_candidates()
+                if not idle:
+                    continue
+                logger.info(
+                    f"Idle reaper: offloading {len(idle)} worker(s) idle "
+                    f">{self._idle_ttl_seconds}s: {', '.join(idle)}"
+                )
+                for codebase_hash in idle:
+                    # _evict (terminate container + mark SLEEPING) can block on the
+                    # Docker API, so run it off the event loop. The next query for
+                    # this codebase auto-reactivates it (query_executor auto-wake).
+                    try:
+                        await loop.run_in_executor(None, self._evict, codebase_hash)
+                    except Exception as e:
+                        logger.warning(f"Idle reaper: failed to offload {codebase_hash}: {e}")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Reaper loop error: {e}", exc_info=True)
+
     async def _watchdog_loop(self) -> None:
         while True:
             try:
@@ -941,6 +999,7 @@ class JoernServerManager:
             self._reservations.pop(codebase_hash, None)
             self._worker_containers.pop(codebase_hash, None)
             self._lru.pop(codebase_hash, None)
+            self._last_touch.pop(codebase_hash, None)
             # Release the port even when _ports never got set: spawn can fail
             # between allocate_port() and the _ports assignment (e.g. the worker
             # image is missing), which would otherwise leak the port.

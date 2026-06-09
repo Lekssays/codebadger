@@ -154,6 +154,18 @@ class RedisPoolStore:
                 return h
         return None
 
+    def idle(self, ttl_seconds: int) -> list:
+        """Hashes whose last-touch is older than ``ttl_seconds`` (idle workers).
+
+        The LRU ZSET is scored by ``time.time()`` of the last touch, so a range
+        query [0, now - ttl] returns exactly the workers that haven't served a
+        query within the window — the reaper's eviction candidates.
+        """
+        if ttl_seconds <= 0:
+            return []
+        cutoff = time.time() - ttl_seconds
+        return list(self.r.zrangebyscore(_LRU, 0, cutoff))
+
     def count(self) -> int:
         return self.r.hlen(_REG)
 

@@ -84,7 +84,10 @@ class TestLifespan:
             async with main.app_lifespan(mock_mcp) as ctx:
                 # Verify initialization calls
                 mock_load_config.assert_called_with("config.yaml")
-                mock_setup_logging.assert_called_with("INFO")
+                # setup_logging now also receives file-logging kwargs; assert the
+                # level positional without pinning the exact kwarg set.
+                mock_setup_logging.assert_called_once()
+                assert mock_setup_logging.call_args[0][0] == "INFO"
                 mock_makedirs.assert_called()
 
     @pytest.mark.asyncio
@@ -330,6 +333,7 @@ class TestShutdown:
 
         joern_server_manager = MagicMock()
         joern_server_manager._watchdog_task = None
+        joern_server_manager._reaper_task = None
         port_manager = MagicMock()
         cpg_queue = MagicMock()
         cpg_queue.stop = AsyncMock()

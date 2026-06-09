@@ -3,179 +3,107 @@ Tests for logging configuration
 """
 
 import logging
-import sys
+import os
+from logging.handlers import RotatingFileHandler
 from unittest.mock import MagicMock, patch
 
-from src.utils.logging import get_logger, setup_logging
+import pytest
+
+from src.utils.logging import get_logger, get_run_log_path, setup_logging
+
+
+@pytest.fixture
+def restore_root_logging():
+    """Snapshot/restore the real root logger so tests don't leak handlers."""
+    root = logging.getLogger()
+    saved_handlers = root.handlers[:]
+    saved_level = root.level
+    yield
+    for h in root.handlers[:]:
+        root.removeHandler(h)
+        try:
+            h.close()
+        except Exception:
+            pass
+    for h in saved_handlers:
+        root.addHandler(h)
+    root.setLevel(saved_level)
+
+
+def _handlers_by_type(root, cls):
+    return [h for h in root.handlers if isinstance(h, cls)]
 
 
 class TestSetupLogging:
-    """Test logging setup functionality"""
+    """Test logging setup against the real root logger (no over-mocking)."""
 
-    def test_setup_logging_default_level(self):
-        """Test setting up logging with default INFO level"""
-        with patch("logging.getLogger") as mock_get_logger, patch(
-            "sys.stdout", create=True
-        ) as mock_stdout:
+    def test_default_level_and_stream_handler(self, tmp_path, restore_root_logging):
+        setup_logging(log_dir=str(tmp_path))
+        root = logging.getLogger()
+        assert root.level == logging.INFO
+        streams = [h for h in root.handlers if isinstance(h, logging.StreamHandler)
+                   and not isinstance(h, RotatingFileHandler)]
+        assert streams, "expected a stdout StreamHandler"
+        assert streams[0].level == logging.INFO
 
-            mock_root_logger = MagicMock()
-            mock_docker_logger = MagicMock()
-            mock_urllib_logger = MagicMock()
-            mock_git_logger = MagicMock()
+    def test_custom_level(self, tmp_path, restore_root_logging):
+        setup_logging("DEBUG", log_dir=str(tmp_path))
+        assert logging.getLogger().level == logging.DEBUG
 
-            def get_logger_side_effect(name=None):
-                if name == "docker":
-                    return mock_docker_logger
-                elif name == "urllib3":
-                    return mock_urllib_logger
-                elif name == "git":
-                    return mock_git_logger
-                else:
-                    return mock_root_logger
+    def test_invalid_level_defaults_to_info(self, tmp_path, restore_root_logging):
+        setup_logging("INVALID", log_dir=str(tmp_path))
+        assert logging.getLogger().level == logging.INFO
 
-            mock_get_logger.side_effect = get_logger_side_effect
+    def test_removes_existing_handlers(self, tmp_path, restore_root_logging):
+        root = logging.getLogger()
+        for h in root.handlers[:]:
+            root.removeHandler(h)
+        sentinel_a, sentinel_b = logging.NullHandler(), logging.NullHandler()
+        root.addHandler(sentinel_a)
+        root.addHandler(sentinel_b)
 
-            setup_logging()
+        setup_logging(log_dir=str(tmp_path))
 
-            # Verify root logger configuration
-            mock_root_logger.setLevel.assert_called_once_with(logging.INFO)
-            assert mock_root_logger.addHandler.called
+        # The two pre-existing handlers are gone; only the fresh stream+file remain.
+        assert sentinel_a not in root.handlers
+        assert sentinel_b not in root.handlers
 
-            # Verify handler was added
-            handler_call = mock_root_logger.addHandler.call_args[0][0]
-            assert isinstance(handler_call, logging.StreamHandler)
-            assert handler_call.level == logging.INFO
+    def test_library_noise_reduction(self, tmp_path, restore_root_logging):
+        setup_logging(log_dir=str(tmp_path))
+        assert logging.getLogger("docker").level == logging.WARNING
+        assert logging.getLogger("urllib3").level == logging.WARNING
+        assert logging.getLogger("git").level == logging.WARNING
 
-            # Verify library loggers are set to WARNING
-            mock_docker_logger.setLevel.assert_called_once_with(logging.WARNING)
-            mock_urllib_logger.setLevel.assert_called_once_with(logging.WARNING)
-            mock_git_logger.setLevel.assert_called_once_with(logging.WARNING)
+    def test_formatter_has_expected_fields(self, tmp_path, restore_root_logging):
+        setup_logging(log_dir=str(tmp_path))
+        root = logging.getLogger()
+        for part in ("%(asctime)s", "%(name)s", "%(levelname)s", "%(message)s"):
+            assert all(part in h.formatter._fmt for h in root.handlers if h.formatter)
 
-    def test_setup_logging_custom_level(self):
-        """Test setting up logging with custom log level"""
-        with patch("logging.getLogger") as mock_get_logger, patch(
-            "sys.stdout", create=True
-        ) as mock_stdout:
+    def test_file_logging_writes_run_file(self, tmp_path, restore_root_logging):
+        setup_logging(log_dir=str(tmp_path))
+        logging.getLogger("codebadger.test").info("marker-line-xyz")
+        path = get_run_log_path()
+        assert path and os.path.exists(path)
+        assert "marker-line-xyz" in open(path, encoding="utf-8").read()
+        # A stable latest symlink points at the current run file.
+        latest = os.path.join(str(tmp_path), "codebadger-latest.log")
+        assert os.path.realpath(latest) == os.path.realpath(path)
 
-            mock_root_logger = MagicMock()
-            mock_docker_logger = MagicMock()
-            mock_urllib_logger = MagicMock()
-            mock_git_logger = MagicMock()
+    def test_file_logging_can_be_disabled(self, tmp_path, restore_root_logging):
+        setup_logging(log_dir=str(tmp_path), log_to_file=False)
+        root = logging.getLogger()
+        assert not _handlers_by_type(root, RotatingFileHandler)
 
-            def get_logger_side_effect(name=None):
-                if name == "docker":
-                    return mock_docker_logger
-                elif name == "urllib3":
-                    return mock_urllib_logger
-                elif name == "git":
-                    return mock_git_logger
-                else:
-                    return mock_root_logger
-
-            mock_get_logger.side_effect = get_logger_side_effect
-
-            setup_logging("DEBUG")
-
-            # Verify root logger configuration
-            mock_root_logger.setLevel.assert_called_once_with(logging.DEBUG)
-
-    def test_setup_logging_invalid_level(self):
-        """Test setting up logging with invalid level defaults to INFO"""
-        with patch("logging.getLogger") as mock_get_logger, patch(
-            "sys.stdout", create=True
-        ) as mock_stdout:
-
-            mock_root_logger = MagicMock()
-            mock_docker_logger = MagicMock()
-            mock_urllib_logger = MagicMock()
-            mock_git_logger = MagicMock()
-
-            def get_logger_side_effect(name=None):
-                if name == "docker":
-                    return mock_docker_logger
-                elif name == "urllib3":
-                    return mock_urllib_logger
-                elif name == "git":
-                    return mock_git_logger
-                else:
-                    return mock_root_logger
-
-            mock_get_logger.side_effect = get_logger_side_effect
-
-            setup_logging("INVALID")
-
-            # Should default to INFO for invalid level
-            mock_root_logger.setLevel.assert_called_once_with(logging.INFO)
-
-    def test_setup_logging_removes_existing_handlers(self):
-        """Test that existing handlers are removed before setup"""
-        with patch("logging.getLogger") as mock_get_logger, patch(
-            "sys.stdout", create=True
-        ) as mock_stdout:
-
-            mock_root_logger = MagicMock()
-            mock_root_logger.handlers = [MagicMock(), MagicMock()]  # Existing handlers
-            mock_get_logger.return_value = mock_root_logger
-
-            setup_logging()
-
-            # Verify existing handlers were removed
-            assert mock_root_logger.removeHandler.call_count == 2
-
-    def test_setup_logging_library_noise_reduction(self):
-        """Test that noisy library loggers are configured"""
-        with patch("logging.getLogger") as mock_get_logger, patch(
-            "sys.stdout", create=True
-        ) as mock_stdout:
-
-            mock_root_logger = MagicMock()
-            mock_docker_logger = MagicMock()
-            mock_urllib_logger = MagicMock()
-            mock_git_logger = MagicMock()
-
-            def get_logger_side_effect(name=None):
-                if name == "docker":
-                    return mock_docker_logger
-                elif name == "urllib3":
-                    return mock_urllib_logger
-                elif name == "git":
-                    return mock_git_logger
-                else:
-                    return mock_root_logger
-
-            mock_get_logger.side_effect = get_logger_side_effect
-
-            setup_logging()
-
-            # Verify library loggers are set to WARNING
-            mock_docker_logger.setLevel.assert_called_once_with(logging.WARNING)
-            mock_urllib_logger.setLevel.assert_called_once_with(logging.WARNING)
-            mock_git_logger.setLevel.assert_called_once_with(logging.WARNING)
-
-    def test_setup_logging_formatter(self):
-        """Test that handlers get proper formatter"""
-        with patch("logging.getLogger") as mock_get_logger, patch(
-            "sys.stdout", create=True
-        ) as mock_stdout:
-
-            mock_root_logger = MagicMock()
-            mock_get_logger.return_value = mock_root_logger
-
-            setup_logging()
-
-            # Get the handler that was added
-            handler = mock_root_logger.addHandler.call_args[0][0]
-
-            # Verify formatter was set
-            assert handler.formatter is not None
-            assert isinstance(handler.formatter, logging.Formatter)
-
-            # Test the format string
-            format_str = handler.formatter._fmt
-            expected_parts = ["%(asctime)s", "%(name)s", "%(levelname)s", "%(message)s"]
-
-            for part in expected_parts:
-                assert part in format_str
+    def test_reinit_does_not_stack_handlers(self, tmp_path, restore_root_logging):
+        setup_logging(log_dir=str(tmp_path))
+        setup_logging(log_dir=str(tmp_path))
+        root = logging.getLogger()
+        # Exactly one stdout stream + one rotating file after a re-init.
+        assert len(_handlers_by_type(root, RotatingFileHandler)) == 1
+        streams = [h for h in root.handlers if isinstance(h, logging.StreamHandler)
+                   and not isinstance(h, RotatingFileHandler)]
+        assert len(streams) == 1
 
 
 class TestGetLogger:

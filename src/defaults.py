@@ -9,6 +9,14 @@ duplication across config files and Python code.
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 4242
 SERVER_LOG_LEVEL = "INFO"
+# Per-run file logging. When enabled, every run writes a timestamped log file
+# under SERVER_LOG_DIR (rotated) in addition to stdout, so a `screen` run can be
+# consulted after the fact instead of scrolling a firehose.
+SERVER_LOG_DIR = "logs"
+SERVER_LOG_TO_FILE = True
+# Rotation: cap each log file and keep this many backups (per run file).
+SERVER_LOG_MAX_BYTES = 50 * 1024 * 1024
+SERVER_LOG_BACKUP_COUNT = 5
 
 JOERN_BINARY_PATH = "joern"
 JOERN_MEMORY_LIMIT = "4g"
@@ -150,6 +158,15 @@ JOERN_MEMORY_BUDGET_MB = 0
 # Evict the LRU server when the container's RSS exceeds this (MB). A backstop
 # on top of the reservation ledger. 0 = auto-derive from host RAM at startup.
 JOERN_RSS_EVICTION_THRESHOLD_MB = 0
+
+# Idle reaping. A Joern query worker that hasn't served a query for this many
+# seconds is offloaded (container torn down, CPG marked SLEEPING) so it stops
+# pinning RAM; the next query for that codebase transparently reactivates it
+# (spawn + reload CPG). This is what bounds steady-state memory to the set of
+# *recently active* codebases rather than every codebase ever queried. 0 = off.
+JOERN_IDLE_TTL_SECONDS = 600
+# How often the background reaper scans for idle workers (seconds).
+JOERN_REAPER_INTERVAL_SECONDS = 60
 
 # MCP connection concurrency limit
 MAX_MCP_CONNECTIONS = 16

@@ -283,11 +283,12 @@ async def _graceful_shutdown():
 
         joern_server_manager = services.get('joern_server_manager')
         if joern_server_manager:
-            watchdog_task = getattr(joern_server_manager, '_watchdog_task', None)
-            if watchdog_task:
-                watchdog_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await watchdog_task
+            for task_attr in ('_watchdog_task', '_reaper_task'):
+                task = getattr(joern_server_manager, task_attr, None)
+                if task:
+                    task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await task
 
             logger.info("Terminating all Joern servers...")
             joern_server_manager.terminate_all_servers()
@@ -438,7 +439,13 @@ async def app_lifespan(server: FastMCP):
     _server_start_time = time.monotonic()
 
     config = load_config("config.yaml")
-    setup_logging(config.server.log_level)
+    setup_logging(
+        config.server.log_level,
+        log_dir=config.server.log_dir,
+        log_to_file=config.server.log_to_file,
+        log_max_bytes=config.server.log_max_bytes,
+        log_backup_count=config.server.log_backup_count,
+    )
     logger.info("Starting CodeBadger Server")
 
     # Print the memory-aware configuration envelope before the heavy service
@@ -585,6 +592,7 @@ async def app_lifespan(server: FastMCP):
             )
             joern_server_manager.start_watchdog()
             logger.info("Joern server watchdog started")
+            joern_server_manager.start_reaper()
 
         interval = int(os.getenv("STATUS_LOG_INTERVAL_SECS", "60"))
         services['status_log_task'] = asyncio.create_task(_periodic_status_log(interval))

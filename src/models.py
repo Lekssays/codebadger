@@ -139,6 +139,10 @@ class JoernConfig:
     memory_budget_mb: int = 0
     # RSS-pressure eviction: kill LRU server when container RSS exceeds this (0 = disabled)
     rss_eviction_threshold_mb: int = 0
+    # Idle reaping: offload a worker not queried for this many seconds (0 = off);
+    # scanned every reaper_interval_seconds. The next query reactivates it.
+    idle_ttl_seconds: int = 600
+    reaper_interval_seconds: int = 60
     # HTTP Connection Pooling
     http_pool_connections: int = 10
     http_pool_maxsize: int = 10
@@ -155,6 +159,10 @@ class ServerConfig:
     host: str = "0.0.0.0"
     port: int = 4242
     log_level: str = "INFO"
+    log_dir: str = "logs"
+    log_to_file: bool = True
+    log_max_bytes: int = 50 * 1024 * 1024
+    log_backup_count: int = 5
 
 
 @dataclass
