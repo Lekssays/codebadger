@@ -19,6 +19,10 @@ cd "$ROOT"
 # Absolute path so the daemon resolves pool sibling-container bind mounts correctly.
 export PLAYGROUND_HOST_PATH="${PLAYGROUND_HOST_PATH:-$ROOT/playground}"
 
+# Postgres data lives OUTSIDE the playground so Joern workers can't reach the DB
+# files (see docs/security.md). Defaults to ./pgdata next to the playground.
+export POSTGRES_DATA_PATH="${POSTGRES_DATA_PATH:-$ROOT/pgdata}"
+
 MCP_PORT="${MCP_PORT:-4242}"
 HEALTH_URL="http://localhost:${MCP_PORT}/health"
 CMD="${1:-up}"
@@ -62,8 +66,9 @@ wait_for_health() {
 
 case "$CMD" in
   up)
-    mkdir -p "$PLAYGROUND_HOST_PATH" "$ROOT/logs"
+    mkdir -p "$PLAYGROUND_HOST_PATH" "$POSTGRES_DATA_PATH" "$ROOT/logs"
     echo "Playground (host): $PLAYGROUND_HOST_PATH"
+    echo "Postgres data (host): $POSTGRES_DATA_PATH"
     "${COMPOSE[@]}" up -d --build
     wait_for_health
     ;;

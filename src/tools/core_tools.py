@@ -21,6 +21,7 @@ from ..exceptions import ValidationError
 from ..models import CodebaseInfo, SessionStatus
 from ..utils.validators import (
     validate_code_snippet,
+    validate_codebase_hash,
     validate_git_branch,
     validate_github_token,
     validate_github_url,
@@ -996,14 +997,27 @@ Examples:
                     logger.info(f"Copying source from {host_path} to {codebase_dir}")
                     
                     try:
+                        real_root = os.path.realpath(host_path)
                         for item in os.listdir(host_path):
                             src_item = os.path.join(host_path, item)
                             dst_item = os.path.join(codebase_dir, item)
-                            
+
+                            # Don't dereference symlinks whose target escapes the
+                            # source tree — that would pull arbitrary host files
+                            # (e.g. ~/.ssh/id_rsa) into the readable snapshot.
+                            if os.path.islink(src_item):
+                                if not os.path.realpath(src_item).startswith(real_root + os.sep):
+                                    logger.warning(
+                                        f"Skipping symlink escaping source root: {item}"
+                                    )
+                                    continue
+
                             if os.path.isdir(src_item):
-                                shutil.copytree(src_item, dst_item, dirs_exist_ok=True)
+                                # symlinks=True: copy nested links as links, never
+                                # dereference them out of the tree.
+                                shutil.copytree(src_item, dst_item, dirs_exist_ok=True, symlinks=True)
                             else:
-                                shutil.copy2(src_item, dst_item)
+                                shutil.copy2(src_item, dst_item, follow_symlinks=False)
                         logger.info(f"Source copied successfully to {codebase_dir}")
                     except OSError as e:
                         logger.error(f"Failed to copy local source directory for {codebase_hash}: {e}")
@@ -1118,6 +1132,7 @@ Examples:
     ) -> Dict[str, Any]:
         """Check CPG generation status or verify if a CPG exists and is ready."""
         try:
+            validate_codebase_hash(codebase_hash)
             codebase_tracker = services["codebase_tracker"]
 
             codebase_info = codebase_tracker.get_codebase(codebase_hash)
@@ -1211,6 +1226,7 @@ delete_files=True:
     ) -> Dict[str, Any]:
         """Free resources held by a codebase (evict server and optionally delete files)."""
         try:
+            validate_codebase_hash(codebase_hash)
             codebase_tracker = services["codebase_tracker"]
             joern_server_manager = services.get("joern_server_manager")
 
@@ -1240,7 +1256,16 @@ delete_files=True:
             )
             freed_bytes = 0
 
+            def _under_playground(p: str) -> bool:
+                # Defense-in-depth: never rmtree outside the playground, even if a
+                # bad hash somehow reached here (it can't — it's hex-validated above).
+                real = os.path.realpath(p)
+                root = os.path.realpath(playground_path)
+                return real == root or real.startswith(root + os.sep)
+
             cpg_dir = os.path.join(playground_path, "cpgs", codebase_hash)
+            if not _under_playground(cpg_dir):
+                raise ValidationError("refusing to delete outside the playground")
             if os.path.exists(cpg_dir):
                 for dirpath, _, filenames in os.walk(cpg_dir):
                     for fname in filenames:
@@ -1251,6 +1276,8 @@ delete_files=True:
                 shutil.rmtree(cpg_dir, ignore_errors=True)
 
             codebase_dir = os.path.join(playground_path, "codebases", codebase_hash)
+            if not _under_playground(codebase_dir):
+                raise ValidationError("refusing to delete outside the playground")
             if os.path.exists(codebase_dir):
                 for dirpath, _, filenames in os.walk(codebase_dir):
                     for fname in filenames:

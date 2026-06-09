@@ -20,6 +20,7 @@ These docs are for two audiences:
 | [Configuration](configuration.md) | `config.yaml` + environment variable reference, telemetry. |
 | [Deployment](deployment.md) | Docker Compose, Postgres/Redis profiles, memory sizing, `shared` vs `pool` mode, large batches. |
 | [Architecture](architecture.md) | System design, request flow, memory-aware admission, and design decisions (with diagrams). |
+| [Security](security.md) | Threat model, trust boundaries, the controls we provide, and production hardening. |
 | [Custom Tools](custom-tools.md) | Add your own detectors without touching the core. |
 | [Contributing](contributing.md) | Dev setup, running tests, and contribution guidelines. |
 | [Roadmap](roadmap.md) | What's shipped and what's next. |

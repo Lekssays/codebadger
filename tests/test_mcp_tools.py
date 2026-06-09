@@ -401,10 +401,27 @@ class TestMCPTools:
 
     @pytest.mark.asyncio
     async def test_get_cpg_status_not_found(self, mock_services):
-        """Test getting CPG status when CPG doesn't exist"""
+        """Test getting CPG status when CPG doesn't exist (valid-format but unknown hash)"""
         from src.tools.core_tools import register_core_tools
-        
+
         mock_services["codebase_tracker"].get_codebase.return_value = None
+        unknown_hash = "0123456789abcdef"
+
+        mcp = FastMCP("TestServer")
+        register_core_tools(mcp, mock_services)
+
+        async with Client(mcp) as client:
+            result = await client.call_tool("get_cpg_status", {"codebase_hash": unknown_hash})
+            import json
+            result_dict = json.loads(result.content[0].text)
+
+            assert result_dict["codebase_hash"] == unknown_hash
+            assert result_dict["status"] == "not_found"
+
+    @pytest.mark.asyncio
+    async def test_get_cpg_status_rejects_malformed_hash(self, mock_services):
+        """A malformed codebase_hash is rejected by validation, not treated as not_found."""
+        from src.tools.core_tools import register_core_tools
 
         mcp = FastMCP("TestServer")
         register_core_tools(mcp, mock_services)
@@ -414,8 +431,27 @@ class TestMCPTools:
             import json
             result_dict = json.loads(result.content[0].text)
 
-            assert result_dict["codebase_hash"] == "nonexistent"
-            assert result_dict["status"] == "not_found"
+            assert result_dict["success"] is False
+            assert "16-character hex" in result_dict["error"]
+
+    @pytest.mark.asyncio
+    async def test_remove_cpg_rejects_malformed_hash(self, mock_services):
+        """remove_cpg validates the hash before any DB/filesystem action."""
+        from src.tools.core_tools import register_core_tools
+
+        mcp = FastMCP("TestServer")
+        register_core_tools(mcp, mock_services)
+
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                "remove_cpg", {"codebase_hash": "../../etc", "delete_files": True}
+            )
+            import json
+            result_dict = json.loads(result.content[0].text)
+
+            assert result_dict["success"] is False
+            assert "16-character hex" in result_dict["error"]
+            mock_services["codebase_tracker"].get_codebase.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_list_methods_success(self, mock_services):
@@ -481,6 +517,54 @@ class TestMCPTools:
 
             assert result_dict["success"] is False
             assert result_dict["error"] == "Invalid query syntax"
+
+    @pytest.mark.asyncio
+    async def test_run_cpgql_query_blocks_dangerous_query(self, mock_services):
+        """The security blocklist is enforced on the raw-query path, before execution."""
+        from src.tools.code_browsing_tools import register_code_browsing_tools
+
+        mcp = FastMCP("TestServer")
+        register_code_browsing_tools(mcp, mock_services)
+
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                "run_cpgql_query",
+                {
+                    "codebase_hash": "553642871dd4251d",
+                    "query": 'scala.io.Source.fromFile("/etc/passwd").mkString',
+                },
+            )
+            import json
+            result_dict = json.loads(result.content[0].text)
+
+            assert result_dict["success"] is False
+            assert "dangerous operation" in result_dict["error"]
+            # Blocked before ever reaching the executor.
+            mock_services["query_executor"].execute_query.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_run_cpgql_query_surfaces_truncation(self, mock_services):
+        """A truncated QueryResult is flagged to the client."""
+        from src.tools.code_browsing_tools import register_code_browsing_tools
+        from src.models import QueryResult
+
+        mcp = FastMCP("TestServer")
+        register_code_browsing_tools(mcp, mock_services)
+        mock_services["query_executor"].execute_query.return_value = QueryResult(
+            success=True, data=["x"], row_count=1, truncated=True
+        )
+
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                "run_cpgql_query",
+                {"codebase_hash": "553642871dd4251d", "query": "cpg.method.name.l"},
+            )
+            import json
+            result_dict = json.loads(result.content[0].text)
+
+            assert result_dict["success"] is True
+            assert result_dict["truncated"] is True
+            assert "truncation_note" in result_dict
 
     @pytest.mark.asyncio
     async def test_get_codebase_summary_success(self, mock_services):

@@ -13,7 +13,11 @@ from ..exceptions import (
             ValidationError,
 )
 from ..utils.query_rendering import escape_scala_string
-from ..utils.validators import validate_codebase_hash
+from ..utils.validators import (
+    validate_codebase_hash,
+    validate_cpgql_query,
+    validate_search_pattern,
+)
 from .queries import QueryLoader
 
 logger = logging.getLogger(__name__)
@@ -731,6 +735,12 @@ Examples:
                     "Invalid line range: start_line must be >= 1 and end_line >= start_line"
                 )
 
+            from ..defaults import MAX_SNIPPET_SPAN_LINES
+            if end_line - start_line + 1 > MAX_SNIPPET_SPAN_LINES:
+                raise ValidationError(
+                    f"Line range too large (max {MAX_SNIPPET_SPAN_LINES} lines per request)"
+                )
+
             codebase_tracker = services["codebase_tracker"]
 
             codebase_info = codebase_tracker.get_codebase(codebase_hash)
@@ -834,6 +844,12 @@ Examples:
             if not query or not query.strip():
                 raise ValidationError("Query cannot be empty")
 
+            # Security blocklist for the raw-query escape hatch. Always enforced
+            # (independent of the optional `validate` syntax check below) — this is
+            # the one tool that forwards untrusted text to the Joern Scala REPL.
+            # Defense-in-depth: the real boundary is the Joern worker sandbox.
+            validate_cpgql_query(query.strip())
+
             codebase_tracker = services["codebase_tracker"]
             query_executor = services["query_executor"]
 
@@ -876,6 +892,13 @@ Examples:
                 "row_count": result.row_count,
                 "execution_time": getattr(result, "execution_time", None),
             }
+
+            if getattr(result, "truncated", False):
+                response["truncated"] = True
+                response["truncation_note"] = (
+                    "Results were capped by the server's size limit; refine the query "
+                    "(filter by filename, add .take(n), or narrow the traversal) to see the rest."
+                )
 
             if not result.success and getattr(result, "error", None):
                 response["error"] = result.error
@@ -1473,6 +1496,13 @@ Examples:
                 repo = git.Repo(source_dir)
             except git.InvalidGitRepositoryError:
                 return "Error: Invalid git repository. Cannot analyze commit history."
+
+            # Caller-supplied regexes are compiled and run against commit messages
+            # in-process (no Joern timeout backstop), so guard against ReDoS / huge
+            # patterns before compiling.
+            if patterns:
+                for p in patterns:
+                    validate_search_pattern(p, field="pattern")
 
             vuln_patterns = patterns if patterns else DEFAULT_VULN_PATTERNS
             compiled_patterns = []

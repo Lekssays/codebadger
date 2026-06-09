@@ -94,6 +94,7 @@ class QueryResult:
     error_code: Optional[str] = None  # "TIMEOUT", "SERVER_UNAVAILABLE", "SERVER_BUSY", "QUERY_ERROR"
     execution_time: float = 0.0
     row_count: int = 0
+    truncated: bool = False  # True when results were capped to the row/output limit
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert result to dictionary"""
@@ -104,6 +105,7 @@ class QueryResult:
             "error_code": self.error_code,
             "execution_time": self.execution_time,
             "row_count": self.row_count,
+            "truncated": self.truncated,
         }
 
 

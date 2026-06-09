@@ -139,5 +139,5 @@ curl -s http://localhost:4242/health | python3 -m json.tool
 
 ```bash
 bash cleanup.sh        # clears codebases, CPGs, and Postgres/Redis state
-docker compose down    # stop & remove containers (playground + pgdata persist)
+docker compose down    # stop & remove containers (playground/ + pgdata/ persist)
 ```

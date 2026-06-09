@@ -5,12 +5,14 @@ Utilities package
 from .logging import get_logger, setup_logging
 from .validators import (
     hash_query,
+    sanitize_error_text,
     sanitize_path,
     validate_codebase_hash,
     validate_cpgql_query,
     validate_github_url,
     validate_language,
     validate_local_path,
+    validate_search_pattern,
     validate_source_type,
     validate_timeout,
 )
@@ -36,7 +38,9 @@ __all__ = [
     "validate_github_url",
     "validate_language",
     "sanitize_path",
+    "sanitize_error_text",
     "validate_cpgql_query",
+    "validate_search_pattern",
     "validate_timeout",
     "hash_query",
     "escape_scala_string",

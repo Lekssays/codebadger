@@ -197,40 +197,69 @@ def validate_github_token(token: Optional[str]) -> None:
 
 
 def validate_cpgql_query(query: str) -> None:
-    """Validate CPGQL query"""
+    """Validate a raw CPGQL query before it reaches Joern's Ammonite Scala REPL.
+
+    IMPORTANT: this is a denylist and therefore *defense-in-depth*, not a security
+    boundary. The REPL is a full Scala interpreter; a determined attacker can
+    obfuscate around literal patterns. The real containment is the Joern worker
+    sandbox (cgroup-capped container, restricted mounts/network). This filter
+    stops casual/accidental misuse and the obvious exec/IO/network/reflection
+    constructs. Only call it on UNTRUSTED raw queries (run_cpgql_query), never on
+    the internally-built, already-escaped parameterized queries (a safely-escaped
+    user value could legitimately contain one of these substrings).
+    """
     if not query or not isinstance(query, str):
         raise ValidationError("Query must be a non-empty string")
 
     if len(query) > 10000:
         raise ValidationError("Query too long (max 10000 characters)")
 
-    # Block patterns that enable shell execution, filesystem writes, or network access.
     # Joern CPGQL runs inside an Ammonite Scala REPL, so all of these are reachable.
     dangerous_patterns = [
         # Process / shell execution
         (r"System\.exit",                       "process execution"),
+        (r"\bsys\s*\.\s*exit",                  "process execution"),
         (r"Runtime\.getRuntime",                "process execution"),
         (r"Runtime\.exec",                      "process execution"),
         (r"ProcessBuilder",                     "process execution"),
-        (r"scala\.sys\.process",                "shell execution"),
-        (r"import\s+sys\.process",              "shell execution"),
+        (r"ProcessImpl",                        "process execution"),
+        # `scala.sys.process` and any aliased/partial import of it
+        (r"sys\s*\.\s*process",                 "shell execution"),
+        (r"import\s+scala\.sys\.\{?\s*process", "shell execution"),
+        (r"stringToProcess",                    "shell execution"),
+        (r"\.lazyLines\b",                      "shell execution"),
         # Filesystem writes / deletes
         (r"java\.io\.File.*\.delete",           "file deletion"),
         (r"java\.io\.FileWriter",               "file write"),
         (r"java\.io\.FileOutputStream",         "file write"),
         (r"java\.io\.PrintWriter",              "file write"),
-        (r"java\.nio\.file\.Files\s*\.\s*(write|delete|move|copy)\b",
+        (r"java\.nio\.file\.Files\s*\.\s*(write|delete|move|copy|createFile|createDirectory|newOutputStream)\b",
                                                 "file write/delete"),
-        (r"\bos\s*\.\s*(write|remove|move|copy)\s*\(", "file write/delete (Ammonite os-lib)"),
+        (r"\bos\s*\.\s*(write|remove|move|copy)\s*", "file write/delete (Ammonite os-lib)"),
+        # Filesystem reads (host file exfiltration)
+        (r"scala\.io\.Source",                  "file read"),
+        (r"Source\.fromFile",                   "file read"),
+        (r"java\.io\.File(Reader|InputStream)", "file read"),
+        (r"java\.nio\.file\.Files\s*\.\s*(read|lines|newInputStream|newBufferedReader)",
+                                                "file read"),
+        (r"\bos\s*\.\s*(read|list|walk)\b",     "file read (Ammonite os-lib)"),
         # Network access
-        (r"java\.net\.(Socket|ServerSocket)\b", "network access"),
+        (r"java\.net\.(Socket|ServerSocket|DatagramSocket)\b", "network access"),
         (r"java\.net\.URL\b.*\.(openStream|openConnection|getContent)\b",
                                                 "network access"),
+        (r"java\.net\.(URI|URL)\b",             "network access"),
         (r"java\.net\.HttpURLConnection",       "network access"),
+        (r"javax\.net\b",                       "network access"),
+        # Dynamic dependency / code loading (network + arbitrary code)
+        (r"\$ivy",                              "dynamic dependency load"),
+        (r"\$file",                             "dynamic file import"),
+        (r"\binterp\s*\.",                      "Ammonite interpreter access"),
         # Reflection (can bypass the above checks)
         (r"java\.lang\.reflect\b",              "reflection"),
+        (r"scala\.reflect\b",                   "reflection"),
         (r"Class\.forName\b",                   "reflection"),
-        (r"\.(getDeclaredMethod|getDeclaredField)\b", "reflection"),
+        (r"\.loadClass\b",                      "reflection"),
+        (r"\.(getDeclaredMethod|getDeclaredField|getMethod|getField|getClass)\b", "reflection"),
     ]
 
     for pattern, category in dangerous_patterns:
@@ -238,6 +267,66 @@ def validate_cpgql_query(query: str) -> None:
             raise ValidationError(
                 f"Query contains a potentially dangerous operation ({category})"
             )
+
+
+# Catch the common catastrophic-backtracking (ReDoS) shapes: a group containing
+# an inner quantifier or an alternation, immediately followed by an outer
+# quantifier — e.g. (a+)+, (a*)*, (a|a)+, (.*,)+ . Heuristic, not exhaustive.
+_REDOS_RE = re.compile(r"\([^)]*(?:[+*]|\|)[^)]*\)\s*[+*]")
+
+
+def validate_search_pattern(pattern: Optional[str], field: str = "pattern") -> None:
+    """Validate a caller-supplied regex / name filter (no-op when empty).
+
+    Bounds length and rejects obviously catastrophic-backtracking shapes before
+    the pattern is compiled (Python side) or handed to Joern's JVM regex engine.
+    """
+    from ..defaults import MAX_SEARCH_PATTERN_LEN
+
+    if pattern is None or pattern == "":
+        return
+    if not isinstance(pattern, str):
+        raise ValidationError(f"{field} must be a string")
+    if len(pattern) > MAX_SEARCH_PATTERN_LEN:
+        raise ValidationError(
+            f"{field} too long (max {MAX_SEARCH_PATTERN_LEN} characters)"
+        )
+    if _REDOS_RE.search(pattern):
+        raise ValidationError(
+            f"{field} contains a nested-quantifier pattern that risks "
+            "catastrophic backtracking; simplify it"
+        )
+
+
+def clamp_int(value, maximum: int, minimum: int = 1, default: Optional[int] = None) -> int:
+    """Coerce value to int and clamp to [minimum, maximum].
+
+    Used to bound caller-supplied `limit` / `take(n)` / depth parameters so an LLM
+    can't request an unbounded traversal or result set. Non-numeric input falls back
+    to `default` (or `minimum` when no default is given).
+    """
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        n = default if default is not None else minimum
+    return max(minimum, min(n, maximum))
+
+
+def sanitize_error_text(text: Optional[str], max_len: int = 600) -> str:
+    """Redact absolute filesystem paths from text echoed back to the client.
+
+    Joern/Ammonite stack traces and OS errors embed host paths (CPG path, source
+    snapshot, JVM classpath). Collapse any absolute path to its basename and bound
+    the length so internal layout isn't disclosed.
+    """
+    if not text:
+        return ""
+    text = str(text)
+    # Replace absolute paths like /a/b/c.scala with <path>/c.scala
+    text = re.sub(r"(/[^\s'\"]+/)([^\s'\"/]+)", r"<path>/\2", text)
+    if len(text) > max_len:
+        text = text[:max_len] + " …(truncated)"
+    return text
 
 
 def hash_query(query: str) -> str:

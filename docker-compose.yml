@@ -70,7 +70,9 @@ services:
       # Non-default host port (override POSTGRES_PORT) to avoid clashing with a system Postgres.
       - "127.0.0.1:${POSTGRES_PORT:-55432}:5432"
     volumes:
-      - ./playground/pgdata:/var/lib/postgresql/data
+      # Kept OUTSIDE ./playground so the Joern containers (which mount the whole
+      # playground) can never read or corrupt the database files. See docs/security.md.
+      - ${POSTGRES_DATA_PATH:-./pgdata}:/var/lib/postgresql/data
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U codebadger -d codebadger"]

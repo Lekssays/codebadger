@@ -8,6 +8,8 @@ import os
 from typing import Dict
 
 from ...utils.query_rendering import escape_scala_string
+from ...utils.validators import clamp_int
+from ...defaults import MAX_RESULT_ROWS, MAX_TRAVERSAL_DEPTH
 
 
 class QueryLoader:
@@ -17,6 +19,17 @@ class QueryLoader:
     _queries_dir = os.path.dirname(__file__)
     # Sentinel used to escape {{ in user values to prevent template injection
     _ESCAPE_SENTINEL = "\x00__ESCAPED_OPEN_BRACE__\x00"
+
+    # Caller-supplied numeric placeholders are clamped before substitution so an
+    # LLM can't request an unbounded `.take(n)` or a runaway graph traversal. Maps
+    # placeholder name -> ceiling.
+    _NUMERIC_CEILINGS = {
+        "limit": MAX_RESULT_ROWS,
+        "max_results": MAX_RESULT_ROWS,
+        "max_nodes": MAX_RESULT_ROWS,
+        "depth": MAX_TRAVERSAL_DEPTH,
+        "max_depth": MAX_TRAVERSAL_DEPTH,
+    }
 
     @classmethod
     def _sanitize_value(cls, value: str) -> str:
@@ -67,10 +80,14 @@ class QueryLoader:
         template = cls._cache[query_name]
 
         # Substitute placeholders like {{variable_name}}
-        # Sanitize values to prevent template injection via {{ in user input
+        # Sanitize values to prevent template injection via {{ in user input;
+        # clamp known numeric placeholders to their resource ceiling.
         for key, value in kwargs.items():
             placeholder = f"{{{{{key}}}}}"  # {{key}}
-            sanitized_value = cls._sanitize_value(str(value))
+            if key in cls._NUMERIC_CEILINGS:
+                sanitized_value = str(clamp_int(value, cls._NUMERIC_CEILINGS[key]))
+            else:
+                sanitized_value = cls._sanitize_value(str(value))
             template = template.replace(placeholder, sanitized_value)
 
         # Restore escaped {{ sequences to literal {{ in the final output

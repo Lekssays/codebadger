@@ -298,6 +298,125 @@ class TestValidateCpgqlQuery:
 
             assert "potentially dangerous operation" in str(exc_info.value)
 
+    def test_expanded_blocklist_covers_reads_dynload_reflection_network(self):
+        """Patterns added after the audit: file reads, $ivy, sys.exit, reflection bypass, aliased process, URI."""
+        dangerous = [
+            'scala.io.Source.fromFile("/etc/passwd").mkString',  # file read
+            'new java.io.FileInputStream("/etc/passwd")',         # file read
+            "java.nio.file.Files.readAllBytes(p)",                # file read
+            "os.read(p)",                                         # ammonite read
+            'import $ivy.`org.x:y:1.0`',                          # dynamic dep load
+            "sys.exit(1)",                                        # scala exit
+            'import scala.sys.{process => p}; p.stringToProcess("id").!',  # aliased process
+            'cls.getMethod("exec")',                              # reflection (getMethod, not getDeclaredMethod)
+            'classOf[String].getClassLoader.loadClass("java.lang.Runtime")',  # loadClass
+            'java.net.URI("http://x").toURL.openConnection',      # network via URI
+        ]
+        for q in dangerous:
+            with pytest.raises(ValidationError):
+                validate_cpgql_query(q)
+
+    def test_legitimate_queries_not_falsely_blocked(self):
+        """Common analysis queries must still pass the expanded blocklist."""
+        ok = [
+            'cpg.method.name("main").l',
+            'cpg.call.name("memcpy").l',
+            "cpg.method.fullName.l",
+            'cpg.literal.code(".*SELECT.*").l',
+            "cpg.method.where(_.name(\"parse.*\")).parameter.l",
+        ]
+        for q in ok:
+            validate_cpgql_query(q)
+
+
+class TestValidateSearchPattern:
+    """Test regex/name-filter ReDoS + length guard"""
+
+    def test_empty_is_noop(self):
+        from src.utils.validators import validate_search_pattern
+        validate_search_pattern(None)
+        validate_search_pattern("")
+
+    def test_benign_patterns_pass(self):
+        from src.utils.validators import validate_search_pattern
+        for ok in [".*parse.*", "foo|bar", "(abc)", "a+", "(a|b)c", "memcpy"]:
+            validate_search_pattern(ok)
+
+    @pytest.mark.parametrize("bad", ["(a+)+$", "(a*)*", "(ab|ab)+", "(.*,)+", "(a|a)*"])
+    def test_redos_shapes_rejected(self, bad):
+        from src.utils.validators import validate_search_pattern
+        with pytest.raises(ValidationError):
+            validate_search_pattern(bad)
+
+    def test_overlong_pattern_rejected(self):
+        from src.utils.validators import validate_search_pattern
+        from src.defaults import MAX_SEARCH_PATTERN_LEN
+        with pytest.raises(ValidationError):
+            validate_search_pattern("a" * (MAX_SEARCH_PATTERN_LEN + 1))
+
+
+class TestClampInt:
+    """Test the numeric clamp helper used for limit / take(n) / depth params"""
+
+    def test_clamps_to_ceiling(self):
+        from src.utils.validators import clamp_int
+        assert clamp_int(10**9, 10000) == 10000
+
+    def test_clamps_to_floor(self):
+        from src.utils.validators import clamp_int
+        assert clamp_int(-5, 100) == 1
+        assert clamp_int(0, 100, minimum=1) == 1
+
+    def test_non_numeric_uses_default(self):
+        from src.utils.validators import clamp_int
+        assert clamp_int("nope", 100, default=7) == 7
+        assert clamp_int(None, 100) == 1  # falls back to minimum
+
+    def test_in_range_unchanged(self):
+        from src.utils.validators import clamp_int
+        assert clamp_int(50, 100) == 50
+
+
+class TestQueryLoaderClamps:
+    """QueryLoader clamps caller-supplied numeric placeholders before substitution"""
+
+    def test_limit_clamped_in_take(self):
+        from src.tools.queries import QueryLoader
+        from src.defaults import MAX_RESULT_ROWS
+        q = QueryLoader.load("type_definition", type_name="Foo", limit=10**9)
+        assert f".take({MAX_RESULT_ROWS})" in q
+
+    def test_depth_clamped(self):
+        from src.tools.queries import QueryLoader
+        from src.defaults import MAX_TRAVERSAL_DEPTH
+        q = QueryLoader.load("call_graph", method_name="main", depth=99999, direction="outgoing")
+        assert f"val maxDepth = {MAX_TRAVERSAL_DEPTH}" in q
+
+    def test_small_values_preserved(self):
+        from src.tools.queries import QueryLoader
+        q = QueryLoader.load("type_definition", type_name="Foo", limit=10)
+        assert ".take(10)" in q
+
+
+class TestSanitizeErrorText:
+    """Test host-path redaction in client-facing error text"""
+
+    def test_redacts_absolute_paths(self):
+        from src.utils.validators import sanitize_error_text
+        out = sanitize_error_text(
+            "boom at /mnt/nvme0/workspace/codebadger/playground/cpgs/abcd/cpg.bin"
+        )
+        assert "/mnt/nvme0/workspace" not in out
+        assert "cpg.bin" in out
+
+    def test_empty(self):
+        from src.utils.validators import sanitize_error_text
+        assert sanitize_error_text(None) == ""
+
+    def test_bounds_length(self):
+        from src.utils.validators import sanitize_error_text
+        assert len(sanitize_error_text("x" * 5000, max_len=100)) <= 120
+
 
 class TestHashQuery:
     """Test query hashing"""

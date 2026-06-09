@@ -6,6 +6,12 @@ from typing import Any, Dict, List, Optional, Union, TYPE_CHECKING
 
 from ..models import QueryResult, SessionStatus
 from ..exceptions import QueryExecutionError
+from ..defaults import (
+    MAX_QUERY_TIMEOUT_SECONDS,
+    MAX_RESULT_ROWS,
+    MAX_QUERY_OUTPUT_BYTES,
+)
+from ..utils.validators import sanitize_error_text
 from .coordination import QueryLockTimeout
 from ..telemetry import get_tracer
 from .joern_server_manager import JoernServerManager
@@ -58,6 +64,13 @@ class QueryExecutor:
             span.set_attribute("query.length", len(query))
 
             start_time = time.time()
+
+            # Clamp a caller-supplied timeout so an LLM can't hold a JVM + the
+            # per-codebase query lock for an unbounded period.
+            try:
+                timeout = max(1, min(int(timeout), MAX_QUERY_TIMEOUT_SECONDS))
+            except (TypeError, ValueError):
+                timeout = 30
 
             try:
                 logger.debug(f"Executing query for codebase {codebase_hash}: {query[:100]}...")
@@ -154,7 +167,7 @@ class QueryExecutor:
                 logger.error(f"Error executing query: {e}", exc_info=True)
                 return QueryResult(
                     success=False,
-                    error=str(e),
+                    error=sanitize_error_text(str(e)),
                     execution_time=execution_time,
                 )
 
@@ -187,7 +200,12 @@ class QueryExecutor:
         is_size_query = bool(re.search(r"\.size\s*$", base_query))
         if limit is None and any(p in base_query for p in _DATAFLOW_PATTERNS):
             limit = _DATAFLOW_RESULT_LIMIT
+        # Cap any otherwise-unbounded query (e.g. a raw `cpg.method.l`) so it can't
+        # stream the whole graph back. Clamp explicit limits to the same ceiling.
+        if limit is None and not is_size_query:
+            limit = MAX_RESULT_ROWS
         if limit is not None and limit > 0 and not is_size_query:
+            limit = min(limit, MAX_RESULT_ROWS)
             base_query = f"{base_query}.take({limit})"
 
         if is_size_query:
@@ -203,9 +221,18 @@ class QueryExecutor:
 
             if result.get("success"):
                 stdout = result.get("stdout", "")
+                # Bound the raw payload we parse/return so a single query can't
+                # exhaust memory or flood the response channel.
+                truncated = False
+                if len(stdout) > MAX_QUERY_OUTPUT_BYTES:
+                    stdout = stdout[:MAX_QUERY_OUTPUT_BYTES]
+                    truncated = True
                 data = self._parse_output(stdout)
+                if isinstance(data, list) and len(data) > MAX_RESULT_ROWS:
+                    data = data[:MAX_RESULT_ROWS]
+                    truncated = True
                 row_count = len(data) if isinstance(data, list) else 1
-                return QueryResult(success=True, data=data, row_count=row_count)
+                return QueryResult(success=True, data=data, row_count=row_count, truncated=truncated)
             else:
                 stderr = result.get("stderr", "")
                 if "timeout" in stderr.lower() or "timed out" in stderr.lower():
@@ -218,11 +245,12 @@ class QueryExecutor:
                     logger.error(f"Query execution timed out after {timeout}s: {query[:100]}...")
                     return QueryResult(success=False, error=error_msg, error_code="TIMEOUT")
                 logger.error(f"Query execution failed: {stderr}")
-                return QueryResult(success=False, error=stderr, error_code="QUERY_ERROR")
+                # Joern stderr / stack traces embed host paths — redact before returning.
+                return QueryResult(success=False, error=sanitize_error_text(stderr), error_code="QUERY_ERROR")
 
         except Exception as e:
             logger.error(f"Error executing query via Joern client: {e}")
-            return QueryResult(success=False, error=str(e), error_code="QUERY_ERROR")
+            return QueryResult(success=False, error=sanitize_error_text(str(e)), error_code="QUERY_ERROR")
 
     def _parse_output(self, output: str) -> Union[list, int, float, str]:
         """Parse Joern query output"""

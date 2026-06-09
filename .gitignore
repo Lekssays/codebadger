@@ -137,6 +137,7 @@ playground/codebases/*
 !playground/codebases/core/
 playground/cpgs/
 playground/pgdata/
+pgdata/
 joern-docs.md
 test_scripts/
 codebadger.db

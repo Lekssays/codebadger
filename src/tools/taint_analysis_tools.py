@@ -12,7 +12,8 @@ from ..exceptions import (
             ValidationError,
 )
 from ..utils.query_rendering import escape_scala_string
-from ..utils.validators import validate_codebase_hash
+from ..utils.validators import clamp_int, validate_codebase_hash
+from ..defaults import MAX_RESULT_ROWS
 from .queries import QueryLoader
 
 logger = logging.getLogger(__name__)
@@ -469,9 +470,9 @@ Examples:
                 # Build query with optional file filter
                 if filename:
                     file_regex = _build_file_filter_regex(filename)
-                    query = f'cpg.call.name("{escape_scala_string(joined)}").where(_.file.name("{escape_scala_string(file_regex)}")).map(c => (c.id, c.name, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take({limit})'
+                    query = f'cpg.call.name("{escape_scala_string(joined)}").where(_.file.name("{escape_scala_string(file_regex)}")).map(c => (c.id, c.name, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take({clamp_int(limit, MAX_RESULT_ROWS)})'
                 else:
-                    query = f'cpg.call.name("{escape_scala_string(joined)}").map(c => (c.id, c.name, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take({limit})'
+                    query = f'cpg.call.name("{escape_scala_string(joined)}").map(c => (c.id, c.name, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take({clamp_int(limit, MAX_RESULT_ROWS)})'
 
                 result = query_executor.execute_query(
                     codebase_hash=codebase_hash,
@@ -594,9 +595,9 @@ Examples:
                 # Build query with optional file filter
                 if filename:
                     file_regex = _build_file_filter_regex(filename)
-                    query = f'cpg.call.name("{escape_scala_string(joined)}").where(_.file.name("{escape_scala_string(file_regex)}")).map(c => (c.id, c.name, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take({limit})'
+                    query = f'cpg.call.name("{escape_scala_string(joined)}").where(_.file.name("{escape_scala_string(file_regex)}")).map(c => (c.id, c.name, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take({clamp_int(limit, MAX_RESULT_ROWS)})'
                 else:
-                    query = f'cpg.call.name("{escape_scala_string(joined)}").map(c => (c.id, c.name, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take({limit})'
+                    query = f'cpg.call.name("{escape_scala_string(joined)}").map(c => (c.id, c.name, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take({clamp_int(limit, MAX_RESULT_ROWS)})'
 
                 result = query_executor.execute_query(
                     codebase_hash=codebase_hash,

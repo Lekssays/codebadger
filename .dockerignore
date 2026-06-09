@@ -2,6 +2,7 @@
 
 # Runtime data — the playground is a mounted volume, never baked into the image.
 playground/
+pgdata/
 logs/
 
 # Version control & local env

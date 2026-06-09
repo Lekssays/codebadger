@@ -92,11 +92,14 @@ curl -s http://localhost:4242/health | python -m json.tool
 ```
 
 - **State that survives `down`:** `playground/` (sources + CPG caches) and
-  `playground/pgdata` (the Postgres catalog/cache/findings/jobs) are bind-mounted,
-  so the catalog and generated CPGs persist across restarts and upgrades. Redis is
-  ephemeral by design (the pool ledger rebuilds).
-- **Back up** `playground/` (especially `playground/pgdata` and `playground/cpgs`);
-  put it on fast storage.
+  `pgdata/` (the Postgres catalog/cache/findings/jobs) are bind-mounted, so the
+  catalog and generated CPGs persist across restarts and upgrades. `pgdata/` is
+  kept **outside** `playground/` on purpose — the Joern containers mount the whole
+  playground, so the database files must live elsewhere (see
+  [Security](security.md)). Override its location with `POSTGRES_DATA_PATH`. Redis
+  is ephemeral by design (the pool ledger rebuilds).
+- **Back up** `playground/` (especially `playground/cpgs`) and `pgdata/`; put them
+  on fast storage.
 - **Per-run logs** are written under `./logs/` (`codebadger-<ts>-<pid>.log`, plus a
   `codebadger-latest.log` symlink) in addition to `docker compose logs`.
 
