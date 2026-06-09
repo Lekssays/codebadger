@@ -37,14 +37,14 @@ from src.utils import setup_logging
 from src.utils import compute_recommendation, current_from_config, render_recommendation
 from src.utils.postgres_db_manager import PostgresDBManager
 
-# Postgres and Redis are the backing services. Both default to the docker-compose
-# services and are overridable via env. A missing or unreachable Postgres/Redis
-# fails the boot (fail-fast), see app_lifespan.
-DEFAULT_DATABASE_URL = "postgresql://codebadger:codebadger@localhost:55432/codebadger"
-DEFAULT_REDIS_URL = "redis://localhost:56379/0"
+# Postgres and Redis are the backing services. Connection URLs resolve from env
+# (DATABASE_URL / REDIS_URL, or the component POSTGRES_* / REDIS_* vars that
+# docker-compose also uses), defaulting to the compose services. A missing or
+# unreachable Postgres/Redis fails the boot (fail-fast), see app_lifespan.
+from src.defaults import resolve_database_url, resolve_redis_url
 from src.tools import register_tools
 
-VERSION = "0.3.4-beta"
+VERSION = "0.4.1-beta"
 
 services = {}
 
@@ -209,9 +209,9 @@ def _log_effective_config(config) -> None:
         cpg_queue = services.get("cpg_queue")
         container_name = services.get("joern_container_name", "codebadger-joern-server")
 
-        database_url = os.getenv("DATABASE_URL") or DEFAULT_DATABASE_URL
+        database_url = resolve_database_url()
         db_target = database_url.split("@")[-1]
-        redis_url = os.getenv("REDIS_URL") or DEFAULT_REDIS_URL
+        redis_url = resolve_redis_url()
 
         worker_mode = getattr(config.joern, "worker_mode", "shared")
         queue_backend = getattr(config.cpg, "queue_backend", "memory")
@@ -469,8 +469,8 @@ async def app_lifespan(server: FastMCP):
         # docker-compose services; override via DATABASE_URL / REDIS_URL. An
         # unreachable Postgres or Redis fails the boot (fail-fast) so the
         # orchestrator restarts us instead of running half-degraded.
-        database_url = os.getenv("DATABASE_URL") or DEFAULT_DATABASE_URL
-        redis_url = os.getenv("REDIS_URL") or DEFAULT_REDIS_URL
+        database_url = resolve_database_url()
+        redis_url = resolve_redis_url()
         try:
             db_manager = PostgresDBManager(database_url)
             db_manager.init_schema()
@@ -851,8 +851,8 @@ async def _build_health(include_sensitive: bool = False) -> dict:
     config = services.get("config")
     cpq = services.get("cpg_queue")
     project_root = os.path.dirname(os.path.abspath(__file__))
-    database_url = os.getenv("DATABASE_URL") or DEFAULT_DATABASE_URL
-    redis_url = os.getenv("REDIS_URL") or DEFAULT_REDIS_URL
+    database_url = resolve_database_url()
+    redis_url = resolve_redis_url()
 
     # Probe the backing services concurrently and time-bounded so one hung
     # dependency can't stall the whole endpoint.

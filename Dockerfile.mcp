@@ -8,7 +8,7 @@
 FROM python:3.13-slim
 
 # Docker CLI (client only) — pulled as a static binary, no daemon/engine.
-ARG DOCKER_CLI_VERSION=27.3.1
+ARG DOCKER_CLI_VERSION=29.5.3
 ARG DOCKER_CLI_ARCH=x86_64
 
 RUN apt-get update && apt-get install -y --no-install-recommends \

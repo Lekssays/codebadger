@@ -6,6 +6,50 @@ This ensures a single source of truth for all configuration defaults, eliminatin
 duplication across config files and Python code.
 """
 
+import os
+
+# --- Backing services (Postgres / Redis) ----------------------------------
+# Component defaults mirror the docker-compose service definitions. resolve_*_url()
+# below build a connection URL from the SAME env vars compose uses
+# (POSTGRES_*/REDIS_*), so a host-run MCP honors POSTGRES_PORT / REDIS_PORT /
+# credential overrides without needing a full DATABASE_URL / REDIS_URL. Set
+# DATABASE_URL or REDIS_URL to override the whole URL at once.
+POSTGRES_USER = "codebadger"
+POSTGRES_PASSWORD = "codebadger"
+POSTGRES_DB = "codebadger"
+POSTGRES_HOST = "localhost"
+POSTGRES_PORT = "55432"
+REDIS_HOST = "localhost"
+REDIS_PORT = "56379"
+REDIS_DB = "0"
+
+
+def resolve_database_url() -> str:
+    """Postgres URL: DATABASE_URL if set, else built from POSTGRES_* env/defaults."""
+    explicit = os.getenv("DATABASE_URL")
+    if explicit:
+        return explicit
+    return (
+        f"postgresql://{os.getenv('POSTGRES_USER', POSTGRES_USER)}:"
+        f"{os.getenv('POSTGRES_PASSWORD', POSTGRES_PASSWORD)}@"
+        f"{os.getenv('POSTGRES_HOST', POSTGRES_HOST)}:"
+        f"{os.getenv('POSTGRES_PORT', POSTGRES_PORT)}/"
+        f"{os.getenv('POSTGRES_DB', POSTGRES_DB)}"
+    )
+
+
+def resolve_redis_url() -> str:
+    """Redis URL: REDIS_URL if set, else built from REDIS_* env/defaults."""
+    explicit = os.getenv("REDIS_URL")
+    if explicit:
+        return explicit
+    return (
+        f"redis://{os.getenv('REDIS_HOST', REDIS_HOST)}:"
+        f"{os.getenv('REDIS_PORT', REDIS_PORT)}/"
+        f"{os.getenv('REDIS_DB', REDIS_DB)}"
+    )
+
+
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 4242
 SERVER_LOG_LEVEL = "INFO"
