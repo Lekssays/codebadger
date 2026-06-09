@@ -1264,3 +1264,29 @@ Edges:
 
         assert "Discovered Vulnerability Fixes" in text_result
         assert "buffer overflow" in text_result.lower()
+
+
+class TestCopyLocalSourceTree:
+    """Unit tests for the off-loop local-source copy helper (path-race fix A)."""
+
+    def test_copies_files_and_dirs(self, tmp_path):
+        from src.tools.core_tools import _copy_local_source_tree
+        src = tmp_path / "src"; (src / "sub").mkdir(parents=True)
+        (src / "a.c").write_text("int a;")
+        (src / "sub" / "b.c").write_text("int b;")
+        dst = tmp_path / "dst"
+        _copy_local_source_tree(str(src), str(dst))
+        assert (dst / "a.c").read_text() == "int a;"
+        assert (dst / "sub" / "b.c").read_text() == "int b;"
+
+    def test_skips_symlink_escaping_source_root(self, tmp_path):
+        import os
+        from src.tools.core_tools import _copy_local_source_tree
+        outside = tmp_path / "secret.txt"; outside.write_text("TOP SECRET")
+        src = tmp_path / "src"; src.mkdir()
+        (src / "ok.c").write_text("int ok;")
+        os.symlink(str(outside), str(src / "leak"))   # escapes the source root
+        dst = tmp_path / "dst"
+        _copy_local_source_tree(str(src), str(dst))
+        assert (dst / "ok.c").exists()
+        assert not (dst / "leak").exists()            # escaping symlink not copied

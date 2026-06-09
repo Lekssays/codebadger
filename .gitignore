@@ -141,3 +141,5 @@ pgdata/
 joern-docs.md
 test_scripts/
 codebadger.db
+# Host-local compose overrides (extra source mounts, etc.)
+docker-compose.override.yml

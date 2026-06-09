@@ -233,6 +233,36 @@ def _count_lines_of_code(source_path: str) -> int:
         return 0
 
 
+def _copy_local_source_tree(host_path: str, codebase_dir: str) -> None:
+    """Copy a local source tree into the playground snapshot dir.
+
+    Symlink-safe: never dereferences symlinks whose target escapes the source root
+    (prevents pulling arbitrary host files into the readable snapshot).
+
+    Blocking I/O — invoke via asyncio.to_thread so it never runs on the event loop.
+    Doing it on the loop serializes concurrent generate_cpg calls, which inflates
+    the latency between request receipt and source capture; under a batch driver
+    that cleans up its source dirs on a timer, a delayed copy races the cleanup and
+    fails with "Path does not exist".
+    """
+    os.makedirs(codebase_dir, exist_ok=True)
+    real_root = os.path.realpath(host_path)
+    for item in os.listdir(host_path):
+        src_item = os.path.join(host_path, item)
+        dst_item = os.path.join(codebase_dir, item)
+
+        if os.path.islink(src_item):
+            if not os.path.realpath(src_item).startswith(real_root + os.sep):
+                logger.warning(f"Skipping symlink escaping source root: {item}")
+                continue
+
+        if os.path.isdir(src_item):
+            # symlinks=True: copy nested links as links, never dereference out of tree.
+            shutil.copytree(src_item, dst_item, dirs_exist_ok=True, symlinks=True)
+        else:
+            shutil.copy2(src_item, dst_item, follow_symlinks=False)
+
+
 def _calculate_repo_size_mb(source_path: str) -> int:
     """Calculate total repository size in MB."""
     size_mb, _ = _scan_repo(source_path)
@@ -799,10 +829,12 @@ Examples:
 
             codebase_tracker = services["codebase_tracker"]
 
-            # Large-project guard: warn before committing to an expensive full-project CPG
+            # Large-project guard: warn before committing to an expensive full-project CPG.
+            # resolve + scan are blocking FS work — run them off the event loop so a big
+            # project's tree walk can't freeze every other concurrent generate_cpg call.
             if source_type == "local" and not force:
-                resolved = resolve_host_path(source_path)
-                size_mb, loc = _scan_repo(resolved)
+                resolved = await asyncio.to_thread(resolve_host_path, source_path)
+                size_mb, loc = await asyncio.to_thread(_scan_repo, resolved)
                 if size_mb > 150 or loc > 15000:
                     return {
                         "status": "large_project_warning",
@@ -823,8 +855,8 @@ Examples:
             commit_hash = None
             if source_type == "local":
                  try:
-                     RESOLVED_PATH = resolve_host_path(source_path)
-                     commit_hash = _get_git_commit_hash(RESOLVED_PATH)
+                     RESOLVED_PATH = await asyncio.to_thread(resolve_host_path, source_path)
+                     commit_hash = await asyncio.to_thread(_get_git_commit_hash, RESOLVED_PATH)
                      if commit_hash:
                          logger.info(f"Detected git commit hash: {commit_hash}")
                  except Exception as e:
@@ -990,34 +1022,15 @@ Examples:
                 else:
                     logger.info(f"Using existing snippet at {codebase_dir}")
             else:
-                host_path = resolve_host_path(source_path)
-                
+                # resolve + copy are blocking FS work — keep them off the event loop
+                # (see _copy_local_source_tree) so concurrent requests don't serialize
+                # and race the caller's source-dir cleanup.
+                host_path = await asyncio.to_thread(resolve_host_path, source_path)
+
                 if not os.path.exists(codebase_dir):
-                    os.makedirs(codebase_dir, exist_ok=True)
                     logger.info(f"Copying source from {host_path} to {codebase_dir}")
-                    
                     try:
-                        real_root = os.path.realpath(host_path)
-                        for item in os.listdir(host_path):
-                            src_item = os.path.join(host_path, item)
-                            dst_item = os.path.join(codebase_dir, item)
-
-                            # Don't dereference symlinks whose target escapes the
-                            # source tree — that would pull arbitrary host files
-                            # (e.g. ~/.ssh/id_rsa) into the readable snapshot.
-                            if os.path.islink(src_item):
-                                if not os.path.realpath(src_item).startswith(real_root + os.sep):
-                                    logger.warning(
-                                        f"Skipping symlink escaping source root: {item}"
-                                    )
-                                    continue
-
-                            if os.path.isdir(src_item):
-                                # symlinks=True: copy nested links as links, never
-                                # dereference them out of the tree.
-                                shutil.copytree(src_item, dst_item, dirs_exist_ok=True, symlinks=True)
-                            else:
-                                shutil.copy2(src_item, dst_item, follow_symlinks=False)
+                        await asyncio.to_thread(_copy_local_source_tree, host_path, codebase_dir)
                         logger.info(f"Source copied successfully to {codebase_dir}")
                     except OSError as e:
                         logger.error(f"Failed to copy local source directory for {codebase_hash}: {e}")
