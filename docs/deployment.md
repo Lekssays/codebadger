@@ -1,50 +1,70 @@
 # Deployment
 
-## Topologies
+The whole stack — the **MCP server**, the **Joern** container, **Postgres**, and
+**Redis** — runs from a single `docker compose`. The MCP server runs in its own
+container (`Dockerfile.mcp`) and drives the host Docker daemon to build CPGs and
+spawn per-CPG Joern workers.
 
 ```mermaid
 flowchart TB
-    M2[main.py #1] --> PG[(Postgres<br/>catalog + cache + findings + jobs)]
-    M3[main.py #2] --> PG
-    M2 --> R[(Redis<br/>pool ledger + locks)]
-    M3 --> R
-    M2 --> W[Joern workers]
-    M3 --> W
+    Chat[Chat interface] -->|HTTP /mcp| MCP[codebadger-mcp<br/>host network]
+    MCP -->|/var/run/docker.sock| DKR[Host Docker daemon]
+    DKR --> JOERN[codebadger-joern-server<br/>+ per-CPG pool workers]
+    MCP --> PG[(codebadger-postgres<br/>catalog + cache + findings + jobs)]
+    MCP --> R[(codebadger-redis<br/>pool ledger + locks)]
+    MCP -. clone / copy source .-> PLAY[(./playground<br/>shared volume)]
+    JOERN -. read source / write CPG .-> PLAY
 ```
 
-CodeBadger needs three backing services: the **Joern** container, **Postgres**
-(catalog, tool cache, findings, and the durable job queue), and **Redis** (the
-per-CPG query lock and the shared pool ledger, so several API/scheduler processes
-coordinate without over-committing). All three start with `docker compose up -d`;
-the server **fails to boot** if Postgres or Redis is unreachable.
+## Prerequisites
 
-### 1. Start the backing services
+- **Docker Engine** + the **Compose v2 plugin** (`docker compose version`). Install: <https://docs.docker.com/engine/install/>.
+- Permission to use the Docker socket (the deploy user is in the `docker` group, or runs as root). The MCP container drives the host daemon via `/var/run/docker.sock`.
+- **A host dedicated to CodeBadger.** Mounting the Docker socket gives the MCP container root-equivalent control of the host (see the trust-boundary note below).
+- Disk for the `playground/` volume (cloned sources + CPG `.bin` caches can reach tens of GB) and RAM for the Joern JVMs (see [Sizing](#sizing-for-your-host)).
+- `git` is only needed if you clone this repo to the host; everything else runs in containers.
+
+## Quick start (full stack)
 
 ```bash
-docker compose up -d            # Joern + Postgres (55432) + Redis (56379)
-docker compose ps               # confirm all three are healthy
-docker compose down             # tear down
+# 1. Get the code
+git clone http://github.com/lekssays/codebadger && cd codebadger
+
+# 2. Configure for your host: copy the template and edit
+cp .env.example .env
+#   Set at minimum:
+#     PLAYGROUND_HOST_PATH=/abs/path/to/codebadger/playground   # ABSOLUTE
+#     MCP_HOST=0.0.0.0                                           # or 127.0.0.1 behind a proxy
+#   Size memory for your host (RAM is the binding constraint):
+python scripts/recommend_config.py        # prints JOERN_MEM_LIMIT / JOERN_MEMORY_BUDGET_MB to set
+
+# 3. Build images + start everything + wait for /health
+./scripts/deploy.sh
+
+# 4. Confirm it's serving
+./scripts/deploy.sh status
 ```
 
-> Postgres publishes on **55432** and Redis on **56379** (non-default ports) to
-> avoid clashing with system services; override with `POSTGRES_PORT` / `REDIS_PORT`.
+`docker compose` auto-loads `.env`, so once it's filled in, plain `docker compose
+up -d` works too. `deploy.sh` additionally exports an **absolute**
+`PLAYGROUND_HOST_PATH` (pool workers are started by the host daemon, so their
+`playground` bind-mount source must be host-absolute) and waits for `/health`.
 
-### 2. Start the server
-
-It defaults to the Compose Postgres/Redis and creates the Postgres schema on first
-start, so a local run needs no extra env:
+To run Compose directly without the script, just make sure that path is absolute:
 
 ```bash
-python main.py
-# equivalent to the built-in defaults:
-DATABASE_URL=postgresql://codebadger:codebadger@localhost:55432/codebadger \
-REDIS_URL=redis://localhost:56379/0 python main.py
+PLAYGROUND_HOST_PATH="$PWD/playground" docker compose up -d --build
 ```
 
-Override `DATABASE_URL` / `REDIS_URL` to point at managed instances. The CPG queue
-is `durable` (Postgres-backed, `FOR UPDATE SKIP LOCKED`) by default.
+The MCP container uses **host networking** and mounts the Docker socket, so the
+`localhost:<published-port>` wiring (Joern servers, Postgres `55432`, Redis
+`56379`, and the MCP's own `:4242`) works unchanged.
 
-### 3. Verify it's healthy
+> **Trust boundary:** mounting `/var/run/docker.sock` gives the MCP container
+> root-equivalent control of the host. Run it on a host dedicated to CodeBadger.
+> Host networking is required by the published-port + sibling-container model.
+
+### Verify it's healthy
 
 `GET /health` reports `status` (`up`/`partial`/`down`), `mcp: "codebadger"`, and a
 `dependencies` map (joern, postgres, redis, docker, cpg_queue). It returns HTTP
@@ -53,7 +73,62 @@ orchestrator liveness/readiness probe.
 
 ```bash
 curl -s http://localhost:4242/health | python -m json.tool
+# -> {"status":"up","mcp":"codebadger","dependencies":{"joern":"up","postgres":"up",...}}
 ```
+
+> Postgres publishes on **55432** and Redis on **56379** (non-default ports) to
+> avoid clashing with system services; override with `POSTGRES_PORT` / `REDIS_PORT`.
+
+## Day-2 operations
+
+```bash
+./scripts/deploy.sh status     # docker compose ps + /health
+./scripts/deploy.sh logs       # follow the MCP logs (add a service name for others)
+./scripts/deploy.sh restart    # recreate just the MCP container, re-wait for health
+./scripts/deploy.sh down       # stop & remove the stack (playground + pgdata persist)
+
+# Apply code/config changes (rebuilds the MCP image, recreates changed containers):
+./scripts/deploy.sh            # = docker compose up -d --build
+```
+
+- **State that survives `down`:** `playground/` (sources + CPG caches) and
+  `playground/pgdata` (the Postgres catalog/cache/findings/jobs) are bind-mounted,
+  so the catalog and generated CPGs persist across restarts and upgrades. Redis is
+  ephemeral by design (the pool ledger rebuilds).
+- **Back up** `playground/` (especially `playground/pgdata` and `playground/cpgs`);
+  put it on fast storage.
+- **Per-run logs** are written under `./logs/` (`codebadger-<ts>-<pid>.log`, plus a
+  `codebadger-latest.log` symlink) in addition to `docker compose logs`.
+
+## Analyzing code from a chat interface
+
+A user pastes a GitHub URL **or** a local path; everything is staged under
+`playground/` so all containers can see it.
+
+- **GitHub repo** — pass the URL to `generate_cpg`. The MCP clones it into
+  `playground/codebases/<hash>` automatically; nothing else to set up.
+- **Local source** — place the code under `./playground/` on the host (the MCP
+  sees it at `/app/playground/...`) and pass that path, e.g.
+  `/app/playground/myproject`. The MCP copies it into `playground/codebases/<hash>`.
+  A path that isn't visible inside the MCP container is rejected, so local code
+  must live under `playground`.
+
+CPGs are written to `playground/cpgs/<hash>` and cached there, so re-analysis and
+sleeping/auto-wake are cheap. The `./playground` volume is the durable artifact —
+back it up / put it on fast storage.
+
+## Running the MCP on the host (development)
+
+To iterate on the server itself, run the backing services in Compose and the MCP
+on the host (skip the MCP container with `--scale codebadger-mcp=0`):
+
+```bash
+docker compose up -d --scale codebadger-mcp=0   # Joern + Postgres + Redis only
+python main.py                                   # defaults to the Compose services
+```
+
+It defaults to the Compose Postgres/Redis and creates the Postgres schema on first
+start. Override `DATABASE_URL` / `REDIS_URL` to point at managed instances.
 
 ## Sizing for your host
 

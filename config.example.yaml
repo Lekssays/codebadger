@@ -34,10 +34,11 @@ sessions:
 
 cpg:
   generation_timeout: 1800                    # 30 min; large repos (v8, wireshark) exceed 10 min
-  # queue_backend: memory (in-process, lost on restart) or durable (DB jobs table,
-  # survives restart, dedup + backpressure — use for large batches). Set DATABASE_URL
-  # to a postgres:// DSN to move the whole store (catalog, cache, findings, queue) to Postgres.
-  queue_backend: ${CPG_QUEUE_BACKEND:memory}
+  # queue_backend: durable (Postgres jobs table — survives restart, dedup +
+  # backpressure; the default) or memory (in-process, lost on restart; throwaway
+  # single-process runs only). Postgres backs the whole store (catalog, cache,
+  # findings, queue).
+  queue_backend: ${CPG_QUEUE_BACKEND:durable}
   # build_workers * build_heap_gb must fit the build container's mem_limit (~7GB/worker incl. JVM).
   build_workers: ${CPG_BUILD_WORKERS:8}
   max_repo_size_mb: ${MAX_REPO_SIZE_MB:1024}

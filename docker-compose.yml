@@ -8,9 +8,54 @@ services:
     ports:
       - "13371-13870:13371-13870"
     volumes:
-      - ./playground:/playground
+      # Same host dir the MCP mounts; keep PLAYGROUND_HOST_PATH consistent across services.
+      - ${PLAYGROUND_HOST_PATH:-./playground}:/playground
     restart: unless-stopped
     mem_limit: ${JOERN_MEM_LIMIT:-100g}
+
+  # The MCP server. Drives the host Docker daemon (socket mount) to build CPGs in
+  # codebadger-joern-server and to spawn per-CPG pool worker containers; uses host
+  # networking so the existing localhost:<published-port> wiring (Joern servers,
+  # Postgres, Redis, and its own :4242) all works unchanged. Starts with the full
+  # stack by default. For deps-only / run-MCP-on-host dev, add
+  # `--scale codebadger-mcp=0`.
+  codebadger-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp
+    image: codebadger-mcp:latest
+    container_name: codebadger-mcp
+    network_mode: host
+    volumes:
+      # MUST be the SAME host dir joern-server mounts at /playground. PLAYGROUND_HOST_PATH
+      # must be ABSOLUTE so pool worker containers (started via the host daemon) bind
+      # the right source — scripts/deploy.sh sets it. The MCP derives its playground
+      # dir from the app location, so it mounts at /app/playground.
+      - ${PLAYGROUND_HOST_PATH:-./playground}:/app/playground
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./logs:/app/logs
+    environment:
+      # 0.0.0.0 = reachable on all interfaces. Set MCP_HOST=127.0.0.1 to bind
+      # loopback only (e.g. when a reverse proxy / socat already fronts it).
+      MCP_HOST: ${MCP_HOST:-0.0.0.0}
+      JOERN_WORKER_MODE: pool
+      JOERN_PLAYGROUND_HOST_PATH: ${PLAYGROUND_HOST_PATH:-./playground}
+      DATABASE_URL: postgresql://codebadger:codebadger@localhost:${POSTGRES_PORT:-55432}/codebadger
+      REDIS_URL: redis://localhost:${REDIS_PORT:-56379}/0
+      CPG_QUEUE_BACKEND: ${CPG_QUEUE_BACKEND:-durable}
+      # Memory sizing — run scripts/recommend_config.py for your host. JOERN_MEM_LIMIT
+      # MUST match the joern-server build cap below so the MCP's over-commit guard
+      # leaves the right amount for the query-worker pool. 0 = auto-derive the budget.
+      JOERN_MEM_LIMIT: ${JOERN_MEM_LIMIT:-100g}
+      JOERN_MEMORY_BUDGET_MB: ${JOERN_MEMORY_BUDGET_MB:-0}
+    depends_on:
+      codebadger-postgres:
+        condition: service_healthy
+      codebadger-redis:
+        condition: service_healthy
+      codebadger-joern-server:
+        condition: service_started
+    restart: unless-stopped
 
   # Postgres and Redis are the backing services and start by default with
   # `docker compose up -d`. CodeBadger fails to boot if they're unreachable.

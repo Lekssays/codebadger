@@ -1,0 +1,40 @@
+# CodeBadger MCP server image.
+#
+# Runs main.py (the FastMCP server). The server orchestrates Joern by driving the
+# *host* Docker daemon — it shells out to `docker exec` for CPG builds and uses the
+# Docker SDK to spawn pool worker containers — so this image ships the docker CLI
+# client (no daemon) and expects /var/run/docker.sock to be mounted in. It also
+# clones GitHub repos, so it needs git. See docker-compose.yml / docs/deployment.md.
+FROM python:3.13-slim
+
+# Docker CLI (client only) — pulled as a static binary, no daemon/engine.
+ARG DOCKER_CLI_VERSION=27.3.1
+ARG DOCKER_CLI_ARCH=x86_64
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git \
+        curl \
+        ca-certificates \
+    && curl -fsSL "https://download.docker.com/linux/static/stable/${DOCKER_CLI_ARCH}/docker-${DOCKER_CLI_VERSION}.tgz" \
+        | tar -xz -C /usr/local/bin --strip-components=1 docker/docker \
+    && docker --version \
+    && apt-get purge -y curl \
+    && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install Python deps first for layer caching.
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Application code (playground/ is a mounted volume, excluded via .dockerignore).
+COPY main.py config.yaml ./
+COPY src/ ./src/
+
+# Per-run file logs land here; mount a volume to persist them on the host.
+RUN mkdir -p /app/logs /app/playground
+
+EXPOSE 4242
+
+CMD ["python", "main.py"]

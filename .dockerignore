@@ -1,0 +1,36 @@
+# Keep the MCP image build context small and free of host/runtime state.
+
+# Runtime data — the playground is a mounted volume, never baked into the image.
+playground/
+logs/
+
+# Version control & local env
+.git/
+.gitignore
+.venv/
+venv/
+.env
+
+# Python caches / build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# Editor / OS cruft
+.idea/
+.vscode/
+.DS_Store
+
+# Tests & docs aren't needed at runtime
+tests/
+docs/
+
+# Don't ship local plans/scratch
+*.log
