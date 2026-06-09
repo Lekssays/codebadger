@@ -4,6 +4,7 @@ HTTP client for communicating with Joern server API
 
 import json
 import logging
+import re
 import time
 from typing import Dict, Optional, Any
 
@@ -11,7 +12,34 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from ..utils.query_rendering import escape_scala_string
+
 logger = logging.getLogger(__name__)
+
+# Joern prints this when a query runs but no project is open — i.e. importCpg
+# did not register/open a project (stale collision, or import silently failed).
+_NO_PROJECT_MARKER = "No projects loaded"
+# Pull the integer out of a Joern REPL result line like "val res0: Int = 42".
+_RESULT_INT_RE = re.compile(r"=\s*(\d+)")
+# Number of times to re-poll the verify query before giving up — importCpg can
+# return before the project is fully registered/overlays settle, so a one-shot
+# verify spuriously sees "No projects loaded". A short poll absorbs that race.
+_VERIFY_POLL_ATTEMPTS = 5
+_VERIFY_POLL_INTERVAL_S = 2.0
+
+
+def _safe_project_name(raw: str) -> str:
+    """Derive a collision-free Joern project name from a hash/path.
+
+    Every CPG file is named ``cpg.bin``; if we let importCpg derive the project
+    name from the filename, a worker that imports a second CPG (or reuses a
+    workspace) collides on the name ``cpg.bin`` and importCpg leaves NO project
+    open -> "No projects loaded". A name unique to the codebase avoids that.
+    """
+    base = raw.rsplit("/", 1)[-1]
+    base = base[:-4] if base.endswith(".bin") else base
+    cleaned = re.sub(r"[^A-Za-z0-9_]", "_", base).strip("_")
+    return cleaned or "cpg"
 
 
 class JoernServerClient:
@@ -188,80 +216,142 @@ class JoernServerClient:
                 "stderr": f"Error: {str(e)}"
             }
 
+    # Outcome of a verify poll: a project is open and we read a method count.
+    _VERIFY_OK = "ok"
+    # A project is open but the CPG has 0 user-defined methods — the build
+    # parsed nothing. This is a broken/empty build, not a load race; no retry
+    # will help, so the caller should fail it with a distinct reason.
+    _VERIFY_EMPTY = "empty"
+    # No project is open ("No projects loaded") — import didn't register. This
+    # is the race/collision case worth re-importing once.
+    _VERIFY_NO_PROJECT = "no_project"
+    # Could not run the verify query at all (server/network).
+    _VERIFY_ERROR = "error"
+
+    def _import_query(self, cpg_path: str, project_name: str) -> str:
+        """Build the import statement: reset stale state, import under an
+        explicit unique name, then open it (open is idempotent if importCpg
+        already opened it, and surfaces a clear error if it didn't)."""
+        path_lit = escape_scala_string(cpg_path)
+        proj_lit = escape_scala_string(project_name)
+        return (
+            f'workspace.reset; '
+            f'importCpg("{path_lit}", "{proj_lit}"); '
+            f'open("{proj_lit}")'
+        )
+
+    def _verify_loaded(self) -> tuple:
+        """Poll until a project is open and report (outcome, method_count).
+
+        Re-polls a few times so a project that is still being registered after
+        importCpg returns isn't mistaken for a permanent failure.
+        """
+        last_stdout = ""
+        for attempt in range(_VERIFY_POLL_ATTEMPTS):
+            verify_result = self.execute_query(
+                "cpg.method.isExternal(false).l.size", timeout=15
+            )
+            if not verify_result.get("success"):
+                # Treat a connection/server error as retryable within the poll.
+                last_stdout = verify_result.get("stderr", "") or ""
+                time.sleep(_VERIFY_POLL_INTERVAL_S)
+                continue
+
+            stdout = verify_result.get("stdout", "") or ""
+            last_stdout = stdout
+
+            if _NO_PROJECT_MARKER in stdout:
+                # Import hasn't registered a project (yet). Keep polling.
+                time.sleep(_VERIFY_POLL_INTERVAL_S)
+                continue
+
+            match = _RESULT_INT_RE.search(stdout)
+            if match:
+                count = int(match.group(1))
+                if count > 0:
+                    return (self._VERIFY_OK, count)
+                # Project is open but empty — settle briefly in case overlays
+                # are still populating, then accept the (empty) verdict.
+                if attempt < _VERIFY_POLL_ATTEMPTS - 1:
+                    time.sleep(_VERIFY_POLL_INTERVAL_S)
+                    continue
+                return (self._VERIFY_EMPTY, 0)
+
+            # Unparseable output that isn't the no-project marker — retry.
+            time.sleep(_VERIFY_POLL_INTERVAL_S)
+
+        if _NO_PROJECT_MARKER in last_stdout:
+            return (self._VERIFY_NO_PROJECT, None)
+        logger.error(f"Could not parse method count from: {last_stdout[:300]}")
+        return (self._VERIFY_ERROR, None)
+
     def load_cpg(self, cpg_path: str, project_name: Optional[str] = None, timeout: int = 600) -> bool:
         """
-        Load a CPG file into the Joern server
-        
+        Load a CPG file into the Joern server.
+
+        Imports the pre-built cpg.bin under an explicit, collision-free project
+        name (every file is literally named ``cpg.bin``, so deriving the name
+        from the filename collides and leaves "No projects loaded"), opens it,
+        then verifies with a readiness poll. On a "No projects loaded" verdict
+        we re-import once before giving up — that verdict is usually a
+        registration race or a stale-workspace collision, not a dead CPG.
+
         Args:
             cpg_path: Path to the CPG file to load
-            project_name: Optional name to assign to the project
-            timeout: Maximum time to wait for loading (seconds, default 600 for large codebases)
-            
+            project_name: Name to assign to the project (defaults to a name
+                derived from the file path)
+            timeout: Maximum time to wait for the import (seconds)
+
         Returns:
-            True if CPG was loaded successfully, False otherwise
+            True if a non-empty CPG was loaded and verified, False otherwise.
         """
-        try:
-            # Use importCpg to load pre-built cpg.bin file
-            # Use workspace.resett to ensure clean state in the isolated workspace
-            # We don't force project name to avoid potential API issues, letting Joern derive it from filename
-            query = f'workspace.reset; importCpg("{cpg_path}")'
-            logger.info(f"Loading CPG from {cpg_path} (timeout={timeout}s)")
-            
-            result = self.execute_query(query, timeout=timeout)
-            
-            if result.get("success"):
-                logger.info(f"CPG loaded successfully from {cpg_path}")
-                # Verify the CPG is actually loaded by checking method count
-                try:
-                    verify_query = "cpg.method.isExternal(false).l.size"
-                    verify_result = self.execute_query(verify_query, timeout=10)
-                    if verify_result.get("success"):
-                        stdout = verify_result.get("stdout", "")
-                        # Extract the number from the output
-                        import re
-                        match = re.search(r'= (\d+)', stdout)
-                        if match:
-                            method_count = int(match.group(1))
-                            logger.info(f"CPG verified: {method_count} methods found")
-                            return True
-                        else:
-                            logger.error(f"Could not parse method count from: {stdout}")
-                            return False
-                    else:
-                        logger.error(f"Could not verify CPG: {verify_result.get('stderr')}")
-                        return False
-                except Exception as e:
-                    logger.error(f"Could not verify CPG: {e}")
-                    return False
-            else:
-                error_msg = result.get('stderr', '')
-                # Check if error mentions connection issues but might have succeeded
-                if "Connection" in error_msg or "reset" in error_msg:
-                    logger.warning(f"Connection issue during importCpg, verifying if CPG loaded anyway")
-                    try:
-                        # Try to verify if CPG is actually there despite connection error
-                        verify_query = "cpg.method.isExternal(false).l.size"
-                        verify_result = self.execute_query(verify_query, timeout=10)
-                        if verify_result.get("success"):
-                            logger.info("CPG verification successful - CPG was loaded despite connection error")
-                            return True
-                    except Exception as verify_error:
-                        logger.warning(f"CPG verification failed after connection error: {verify_error}")
-                
-                logger.error(f"Failed to load CPG from {cpg_path}: {error_msg}")
-                return False
-                
-        except Exception as e:
-            logger.error(f"Error loading CPG from {cpg_path}: {e}")
-            # Try to verify if CPG might be loaded anyway
+        proj = _safe_project_name(project_name or cpg_path)
+        query = self._import_query(cpg_path, proj)
+
+        for attempt in range(2):  # initial import + one re-import on no_project
+            label = "Loading" if attempt == 0 else "Re-importing"
+            logger.info(f"{label} CPG from {cpg_path} as project '{proj}' (timeout={timeout}s)")
             try:
-                verify_query = "cpg.method.isExternal(false).l.size"
-                verify_result = self.execute_query(verify_query, timeout=10)
-                if verify_result.get("success"):
-                    logger.info("CPG verification successful - CPG was loaded despite exception")
+                result = self.execute_query(query, timeout=timeout)
+            except Exception as e:
+                logger.error(f"Error importing CPG from {cpg_path}: {e}")
+                # The import statement itself blew up; a verify poll can still
+                # confirm a prior successful load in rare connection-reset cases.
+                outcome, count = self._verify_loaded()
+                if outcome == self._VERIFY_OK:
+                    logger.info(f"CPG verified despite import exception: {count} methods")
                     return True
-            except Exception as verify_error:
-                logger.warning(f"CPG verification failed after exception: {verify_error}")
+                return False
+
+            if not result.get("success"):
+                error_msg = result.get("stderr", "") or ""
+                # A connection reset can fire after the import actually applied,
+                # so fall through to the verify poll rather than failing blind.
+                logger.warning(
+                    f"importCpg returned unsuccessful for {cpg_path}: {error_msg[:300]} "
+                    f"— verifying load state anyway"
+                )
+
+            outcome, count = self._verify_loaded()
+            if outcome == self._VERIFY_OK:
+                logger.info(f"CPG verified: {count} methods found")
+                return True
+            if outcome == self._VERIFY_EMPTY:
+                logger.error(
+                    f"CPG loaded but is empty (0 user-defined methods) for {cpg_path} "
+                    f"— treating as a failed/empty build"
+                )
+                return False
+            if outcome == self._VERIFY_NO_PROJECT and attempt == 0:
+                logger.warning(
+                    f"No project open after import of {cpg_path} — re-importing once"
+                )
+                continue  # retry the import loop
+            logger.error(
+                f"Failed to load CPG from {cpg_path} (verify outcome: {outcome})"
+            )
             return False
+
+        return False
 
 

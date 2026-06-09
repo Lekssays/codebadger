@@ -702,11 +702,13 @@ class JoernServerManager:
                 logger.info(f"CPG loaded successfully for {codebase_hash}")
                 return True
 
-            # importCpg failed or timed out — kill the server so the JVM doesn't
-            # spin forever at 100% CPU doing overlay computation.
+            # importCpg failed, verified empty, or timed out — kill the server
+            # so a stuck JVM doesn't spin at 100% CPU on overlay computation.
+            # (A sub-second failure here is a load/verify failure, not a stuck
+            # overlay; the client log above carries the specific cause.)
             logger.error(
                 f"Failed to load CPG for {codebase_hash} (timeout={timeout}s) — "
-                f"terminating server to stop stuck overlay computation"
+                f"terminating server"
             )
             self.terminate_server(codebase_hash)
             return False
