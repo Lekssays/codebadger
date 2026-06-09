@@ -297,6 +297,72 @@ class TestMCPTools:
                 assert str(source_dir) not in result_dict["error"]
 
     @pytest.mark.asyncio
+    async def test_generate_cpg_snippet_stages_pasted_code(self, mock_services, tmp_path):
+        """A pasted snippet should be written into codebases/<hash> and queued."""
+        from unittest.mock import AsyncMock
+        from src.tools.core_tools import register_core_tools
+
+        codebase_hash = "abc1234567890123"
+        code = "int main() { int a[2]; a[5] = 1; return 0; }"
+        mock_services["codebase_tracker"].get_codebase.return_value = None
+        mock_services["cpg_queue"] = MagicMock()
+        mock_services["cpg_queue"].submit = AsyncMock(return_value="queued")
+
+        with patch("src.tools.core_tools.os.path.abspath", return_value=str(tmp_path)), \
+             patch("src.tools.core_tools.os.path.dirname", return_value=str(tmp_path)), \
+             patch("src.tools.core_tools.os.path.join", side_effect=os.path.join), \
+             patch("src.tools.core_tools.get_cpg_cache_key", return_value=codebase_hash):
+
+            mcp = FastMCP("TestServer")
+            register_core_tools(mcp, mock_services)
+
+            async with Client(mcp) as client:
+                result = await client.call_tool(
+                    "generate_cpg",
+                    {
+                        "source_type": "snippet",
+                        "source_path": "",
+                        "language": "c",
+                        "code": code,
+                    },
+                )
+
+            import json
+            result_dict = json.loads(result.content[0].text)
+
+            assert result_dict["status"] == "generating"
+            mock_services["cpg_queue"].submit.assert_awaited_once()
+
+            # The snippet was staged with the language-derived filename.
+            snippet_file = tmp_path / "codebases" / codebase_hash / "snippet.c"
+            assert snippet_file.read_text() == code
+
+            # Persisted as a snippet source.
+            save_kwargs = mock_services["codebase_tracker"].save_codebase.call_args.kwargs
+            assert save_kwargs["source_type"] == "snippet"
+
+    @pytest.mark.asyncio
+    async def test_generate_cpg_snippet_requires_code(self, mock_services, tmp_path):
+        """source_type='snippet' without code returns a validation error, not a crash."""
+        from src.tools.core_tools import register_core_tools
+
+        mock_services["codebase_tracker"].get_codebase.return_value = None
+
+        mcp = FastMCP("TestServer")
+        register_core_tools(mcp, mock_services)
+
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                "generate_cpg",
+                {"source_type": "snippet", "source_path": "", "language": "c"},
+            )
+
+        import json
+        result_dict = json.loads(result.content[0].text)
+        assert result_dict["success"] is False
+        assert "code is required" in result_dict["error"]
+
+    @pytest.mark.asyncio
     async def test_get_cpg_status_exists(self, mock_services):
         """Test getting CPG status when CPG exists"""
         from src.tools.core_tools import register_core_tools

@@ -28,7 +28,7 @@ codebadger speaks MCP over HTTP at `http://localhost:4242/mcp`.
 
 ```mermaid
 flowchart LR
-    A[generate_cpg<br/>local path or GitHub URL] --> B{get_cpg_status}
+    A[generate_cpg<br/>GitHub URL, local path, or pasted snippet] --> B{get_cpg_status}
     B -- generating --> B
     B -- ready --> C[Explore<br/>list_methods, get_method_source,<br/>get_call_graph, get_codebase_summary]
     C --> D[Hunt<br/>find_taint_flows, find_use_after_free,<br/>find_integer_overflow, get_program_slice]
@@ -46,8 +46,13 @@ content hash; an idle server sleeps and transparently wakes on the next query.
 
 ```text
 # 1. Build a CPG (GitHub URL or local path; a sub-path keeps it small/fast)
-generate_cpg(source="https://github.com/GNOME/libsoup", language="c")
+generate_cpg(source_type="github", source_path="https://github.com/GNOME/libsoup", language="c")
   -> { "codebase_hash": "ddf44eb0a10a85e6", "status": "generating" }
+
+# 1b. Or analyze code pasted straight into the chat - no repo or path needed
+generate_cpg(source_type="snippet", language="c",
+             code="int main() { char b[8]; gets(b); return 0; }")
+  -> { "codebase_hash": "9f2c1ab07e4d3a55", "status": "generating" }
 
 # 2. Wait for it
 get_cpg_status(codebase_hash="ddf44eb0a10a85e6")  -> { "status": "ready" }

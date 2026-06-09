@@ -28,7 +28,7 @@ These manage the analysis artifact itself — the CPG is generated once and reus
 
 | Tool | What it does |
 |------|--------------|
-| `generate_cpg` | Build a CPG for a codebase. Accepts a **GitHub URL** (cloned first) or a **local path** (copied into the workspace); a sub-path keeps large repos small. Returns immediately with a `codebase_hash` and builds in the background. CPGs are cached on disk by content hash, so re-runs are instant. |
+| `generate_cpg` | Build a CPG for a codebase. Accepts a **GitHub URL** (cloned first), a **local path** (copied into the workspace), or a pasted **code snippet** (`source_type="snippet"` with the code in `code`); a sub-path keeps large repos small. Returns immediately with a `codebase_hash` and builds in the background. CPGs are cached on disk by content hash, so re-runs are instant. |
 | `get_cpg_status` | Check whether a CPG is `generating`, `ready`, `sleeping`, or `failed`, and get the Joern server port if running. **Poll this** after `generate_cpg` until `ready`. |
 | `remove_cpg` | Free resources for a codebase. By default it terminates the Joern process and releases the port but **keeps the CPG `.bin`** on disk (status → `sleeping`) for fast re-activation. Pass `delete_files=True` to delete the cached artifacts entirely. |
 

@@ -89,6 +89,113 @@ def validate_local_path(path: str) -> bool:
     return True
 
 
+def validate_code_snippet(code: Optional[str]) -> None:
+    """Validate a pasted code snippet (source_type='snippet')."""
+    from ..defaults import MAX_SNIPPET_BYTES
+
+    if not code or not isinstance(code, str) or not code.strip():
+        raise ValidationError(
+            "code is required and must be a non-empty string when source_type='snippet'"
+        )
+
+    if "\x00" in code:
+        raise ValidationError("code must not contain null bytes")
+
+    size = len(code.encode("utf-8"))
+    if size > MAX_SNIPPET_BYTES:
+        raise ValidationError(
+            f"Code snippet is too large ({size} bytes, max {MAX_SNIPPET_BYTES}). "
+            "Stage larger code as a local path or GitHub repo instead."
+        )
+
+
+# A snippet filename must be a single, plain path segment.
+_SNIPPET_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+
+
+def snippet_filename(language: str, filename: Optional[str] = None) -> str:
+    """Resolve a safe, single-segment filename for a pasted snippet.
+
+    Honors a caller-supplied name only if it's a plain, single path segment
+    (no directories, no traversal, conservative charset); otherwise falls back
+    to `snippet.<ext>` derived from the language.
+    """
+    from ..defaults import LANGUAGE_EXTENSIONS
+
+    if filename:
+        # Strip any directory components — the snippet must land directly in the
+        # codebase dir, never escape it — then enforce a conservative charset.
+        base = os.path.basename(filename.strip()).strip()
+        if base and base not in (".", "..") and _SNIPPET_NAME_RE.match(base):
+            return base
+
+    ext = LANGUAGE_EXTENSIONS.get(language, "txt")
+    return f"snippet.{ext}"
+
+
+def validate_snippet_label(label: Optional[str]) -> str:
+    """Validate/sanitize the human label stored for a snippet (source_path).
+
+    Cosmetic only (stored + echoed to the client), so we bound length and strip
+    control characters rather than rejecting outright. Returns the cleaned label.
+    """
+    if not label:
+        return ""
+    if not isinstance(label, str):
+        raise ValidationError("source_path must be a string")
+    # Drop control characters; collapse to a bounded single-line label.
+    cleaned = "".join(ch for ch in label if ch.isprintable()).strip()
+    return cleaned[:256]
+
+
+# Git branch / ref name: conservative whitelist. Blocks the classic
+# `--upload-pack=...` style argument injection and other ref-name abuses before
+# the value ever reaches `git clone --branch`.
+_GIT_BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
+
+
+def validate_git_branch(branch: Optional[str]) -> None:
+    """Validate a git branch/ref name (no-op when not provided)."""
+    if branch is None:
+        return
+    if not isinstance(branch, str) or not branch.strip():
+        raise ValidationError("branch must be a non-empty string when provided")
+
+    branch = branch.strip()
+    if len(branch) > 255:
+        raise ValidationError("branch name too long (max 255 characters)")
+    if (
+        branch.startswith("-")
+        or branch.startswith("/")
+        or branch.endswith("/")
+        or branch.endswith(".lock")
+        or ".." in branch
+        or "@{" in branch
+        or "//" in branch
+    ):
+        raise ValidationError(f"Invalid git branch name: {branch!r}")
+    if not _GIT_BRANCH_RE.match(branch):
+        raise ValidationError(
+            "branch name may only contain letters, digits, '.', '_', '/', and '-'"
+        )
+
+
+def validate_github_token(token: Optional[str]) -> None:
+    """Validate a GitHub token's shape (no-op when not provided).
+
+    The token is injected into the clone URL (`https://<token>@github.com/...`),
+    so reject anything that could break out of that context or inject creds/host.
+    """
+    if token is None:
+        return
+    if not isinstance(token, str) or not token.strip():
+        raise ValidationError("github_token must be a non-empty string when provided")
+    if len(token) > 512:
+        raise ValidationError("github_token too long")
+    if any(ch.isspace() for ch in token) or any(c in token for c in ("@", "/", ":", "#", "?")):
+        raise ValidationError("github_token contains invalid characters")
+
+
 def validate_cpgql_query(query: str) -> None:
     """Validate CPGQL query"""
     if not query or not isinstance(query, str):

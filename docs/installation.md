@@ -26,7 +26,7 @@ docker --version && docker compose version
 ### 2. Get the code
 
 ```bash
-git clone <repo-url> codebadger && cd codebadger
+git clone http://github.com/lekssays/codebadger && cd codebadger
 ```
 
 ### 3. Configure for your host

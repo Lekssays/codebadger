@@ -20,11 +20,16 @@ from ..defaults import LANGUAGE_COMMANDS
 from ..exceptions import ValidationError
 from ..models import CodebaseInfo, SessionStatus
 from ..utils.validators import (
+    validate_code_snippet,
+    validate_git_branch,
+    validate_github_token,
     validate_github_url,
     validate_language,
     validate_local_path,
+    validate_snippet_label,
     validate_source_type,
     resolve_host_path,
+    snippet_filename,
 )
 
 logger = logging.getLogger(__name__)
@@ -137,11 +142,18 @@ def _get_git_commit_hash(path: str) -> Optional[str]:
     except (subprocess.CalledProcessError, FileNotFoundError, OSError):
         return None
 
-def get_cpg_cache_key(source_type: str, source_path: str, language: str, commit_hash: Optional[str] = None) -> str:
+def get_cpg_cache_key(source_type: str, source_path: str, language: str, commit_hash: Optional[str] = None, content: Optional[str] = None) -> str:
     """
     Generate a deterministic CPG cache key based on source type, path, language, and optional commit hash.
+
+    For snippets the key is derived from the code content (not the path), so pasting
+    the same snippet twice reuses the cached CPG regardless of the label.
     """
-    if source_type == "github":
+    if source_type == "snippet":
+        digest = hashlib.sha256((content or "").encode("utf-8")).hexdigest()
+        identifier = f"snippet:{digest}:{language}"
+        return hashlib.sha256(identifier.encode()).hexdigest()[:16]
+    elif source_type == "github":
         if "github.com/" in source_path:
             parts = source_path.split("github.com/")[-1].split("/")
             if len(parts) >= 2:
@@ -760,17 +772,29 @@ Examples:
     )""",
     )
     async def generate_cpg(
-        source_type: Annotated[str, Field(description="Either 'local' or 'github'")],
-        source_path: Annotated[str, Field(description="For local: absolute path to source directory. For github: full GitHub URL (e.g., https://github.com/user/repo)")],
+        source_type: Annotated[str, Field(description="One of 'local', 'github', or 'snippet' (code pasted directly into the chat)")],
+        source_path: Annotated[str, Field(description="For local: absolute path to source directory. For github: full GitHub URL (e.g., https://github.com/user/repo). For snippet: a short human label for the pasted code (e.g. a function name); may be left empty")],
         language: Annotated[str, Field(description="Programming language - one of: java, c, cpp, javascript, python, go, kotlin, csharp, ghidra, jimple, php, ruby, swift")],
+        code: Annotated[Optional[str], Field(description="The source code itself, required when source_type='snippet'. Ignored for local/github.")] = None,
+        filename: Annotated[Optional[str], Field(description="Optional filename for a snippet (e.g. 'parser.c'); defaults to snippet.<ext> from the language. Ignored for local/github.")] = None,
         github_token: Annotated[Optional[str], Field(description="GitHub Personal Access Token for private repositories (optional)")] = None,
         branch: Annotated[Optional[str], Field(description="Specific git branch to checkout (optional, defaults to default branch)")] = None,
         force: Annotated[bool, Field(description="Skip the large-project size warning. Set to True only after the user has explicitly confirmed they want to analyze the full project.")] = False,
     ) -> Dict[str, Any]:
-        """Create a Code Property Graph from source code for analysis."""
+        """Create a Code Property Graph from source code for analysis.
+
+        Source can be a GitHub repo, a local directory, or a code snippet pasted
+        straight into the chat (source_type='snippet' with the code in `code`).
+        """
         try:
             validate_source_type(source_type)
             validate_language(language)
+            # Validate every caller-supplied input up front (no-ops when unset).
+            validate_git_branch(branch)
+            validate_github_token(github_token)
+            if source_type == "snippet":
+                validate_code_snippet(code)
+                source_path = validate_snippet_label(source_path)
 
             codebase_tracker = services["codebase_tracker"]
 
@@ -805,7 +829,7 @@ Examples:
                  except Exception as e:
                      logger.warning(f"Failed to get git commit hash: {e}")
 
-            codebase_hash = get_cpg_cache_key(source_type, source_path, language, commit_hash)
+            codebase_hash = get_cpg_cache_key(source_type, source_path, language, commit_hash, content=code)
             logger.info(f"Processing codebase with hash: {codebase_hash}")
 
             existing_codebase = codebase_tracker.get_codebase(codebase_hash)
@@ -946,6 +970,24 @@ Examples:
                     logger.info(f"Cloned repository to {codebase_dir}")
                 else:
                     logger.info(f"Using existing cloned repository at {codebase_dir}")
+            elif source_type == "snippet":
+                snippet_name = snippet_filename(language, filename)
+                # Label the DB record with the filename when no explicit label was given.
+                if not source_path:
+                    source_path = snippet_name
+
+                if not os.path.exists(codebase_dir):
+                    os.makedirs(codebase_dir, exist_ok=True)
+                    snippet_file = os.path.join(codebase_dir, snippet_name)
+                    try:
+                        with open(snippet_file, "w", encoding="utf-8") as f:
+                            f.write(code)
+                        logger.info(f"Wrote snippet to {snippet_file}")
+                    except OSError as e:
+                        logger.error(f"Failed to write snippet for {codebase_hash}: {e}")
+                        raise ValidationError("Failed to stage code snippet")
+                else:
+                    logger.info(f"Using existing snippet at {codebase_dir}")
             else:
                 host_path = resolve_host_path(source_path)
                 

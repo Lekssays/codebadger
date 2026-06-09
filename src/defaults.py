@@ -201,3 +201,24 @@ LANGUAGE_COMMANDS = {
     "ruby":       "/opt/joern/joern-cli/rubysrc2cpg",
     "swift":      "/opt/joern/joern-cli/swiftsrc2cpg.sh",
 }
+
+# Default file extension per language, used to name a pasted code snippet
+# (source_type="snippet") so the Joern frontend picks the right parser.
+LANGUAGE_EXTENSIONS = {
+    "java":       "java",
+    "c":          "c",
+    "cpp":        "cpp",
+    "javascript": "js",
+    "python":     "py",
+    "go":         "go",
+    "kotlin":     "kt",
+    "csharp":     "cs",
+    "jimple":     "jimple",
+    "php":        "php",
+    "ruby":       "rb",
+    "swift":      "swift",
+}
+
+# Upper bound on a pasted code snippet (source_type="snippet"). Snippets are meant
+# to be small; anything larger should be staged as a local path or GitHub repo.
+MAX_SNIPPET_BYTES = 1_000_000

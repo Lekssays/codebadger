@@ -10,10 +10,15 @@ from src.exceptions import ValidationError
 from src.utils.validators import (
     hash_query,
     sanitize_path,
+    snippet_filename,
+    validate_code_snippet,
     validate_cpgql_query,
+    validate_git_branch,
+    validate_github_token,
     validate_github_url,
     validate_language,
     validate_local_path,
+    validate_snippet_label,
     validate_source_type,
     validate_timeout,
     resolve_host_path,
@@ -25,7 +30,7 @@ class TestValidateSourceType:
 
     def test_valid_source_types(self):
         """Test valid source types"""
-        valid_types = ["local", "github"]
+        valid_types = ["local", "github", "snippet"]
 
         for source_type in valid_types:
             # Should not raise
@@ -37,7 +42,124 @@ class TestValidateSourceType:
             validate_source_type("invalid")
 
         assert "Invalid source_type 'invalid'" in str(exc_info.value)
-        assert "Must be one of: local, github" in str(exc_info.value)
+        assert "snippet" in str(exc_info.value)
+
+
+class TestValidateCodeSnippet:
+    """Test pasted code snippet validation"""
+
+    def test_valid_snippet(self):
+        validate_code_snippet("int main() { return 0; }")
+
+    @pytest.mark.parametrize("bad", [None, "", "   ", "\n\t"])
+    def test_empty_snippet_rejected(self, bad):
+        with pytest.raises(ValidationError):
+            validate_code_snippet(bad)
+
+    def test_oversize_snippet_rejected(self):
+        from src.defaults import MAX_SNIPPET_BYTES
+
+        with pytest.raises(ValidationError):
+            validate_code_snippet("a" * (MAX_SNIPPET_BYTES + 1))
+
+    def test_null_byte_rejected(self):
+        with pytest.raises(ValidationError):
+            validate_code_snippet("int main(){}\x00")
+
+
+class TestValidateGitBranch:
+    """Test git branch/ref validation"""
+
+    @pytest.mark.parametrize(
+        "ok", [None, "main", "develop", "release/1.2.x", "feature_x-1.0", "v2.0.0"]
+    )
+    def test_valid_branches(self, ok):
+        validate_git_branch(ok)
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "--upload-pack=touch /tmp/pwned",  # classic git arg-injection RCE
+            "-x",
+            "a b",
+            "a..b",
+            "a@{0}",
+            "/leading",
+            "trailing/",
+            "feature.lock",
+            "a;rm -rf /",
+            "a//b",
+            "",
+            "   ",
+        ],
+    )
+    def test_malicious_branches_rejected(self, bad):
+        with pytest.raises(ValidationError):
+            validate_git_branch(bad)
+
+
+class TestValidateGithubToken:
+    """Test GitHub token shape validation"""
+
+    @pytest.mark.parametrize("ok", [None, "ghp_abcDEF123", "github_pat_11ABC_def-ghi"])
+    def test_valid_tokens(self, ok):
+        validate_github_token(ok)
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "tok with space",
+            "evil@host",        # would break out of https://<token>@host
+            "a/b",
+            "user:pass",
+            "frag#ment",
+            "q?uery",
+            "x" * 513,
+        ],
+    )
+    def test_invalid_tokens_rejected(self, bad):
+        with pytest.raises(ValidationError):
+            validate_github_token(bad)
+
+
+class TestValidateSnippetLabel:
+    """Test snippet label sanitization"""
+
+    def test_empty_returns_empty(self):
+        assert validate_snippet_label(None) == ""
+        assert validate_snippet_label("") == ""
+
+    def test_strips_control_characters(self):
+        assert validate_snippet_label("he\x07llo\nworld") == "helloworld"
+
+    def test_bounds_length(self):
+        assert len(validate_snippet_label("a" * 500)) == 256
+
+
+class TestSnippetFilename:
+    """Test snippet filename resolution"""
+
+    def test_default_from_language(self):
+        assert snippet_filename("python") == "snippet.py"
+        assert snippet_filename("c") == "snippet.c"
+
+    def test_unknown_language_falls_back_to_txt(self):
+        assert snippet_filename("ghidra") == "snippet.txt"
+
+    def test_honors_explicit_filename(self):
+        assert snippet_filename("c", "parser.c") == "parser.c"
+
+    def test_strips_path_traversal(self):
+        assert snippet_filename("c", "../../etc/passwd") == "passwd"
+        assert snippet_filename("c", "/abs/path/foo.c") == "foo.c"
+
+    def test_dotdot_only_falls_back(self):
+        assert snippet_filename("python", "..") == "snippet.py"
+
+    def test_unsafe_charset_falls_back(self):
+        # Names with shell metachars / spaces are not trusted; fall back to default.
+        assert snippet_filename("c", "a;rm -rf b.c") == "snippet.c"
+        assert snippet_filename("c", "weird name.c") == "snippet.c"
 
 
 class TestValidateLanguage:

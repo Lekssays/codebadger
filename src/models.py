@@ -15,6 +15,7 @@ class SourceType(str, Enum):
 
     LOCAL = "local"
     GITHUB = "github"
+    SNIPPET = "snippet"  # code pasted directly into the chat (no repo / path)
 
 
 class SessionStatus(str, Enum):

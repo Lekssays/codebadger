@@ -70,6 +70,7 @@ class TestEnums:
         """Test SourceType enum values"""
         assert SourceType.LOCAL.value == "local"
         assert SourceType.GITHUB.value == "github"
+        assert SourceType.SNIPPET.value == "snippet"
 
 
 class TestConfigModels:

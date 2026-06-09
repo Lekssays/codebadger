@@ -102,16 +102,22 @@ curl -s http://localhost:4242/health | python -m json.tool
 
 ## Analyzing code from a chat interface
 
-A user pastes a GitHub URL **or** a local path; everything is staged under
-`playground/` so all containers can see it.
+A user pastes a GitHub URL, a local path, **or a code snippet**; everything is
+staged under `playground/` so all containers can see it.
 
-- **GitHub repo** — pass the URL to `generate_cpg`. The MCP clones it into
-  `playground/codebases/<hash>` automatically; nothing else to set up.
+- **GitHub repo** — pass the URL to `generate_cpg` (`source_type="github"`). The
+  MCP clones it into `playground/codebases/<hash>` automatically; nothing else to
+  set up.
 - **Local source** — place the code under `./playground/` on the host (the MCP
-  sees it at `/app/playground/...`) and pass that path, e.g.
-  `/app/playground/myproject`. The MCP copies it into `playground/codebases/<hash>`.
-  A path that isn't visible inside the MCP container is rejected, so local code
-  must live under `playground`.
+  sees it at `/app/playground/...`) and pass that path with `source_type="local"`,
+  e.g. `/app/playground/myproject`. The MCP copies it into
+  `playground/codebases/<hash>`. A path that isn't visible inside the MCP
+  container is rejected, so local code must live under `playground`.
+- **Pasted snippet** — pass `source_type="snippet"` with the code in `code` (and
+  the `language`); no repo or path needed. The MCP writes it to
+  `playground/codebases/<hash>/snippet.<ext>` (override the name with `filename`)
+  and builds a CPG from it like any other source. The cache key is the snippet's
+  content hash, so re-pasting the same code reuses the existing CPG.
 
 CPGs are written to `playground/cpgs/<hash>` and cached there, so re-analysis and
 sleeping/auto-wake are cheap. The `./playground` volume is the durable artifact —
