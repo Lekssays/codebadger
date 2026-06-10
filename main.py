@@ -569,7 +569,11 @@ async def app_lifespan(server: FastMCP):
         # survives restarts and is never silently dropped; "memory" is the
         # in-process queue.
         queue_backend = getattr(config.cpg, "queue_backend", "memory")
-        queue_maxsize = config.cpg.build_workers * 4
+        # Pending-job depth is independent of build concurrency: only build_workers
+        # builds run at once (memory stays capped), this just sizes the waiting
+        # room so a high-concurrency client isn't rejected with queue_full. <=0
+        # falls back to the old build_workers*4 heuristic.
+        queue_maxsize = getattr(config.cpg, "queue_maxsize", 0) or config.cpg.build_workers * 4
         if queue_backend == "durable":
             # db_manager (Postgres) provides the job-queue methods via
             # FOR UPDATE SKIP LOCKED, so it doubles as the job store.

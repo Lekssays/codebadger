@@ -10,6 +10,31 @@ import pytest
 
 import src.services.joern_server_manager as jsm
 from src.config import load_config
+from src.services.port_manager import PortManager
+
+
+def test_port_allocation_rotates_instead_of_reusing_lowest():
+    """A just-released port must not be the very next port handed out.
+
+    Always returning min(available) republishes the same host port on the next
+    spawn, racing Docker's port-mapping teardown / TIME_WAIT and concentrating
+    all failures on the first port (14000). Allocation must sweep the range.
+    """
+    pm = PortManager(port_min=14000, port_max=14002)
+    a = pm.allocate_port("a")
+    b = pm.allocate_port("b")
+    assert (a, b) == (14000, 14001)  # cursor advances, not stuck on min
+
+    # Free the lowest, allocate again: must NOT immediately reuse 14000.
+    pm.release_port("a")
+    c = pm.allocate_port("c")
+    assert c == 14002  # rotated past the freed port
+    assert c != a
+
+    # Range still fully reclaimable (wraps around to the freed 14000).
+    d = pm.allocate_port("d")
+    assert d == 14000
+    assert sorted([b, c, d]) == [14000, 14001, 14002]
 
 
 @pytest.fixture

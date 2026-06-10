@@ -228,6 +228,12 @@ CPG_BUILD_HEAP_GB = 6
 # in-process asyncio.Queue (drops on full, lost on restart); use only for a
 # throwaway single-process run.
 CPG_QUEUE_BACKEND = "durable"
+# Max pending (queued, not-yet-running) CPG build jobs before new requests are
+# rejected with queue_full. Sizes only the waiting room — concurrent builds stay
+# capped at CPG_BUILD_WORKERS, so raising this does NOT increase build memory. A
+# value tied to build_workers (e.g. workers*4 = 8) saturates under a 12+-way
+# client and rejects ~30% of generations; keep generous headroom here instead.
+CPG_QUEUE_MAXSIZE = 64
 
 # Large-project guard: generate_cpg returns a "large_project_warning" (instead of
 # building) for a local source above either threshold, unless force=True. Meant to

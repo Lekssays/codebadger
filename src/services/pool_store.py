@@ -34,6 +34,7 @@ _REG = "cb:pool:reg"
 _WORKER = "cb:pool:worker"
 _LRU = "cb:pool:lru"
 _ADMIT_LOCK = "cb:pool:admit"
+_PORTCURSOR = "cb:pool:portcursor"
 
 
 class RedisPoolStore:
@@ -118,13 +119,23 @@ class RedisPoolStore:
         return self.r.hget(_WORKER, codebase_hash)
 
     def allocate_port(self, port_min: int, port_max: int) -> Optional[int]:
-        """Lowest free port in range not already in the registry.
+        """First free port in range not already in the registry, sweeping the
+        whole range via a rotating cursor.
+
+        Picking the lowest free port every time republishes a just-released host
+        port on the next spawn, racing Docker's teardown of the old port mapping
+        and the kernel TIME_WAIT — failures then pile up on the first port
+        (14000). A shared cursor (atomic INCR, here under admit_lock) rotates the
+        scan start so a freed port has the rest of the range pass before reuse.
 
         Must be called under admit_lock() and followed by set_port() so two
         processes can't pick the same port.
         """
         taken = set(self.all_ports().values())
-        for port in range(port_min, port_max + 1):
+        span = port_max - port_min + 1
+        start = int(self.r.incr(_PORTCURSOR))
+        for i in range(span):
+            port = port_min + ((start + i) % span)
             if port not in taken:
                 return port
         return None

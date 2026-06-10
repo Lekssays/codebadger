@@ -18,7 +18,15 @@ class PortManager:
         self._session_to_port: Dict[str, int] = {}  # session_id -> port
         self._port_to_session: Dict[int, str] = {}  # port -> session_id
         self._available_ports: Set[int] = set(range(self.port_min, self.port_max + 1))
+        # Rotating cursor so allocation sweeps the whole range instead of always
+        # handing back the lowest free port (see allocate_port for why).
+        self._cursor = self.port_min
         self._lock = threading.Lock()
+
+    def _next_available_from(self, cursor: int) -> int:
+        """Smallest available port >= cursor, wrapping to the lowest otherwise."""
+        ahead = [p for p in self._available_ports if p >= cursor]
+        return min(ahead) if ahead else min(self._available_ports)
 
     def allocate_port(self, session_id: str) -> int:
         """Allocate a port for a session"""
@@ -33,8 +41,17 @@ class PortManager:
             if not self._available_ports:
                 raise RuntimeError(f"No available ports in range {self.port_min}-{self.port_max}")
 
-            port = min(self._available_ports)
+            # Rotate across the range rather than always reusing the lowest free
+            # port. Always picking min() means a just-released host port is
+            # republished by the very next spawn, racing Docker's teardown of the
+            # old port mapping (docker-proxy/iptables DNAT) and the kernel's
+            # TIME_WAIT on the socket — which surfaces as "failed to become ready
+            # / connection refused" concentrated on the first port (14000).
+            # Advancing a cursor gives the OS/Docker time to fully free a port
+            # before it comes round again.
+            port = self._next_available_from(self._cursor)
             self._available_ports.remove(port)
+            self._cursor = port + 1 if port < self.port_max else self.port_min
             self._session_to_port[session_id] = port
             self._port_to_session[port] = session_id
 

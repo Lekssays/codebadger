@@ -187,6 +187,12 @@ class CPGConfig:
     build_heap_gb: int = 6
     # "memory" (in-process queue) or "durable" (DB-backed jobs table).
     queue_backend: str = "memory"
+    # Max pending (not-yet-running) CPG build jobs the queue accepts before it
+    # rejects with queue_full. Decoupled from build_workers: concurrent builds
+    # (and thus build memory) stay capped at build_workers, while this only sizes
+    # the waiting room. Too small and a high-concurrency client gets ~30% of
+    # generations rejected under load. <=0 falls back to build_workers * 4.
+    queue_maxsize: int = 64
     # Large-project guard (generate_cpg declines local sources above either
     # threshold unless force=True). Turn off for unattended/batch drivers.
     large_project_guard: bool = True

@@ -549,6 +549,11 @@ class JoernServerManager:
         name = self._worker_name(codebase_hash)
         # Clear any stale container with the same name so the run() can't collide.
         self._remove_worker_container(name)
+        # Removing the previous container doesn't synchronously release the host
+        # port: docker-proxy/iptables teardown plus the kernel TIME_WAIT can leave
+        # 127.0.0.1:<port> briefly occupied. Rotating allocation makes back-to-back
+        # reuse rare, but wait it out so run()'s publish can't race a stale mapping.
+        self._wait_host_port_free(port)
         logger.info(
             f"Launching worker container {name} (image {self.worker_image}, "
             f"mem_limit {mem_limit_mb}MB) on 127.0.0.1:{port} -> :{self.worker_internal_port}"
@@ -953,6 +958,38 @@ class JoernServerManager:
             time.sleep(1)
 
         return False
+
+    def _wait_host_port_free(self, port: int, wait: float = 6.0) -> None:
+        """Wait (briefly) for a host port to be free before republishing it.
+
+        Pool mode publishes the worker on 127.0.0.1:<port>; a just-removed
+        container can leave that mapping in TIME_WAIT for a moment. Best-effort:
+        if it's still occupied after ``wait`` we proceed anyway — Docker's publish
+        will raise and the caller terminates+retries — but in practice the port
+        frees within a second or two.
+        """
+        import socket
+        host = self.config.joern.server_host if self.config else "localhost"
+        deadline = time.time() + wait
+
+        def _open() -> bool:
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(1)
+                result = s.connect_ex((host, port))
+                s.close()
+                return result == 0
+            except Exception:
+                return False
+
+        if not _open():
+            return
+        logger.warning(f"Host port {port} still occupied before worker start — waiting up to {wait}s")
+        while time.time() < deadline:
+            time.sleep(0.25)
+            if not _open():
+                return
+        logger.error(f"Host port {port} still occupied after {wait}s — worker publish may fail")
 
     def _ensure_port_free(self, container, port: int, wait: int = 8) -> None:
         """Kill any process still holding *port* inside the container, then wait for it to close."""
