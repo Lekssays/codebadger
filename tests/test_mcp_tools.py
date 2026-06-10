@@ -365,6 +365,31 @@ class TestMCPTools:
         assert "no snippet code" in err.lower() and "<code language=" in err
 
     @pytest.mark.asyncio
+    async def test_generate_cpg_local_disabled_in_chat_deploy(self, mock_services, tmp_path):
+        """When chat_deploy is on, source_type='local' is refused with guidance."""
+        from src.tools.core_tools import register_core_tools
+
+        mock_services["config"].server.chat_deploy = True
+        mock_services["codebase_tracker"].get_codebase.return_value = None
+
+        mcp = FastMCP("TestServer")
+        register_core_tools(mcp, mock_services)
+
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                "generate_cpg",
+                {"source_type": "local", "source_path": str(tmp_path), "language": "c"},
+            )
+
+        import json
+        result_dict = json.loads(result.content[0].text)
+        assert result_dict["success"] is False
+        err = result_dict["error"]
+        assert "disabled" in err.lower()
+        # Steer the LLM to the allowed alternatives.
+        assert "github" in err.lower() and "snippet" in err.lower()
+
+    @pytest.mark.asyncio
     async def test_get_cpg_status_exists(self, mock_services):
         """Test getting CPG status when CPG exists"""
         from src.tools.core_tools import register_core_tools

@@ -165,6 +165,9 @@ class ServerConfig:
     log_dir: str = "logs"
     log_to_file: bool = True
     log_max_bytes: int = 50 * 1024 * 1024
+    # Chat/hosted deployment: disable source_type='local' (no arbitrary host-path
+    # access from a chat-facing MCP). See defaults.CHAT_DEPLOY.
+    chat_deploy: bool = False
     log_backup_count: int = 5
 
 

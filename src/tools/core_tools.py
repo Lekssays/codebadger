@@ -929,6 +929,17 @@ Examples:
         """
         try:
             validate_source_type(source_type)
+            # Chat/hosted deployment: never expose arbitrary host filesystem paths
+            # through a chat-facing MCP. Disable local sources entirely; callers
+            # must use a github.com/gitlab.com URL or paste the code as a snippet.
+            if source_type == "local":
+                _cfg = services.get("config")
+                if _cfg and getattr(_cfg.server, "chat_deploy", False):
+                    raise ValidationError(
+                        "source_type='local' is disabled in this deployment. Provide a "
+                        "github.com or gitlab.com repository URL with source_type='github', "
+                        "or paste the code with source_type='snippet'."
+                    )
             # For snippets the code may be wrapped in <code language="..."> tags;
             # extract the language + body from them so the snippet is
             # self-describing. The tag (when present) provides the declared

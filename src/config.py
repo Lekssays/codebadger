@@ -40,6 +40,8 @@ def load_config(config_path: Optional[str] = None) -> Config:
                 log_to_file=os.getenv("LOG_TO_FILE", str(defaults.SERVER_LOG_TO_FILE)).lower() != "false",
                 log_max_bytes=int(os.getenv("LOG_MAX_BYTES", str(defaults.SERVER_LOG_MAX_BYTES))),
                 log_backup_count=int(os.getenv("LOG_BACKUP_COUNT", str(defaults.SERVER_LOG_BACKUP_COUNT))),
+                chat_deploy=os.getenv("CHAT_DEPLOY", str(defaults.CHAT_DEPLOY)).lower()
+                in ("true", "1", "yes", "on"),
             ),
             joern=JoernConfig(
                 binary_path=os.getenv("JOERN_BINARY_PATH", defaults.JOERN_BINARY_PATH),

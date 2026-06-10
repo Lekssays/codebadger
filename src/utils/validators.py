@@ -693,6 +693,22 @@ _BLOCKED_PATH_PREFIXES = tuple(
 )
 
 
+def _allowed_source_roots() -> tuple:
+    """Canonical allowlisted local-source roots from ALLOWED_SOURCE_ROOTS.
+
+    Read at call time (not import) so deployments/tests can set the env var.
+    Empty/unset => no allowlist (denylist + canonicalization still apply).
+    """
+    raw = os.getenv("ALLOWED_SOURCE_ROOTS", "")
+    return tuple(
+        os.path.realpath(os.path.abspath(r)) for r in raw.split(":") if r.strip()
+    )
+
+
+def _is_within(canonical: str, root: str) -> bool:
+    return canonical == root or canonical.startswith(root.rstrip("/") + "/")
+
+
 def resolve_host_path(host_path: str) -> str:
     """
     Validate and resolve a host path.
@@ -709,14 +725,29 @@ def resolve_host_path(host_path: str) -> str:
     Raises:
         ValidationError: If path doesn't exist, isn't a directory, or is unsafe
     """
+    if not host_path or not isinstance(host_path, str):
+        raise ValidationError("Host path must be a non-empty string")
+
+    # Null bytes / control chars can truncate or smuggle past downstream checks.
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in host_path):
+        raise ValidationError("Host path must not contain control characters")
+
     if not os.path.isabs(host_path):
         raise ValidationError("Host path must be absolute")
 
-    # Resolve symlinks before checking prefixes so symlink tricks can't bypass the check.
+    # Resolve symlinks before checking prefixes so symlink tricks (and any ".."
+    # traversal) collapse to a real canonical path the checks below can trust.
     canonical = os.path.realpath(os.path.abspath(host_path))
 
-    if any(canonical == p or canonical.startswith(p + "/") for p in _BLOCKED_PATH_PREFIXES):
+    if any(_is_within(canonical, p) for p in _BLOCKED_PATH_PREFIXES):
         raise ValidationError("Invalid host path")
+
+    # Optional hard containment: when ALLOWED_SOURCE_ROOTS is configured, the
+    # resolved path MUST live under one of them. This is the strong traversal /
+    # arbitrary-access guard for trusted (non-chat) deployments.
+    roots = _allowed_source_roots()
+    if roots and not any(_is_within(canonical, r) for r in roots):
+        raise ValidationError("Host path is outside the allowed source roots")
 
     if not os.path.exists(canonical):
         raise ValidationError("Path does not exist")

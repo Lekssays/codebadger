@@ -778,3 +778,28 @@ class TestResolveHostPath:
             resolve_host_path(str(file_path))
 
         assert "Path is not a directory" in str(exc_info.value)
+
+    def test_control_char_rejected(self):
+        with pytest.raises(ValidationError) as e:
+            resolve_host_path("/tmp/evil\x00/etc/passwd")
+        assert "control characters" in str(e.value)
+
+    def test_empty_rejected(self):
+        with pytest.raises(ValidationError):
+            resolve_host_path("")
+
+    def test_allowlist_contains_allowed_path(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ALLOWED_SOURCE_ROOTS", str(tmp_path))
+        sub = tmp_path / "proj"
+        sub.mkdir()
+        assert resolve_host_path(str(sub)) == str(sub)
+
+    def test_allowlist_rejects_outside_path(self, tmp_path, monkeypatch):
+        allowed = tmp_path / "allowed"
+        allowed.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        monkeypatch.setenv("ALLOWED_SOURCE_ROOTS", str(allowed))
+        with pytest.raises(ValidationError) as e:
+            resolve_host_path(str(outside))
+        assert "outside the allowed source roots" in str(e.value)

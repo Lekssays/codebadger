@@ -62,6 +62,16 @@ SERVER_LOG_TO_FILE = True
 SERVER_LOG_MAX_BYTES = 50 * 1024 * 1024
 SERVER_LOG_BACKUP_COUNT = 5
 
+# Chat / hosted deployment posture. When true, source_type='local' is DISABLED in
+# generate_cpg: a chat-facing MCP must never expose arbitrary host filesystem
+# paths. Callers use a github.com/gitlab.com URL or a pasted snippet instead.
+CHAT_DEPLOY = False
+# Optional ':'-separated allowlist of host directory roots that source_type=
+# 'local' paths must canonically resolve within. Empty = no allowlist (the
+# denylist + symlink-resolving canonicalization in resolve_host_path still apply).
+# Set this in trusted batch deployments to hard-contain local source access.
+ALLOWED_SOURCE_ROOTS = ""
+
 JOERN_BINARY_PATH = "joern"
 JOERN_MEMORY_LIMIT = "4g"
 JOERN_JAVA_OPTS = "-Xmx4G -Xms2G -XX:+UseG1GC -XX:+UseStringDeduplication -Dfile.encoding=UTF-8"
