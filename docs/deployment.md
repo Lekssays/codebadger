@@ -20,7 +20,7 @@ flowchart TB
 
 - **Docker Engine** + the **Compose v2 plugin** (`docker compose version`). Install: <https://docs.docker.com/engine/install/>.
 - Permission to use the Docker socket (the deploy user is in the `docker` group, or runs as root). The MCP container drives the host daemon via `/var/run/docker.sock`.
-- **A host dedicated to CodeBadger.** Mounting the Docker socket gives the MCP container root-equivalent control of the host (see the trust-boundary note below).
+- **A host dedicated to codebadger.** Mounting the Docker socket gives the MCP container root-equivalent control of the host (see the trust-boundary note below).
 - Disk for the `playground/` volume (cloned sources + CPG `.bin` caches can reach tens of GB) and RAM for the Joern JVMs (see [Sizing](#sizing-for-your-host)).
 - `git` is only needed if you clone this repo to the host; everything else runs in containers.
 
@@ -61,7 +61,7 @@ The MCP container uses **host networking** and mounts the Docker socket, so the
 `56379`, and the MCP's own `:4242`) works unchanged.
 
 > **Trust boundary:** mounting `/var/run/docker.sock` gives the MCP container
-> root-equivalent control of the host. Run it on a host dedicated to CodeBadger.
+> root-equivalent control of the host. Run it on a host dedicated to codebadger.
 > Host networking is required by the published-port + sibling-container model.
 
 ### Verify it's healthy

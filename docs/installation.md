@@ -1,6 +1,6 @@
 # Installation
 
-There are two ways to run CodeBadger:
+There are two ways to run codebadger:
 
 - **A — Full stack with Docker (recommended).** One command brings up the MCP
   server + Joern + Postgres + Redis as containers. Best for production and the
@@ -16,7 +16,7 @@ There are two ways to run CodeBadger:
 
 - **Docker Engine** + the **Compose v2 plugin** — install: <https://docs.docker.com/engine/install/>
 - Permission to use the Docker socket (deploy user in the `docker` group, or root)
-- A host **dedicated to CodeBadger** — the MCP container mounts the Docker socket
+- A host **dedicated to codebadger** — the MCP container mounts the Docker socket
   (root-equivalent on the host; see [Deployment → Trust boundary](deployment.md#quick-start-full-stack))
 
 ```bash

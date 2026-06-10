@@ -1,9 +1,21 @@
 # 🦡 codebadger
 
-A containerized **Model Context Protocol (MCP)** server providing static code
-analysis via [Joern](https://joern.io/) Code Property Graphs (CPG), with support
-for Java, C/C++, JavaScript, Python, Go, Kotlin, C#, Ghidra, Jimple, PHP, Ruby,
-and Swift.
+**codebadger** is a containerized **Model Context Protocol (MCP)** server that
+gives AI agents and LLMs deep, queryable access to a codebase's structure and
+data flow through [Joern](https://joern.io/) Code Property Graphs (CPGs).
+
+Point it at a Git repository, a local path, or even a pasted code snippet, and
+codebadger builds a CPG and exposes it over MCP — so an assistant can run CPGQL
+queries, trace data flow and taint, slice programs, and hunt for vulnerabilities
+across Java, C/C++, JavaScript, Python, Go, Kotlin, C#, Ghidra, Jimple, PHP,
+Ruby, and Swift.
+
+It's a general-purpose foundation for both **program analysis** (understanding
+code structure, call graphs, and data flow) and **vulnerability analysis**
+(taint tracking, bug hunting, and PoC development) — useful for **academic
+research** as well as **industry** security and engineering work. It's built to
+scale to large analysis batches with per-CPG worker pools, memory-aware
+scheduling, and a Postgres/Redis backend.
 
 ## News
 
