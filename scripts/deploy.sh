@@ -16,13 +16,39 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# Read KEY from .env. `docker compose` auto-loads .env, but THIS script does not, so
+# a value set only in .env is otherwise invisible here — leading to a health probe
+# on the wrong port, or an exported default that overrides the .env value in compose
+# (shell env > .env). Read it the way compose resolves: exported shell var > .env.
+# Must always succeed: it's used in `${VAR:-$(env_file_value KEY)}` under `set -e`,
+# where a non-zero return (e.g. no .env file) would abort the whole script.
+env_file_value() { [[ -f .env ]] && sed -n "s/^$1=//p" .env | tail -1 || true; }
+
 # Absolute path so the daemon resolves pool sibling-container bind mounts correctly.
+# Honor a PLAYGROUND_HOST_PATH set only in .env instead of clobbering it with the
+# default (export would make our value win over .env inside compose).
+export PLAYGROUND_HOST_PATH="${PLAYGROUND_HOST_PATH:-$(env_file_value PLAYGROUND_HOST_PATH)}"
 export PLAYGROUND_HOST_PATH="${PLAYGROUND_HOST_PATH:-$ROOT/playground}"
 
 # Postgres data lives OUTSIDE the playground so Joern workers can't reach the DB
 # files (see docs/security.md). Defaults to ./pgdata next to the playground.
+export POSTGRES_DATA_PATH="${POSTGRES_DATA_PATH:-$(env_file_value POSTGRES_DATA_PATH)}"
 export POSTGRES_DATA_PATH="${POSTGRES_DATA_PATH:-$ROOT/pgdata}"
 
+# Host Docker socket to bind-mount into the MCP (it drives the host daemon). Derive
+# from DOCKER_HOST (.env/shell) so a rootless / non-default daemon socket is mounted
+# rather than the hardcoded /var/run/docker.sock. The container side stays fixed.
+DOCKER_HOST_VALUE="${DOCKER_HOST:-$(env_file_value DOCKER_HOST)}"
+case "$DOCKER_HOST_VALUE" in
+  unix://*) export DOCKER_SOCK="${DOCKER_SOCK:-${DOCKER_HOST_VALUE#unix://}}" ;;
+esac
+export DOCKER_SOCK="${DOCKER_SOCK:-/var/run/docker.sock}"
+
+# Resolve MCP_PORT the way `docker compose` will, so the health-check URL matches
+# the port the server actually binds. Without this a port set only in .env would
+# bind correctly in the container yet leave the probe polling :4242 and falsely
+# report "not healthy". Precedence: exported shell var > .env > built-in default.
+MCP_PORT="${MCP_PORT:-$(env_file_value MCP_PORT)}"
 MCP_PORT="${MCP_PORT:-4242}"
 HEALTH_URL="http://localhost:${MCP_PORT}/health"
 CMD="${1:-up}"
@@ -76,7 +102,11 @@ case "$CMD" in
     "${COMPOSE[@]}" down
     ;;
   restart)
-    "${COMPOSE[@]}" restart codebadger-mcp
+    # `up -d` (not `restart`): plain `docker compose restart` reuses the existing
+    # container and does NOT re-read .env, so a changed MCP_PORT / JOERN_MEM_LIMIT /
+    # etc. would be silently ignored. `up -d` recreates the service when its config
+    # changed and is a no-op otherwise.
+    "${COMPOSE[@]}" up -d codebadger-mcp
     wait_for_health
     ;;
   logs)

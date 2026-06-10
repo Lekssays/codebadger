@@ -114,10 +114,10 @@ class TestConfigModels:
 
     def test_joern_config(self):
         """Test JoernConfig creation"""
-        config = JoernConfig(binary_path="/usr/local/bin/joern", memory_limit="8g")
+        config = JoernConfig(binary_path="/usr/local/bin/joern", java_opts="-Xmx8G")
 
         assert config.binary_path == "/usr/local/bin/joern"
-        assert config.memory_limit == "8g"
+        assert config.java_opts == "-Xmx8G"
 
     def test_config_composition(self):
         """Test Config composition"""

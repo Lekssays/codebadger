@@ -45,7 +45,6 @@ def load_config(config_path: Optional[str] = None) -> Config:
             ),
             joern=JoernConfig(
                 binary_path=os.getenv("JOERN_BINARY_PATH", defaults.JOERN_BINARY_PATH),
-                memory_limit=os.getenv("JOERN_MEMORY_LIMIT", defaults.JOERN_MEMORY_LIMIT),
                 java_opts=os.getenv("JOERN_JAVA_OPTS", defaults.JOERN_JAVA_OPTS),
                 server_host=os.getenv("JOERN_SERVER_HOST", defaults.JOERN_SERVER_HOST),
                 server_port=int(os.getenv("JOERN_SERVER_PORT", str(defaults.JOERN_SERVER_PORT))),

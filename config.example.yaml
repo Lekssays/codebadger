@@ -5,7 +5,9 @@ server:
 
 joern:
   binary_path: ${JOERN_BINARY_PATH:joern}
-  memory_limit: ${JOERN_MEMORY_LIMIT:4g}
+  # Per query-server JVM opts; -Xmx is the real per-server heap. The container cap
+  # is JOERN_MEM_LIMIT (docker-compose mem_limit), a separate knob — don't confuse
+  # the two. The memory-aware pool sizes -Xmx per CPG tier at runtime.
   java_opts: '-Xmx4G -Xms2G -XX:+UseG1GC -XX:+UseStringDeduplication -Dfile.encoding=UTF-8'
 
   # Memory-aware server pool; run scripts/recommend_config.py to size for your host.
@@ -19,6 +21,11 @@ joern:
   worker_image: ${JOERN_WORKER_IMAGE:codebadger-joern-server:latest}
   worker_port_min: ${JOERN_WORKER_PORT_MIN:14000}
   worker_port_max: ${JOERN_WORKER_PORT_MAX:14999}
+  # Absolute HOST path of the shared playground, bind-mounted as /playground into
+  # pool workers (which the MCP starts via the host Docker daemon). Empty = derive
+  # from the app location — only correct when the MCP runs on the host, NOT in a
+  # container. compose passes PLAYGROUND_HOST_PATH through, so set it there.
+  playground_host_path: ${JOERN_PLAYGROUND_HOST_PATH:}
 
   http_pool_connections: ${HTTP_POOL_CONNECTIONS:10}
   http_pool_maxsize: ${HTTP_POOL_MAXSIZE:10}

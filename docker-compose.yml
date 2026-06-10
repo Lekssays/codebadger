@@ -32,7 +32,9 @@ services:
       # the right source — scripts/deploy.sh sets it. The MCP derives its playground
       # dir from the app location, so it mounts at /app/playground.
       - ${PLAYGROUND_HOST_PATH:-./playground}:/app/playground
-      - /var/run/docker.sock:/var/run/docker.sock
+      # Host daemon socket. Override DOCKER_SOCK (scripts/deploy.sh derives it from
+      # DOCKER_HOST) for a rootless / non-default socket; container side stays fixed.
+      - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
       - ./logs:/app/logs
     environment:
       # 0.0.0.0 = reachable on all interfaces. Set MCP_HOST=127.0.0.1 to bind

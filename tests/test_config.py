@@ -41,7 +41,6 @@ class TestLoadConfig:
             "MCP_PORT": "4242",
             "MCP_LOG_LEVEL": "INFO",
             "JOERN_BINARY_PATH": "/usr/bin/joern",
-            "JOERN_MEMORY_LIMIT": "4g",
             "CPG_GENERATION_TIMEOUT": "1200",
             "MAX_REPO_SIZE_MB": "1000",
             "QUERY_TIMEOUT": "60",
@@ -58,7 +57,6 @@ class TestLoadConfig:
             assert config.server.port == 4242
             assert config.server.log_level == "INFO"
             assert config.joern.binary_path == "/usr/bin/joern"
-            assert config.joern.memory_limit == "4g"
             assert config.cpg.generation_timeout == 1200
             assert config.cpg.max_repo_size_mb == 1000
             assert config.query.timeout == 60
@@ -77,7 +75,6 @@ class TestLoadConfig:
             assert config.server.port == 4242
             assert config.server.log_level == "INFO"
             assert config.joern.binary_path == "joern"
-            assert config.joern.memory_limit == "4g"
             assert config.cpg.generation_timeout == 1800
             assert config.cpg.max_repo_size_mb == 1024
             assert config.query.timeout == 300
@@ -148,7 +145,7 @@ class TestDictToConfig:
         """Test converting full config dictionary"""
         data = {
             "server": {"host": "127.0.0.1", "port": 8080, "log_level": "DEBUG"},
-            "joern": {"binary_path": "/usr/bin/joern", "memory_limit": "8g"},
+            "joern": {"binary_path": "/usr/bin/joern", "java_opts": "-Xmx8G"},
             "cpg": {"generation_timeout": 1200, "max_repo_size_mb": 1000},
             "query": {"timeout": 60, "cache_enabled": False, "cache_ttl": 600},
             "storage": {"workspace_root": "/tmp/custom", "cleanup_on_shutdown": False},
@@ -160,7 +157,7 @@ class TestDictToConfig:
         assert config.server.port == 8080
         assert config.server.log_level == "DEBUG"
         assert config.joern.binary_path == "/usr/bin/joern"
-        assert config.joern.memory_limit == "8g"
+        assert config.joern.java_opts == "-Xmx8G"
         assert config.cpg.generation_timeout == 1200
         assert config.cpg.max_repo_size_mb == 1000
         assert config.query.timeout == 60

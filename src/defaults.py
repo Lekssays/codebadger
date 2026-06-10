@@ -73,7 +73,6 @@ CHAT_DEPLOY = False
 ALLOWED_SOURCE_ROOTS = ""
 
 JOERN_BINARY_PATH = "joern"
-JOERN_MEMORY_LIMIT = "4g"
 JOERN_JAVA_OPTS = "-Xmx4G -Xms2G -XX:+UseG1GC -XX:+UseStringDeduplication -Dfile.encoding=UTF-8"
 JOERN_SERVER_HOST = "localhost"
 JOERN_SERVER_PORT = 8080

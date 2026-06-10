@@ -138,9 +138,10 @@ endpoint) and rolls them into one status:
   `dependencies` map: `joern`, `postgres`, `redis`, `docker`, `cpg_queue` (each
   `up`/`partial`/`down`). Per-dependency detail (ping latency, port pool, memory
   ledger, queue depth) lives under `checks`.
-- **Aggregation**: `down` if any of postgres/redis/docker/joern is down (Joern is
-  the analysis engine, so its loss is a full outage); `partial` for softer
-  degradation (e.g. queue full, memory budget near-exhausted); else `up`.
+- **Aggregation**: `up` ONLY when every dependency is up. `down` if ANY dependency
+  (postgres/redis/docker/joern/cpg_queue) is down — each is required, so losing any
+  one is a full outage. `partial` only for softer degradation where a dependency is
+  still up but strained (e.g. queue full, memory budget near-exhausted).
 - **HTTP codes**: 200 for `up`/`partial`, 503 for `down` — so a load balancer or
   orchestrator takes a `down` instance out of rotation.
 

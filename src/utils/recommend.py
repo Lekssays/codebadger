@@ -337,7 +337,9 @@ def render(rec: Recommendation, current: Optional[Dict[str, object]] = None) -> 
     lines.append(f"  export JOERN_MEMORY_BUDGET_MB={rec.query_budget_gb * 1024}")
     if rec.worker_mode == "pool":
         lines.append(f"  export JOERN_WORKER_MODE=pool")
-        lines.append(f"  export JOERN_MEM_LIMIT={rec.build_container_cap_gb}g   # build container only")
+        lines.append(f"  export JOERN_MEM_LIMIT={rec.docker_mem_limit_gb}g   # joern-server BUILD container only (query workers are capped separately by JOERN_MEMORY_BUDGET_MB)")
+    else:
+        lines.append(f"  export JOERN_MEM_LIMIT={rec.docker_mem_limit_gb}g   # joern-server container cap (runs builds + query servers)")
     lines.append("")
     lines.append("config.yaml snippet:")
     lines.append("  joern:")

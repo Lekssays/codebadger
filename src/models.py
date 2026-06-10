@@ -114,7 +114,6 @@ class JoernConfig:
     """Joern configuration"""
 
     binary_path: str = "joern"
-    memory_limit: str = "4g"
     java_opts: str = "-Xmx4G -Xms2G -XX:+UseG1GC -Dfile.encoding=UTF-8"
     server_host: str = "localhost"
     server_port: int = 8080

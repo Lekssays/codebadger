@@ -805,21 +805,19 @@ def _get_codebase_list(include_sensitive: bool = False) -> list:
 
 
 # Overall status / dependency vocabulary: up | partial | down.
-_CRITICAL_DEPS = ("postgres", "redis", "docker", "joern")
-
-
 def _aggregate_status(dependencies: dict) -> str:
     """Roll per-dependency statuses into one overall up/partial/down value.
 
-    `down` if any CRITICAL dependency is down — Joern is the analysis engine, so
-    losing it (or Postgres/Redis/Docker) is a full outage. Otherwise `partial`
-    if anything is degraded, else `up`.
+    `up` ONLY when every dependency is up. ANY dependency that is down makes the
+    whole server `down` — every dependency here (Postgres, Redis, Docker, Joern,
+    the CPG queue) is required for the server to do its job, so losing any one is
+    a full outage, not a degradation. A dependency that is merely degraded
+    (`partial`, e.g. Joern memory pressure or a full queue) reports as `partial`.
     """
-    if any(dependencies.get(dep) == "down" for dep in _CRITICAL_DEPS):
+    statuses = list(dependencies.values())
+    if any(status == "down" for status in statuses):
         return "down"
-    # A non-critical dependency that is down (or any degraded one) is partial,
-    # not a full outage — the core service still functions.
-    if any(status in ("partial", "down") for status in dependencies.values()):
+    if any(status == "partial" for status in statuses):
         return "partial"
     return "up"
 

@@ -174,6 +174,122 @@ python main.py                                   # defaults to the Compose servi
 It defaults to the Compose Postgres/Redis and creates the Postgres schema on first
 start. Override `DATABASE_URL` / `REDIS_URL` to point at managed instances.
 
+## Configuration reference
+
+Every value below is an environment variable. Precedence is **env var > `config.yaml`
+> built-in default** (`src/defaults.py`); `docker compose` and `scripts/deploy.sh`
+auto-load `.env` for `${VAR}` interpolation. Defaults shown are the built-in
+defaults — note a few differ in the shipped `docker-compose.yml` (called out below).
+
+> A host-run `python main.py` reads `config.yaml`, **not** `.env` — export the vars
+> in that shell (or use the containerized MCP, which gets them from compose).
+
+### Server & networking
+
+| Variable | Default | Description |
+|---|---|---|
+| `MCP_HOST` | `127.0.0.1` (compose: `0.0.0.0`) | Interface the MCP binds. `127.0.0.1` = loopback only (behind a proxy). |
+| `MCP_PORT` | `4242` | Port the MCP HTTP server listens on (also the host port — host networking). |
+| `MCP_LOG_LEVEL` | `INFO` | Log level. |
+| `MAX_MCP_CONNECTIONS` | `16` | Max in-flight HTTP requests; the MCP returns `503` past this. |
+| `LOG_DIR` | `logs` | Per-run log directory. |
+| `LOG_TO_FILE` | `true` | Also write a rotated per-run file in addition to stdout. |
+| `LOG_MAX_BYTES` | `52428800` (50 MB) | Per-file rotation cap. |
+| `LOG_BACKUP_COUNT` | `5` | Rotated backups kept per run file. |
+
+### Deployment posture & source security
+
+| Variable | Default | Description |
+|---|---|---|
+| `CHAT_DEPLOY` | `false` | `true` DISABLES `source_type='local'` so a chat-facing MCP can't read arbitrary host paths (see [Hardening](#hardening-a-chat-facing-deployment-chat_deploy)). |
+| `ALLOWED_SOURCE_ROOTS` | `` (empty) | `:`-separated allowlist of dirs local sources must canonically resolve within (as the MCP sees them, e.g. `/app/playground`). Empty = no allowlist. |
+| `GITHUB_TOKEN` | `` (empty) | PAT for cloning private repos (never embed it in the URL). |
+
+### Memory & the Joern pool
+
+Three distinct memory knobs, easy to confuse — keep them straight:
+
+- **`JOERN_MEM_LIMIT`** — the **container** cap (`docker-compose mem_limit`) for
+  `codebadger-joern-server`, also read by the MCP's over-commit guard.
+- **`JOERN_MEMORY_BUDGET_MB`** — the **query-worker pool** budget (a reservation
+  ledger across all query servers); the pool admits/evicts to stay under it.
+- **`JOERN_JAVA_OPTS` (`-Xmx`)** — a **single query server's** JVM heap.
+
+`JOERN_MEM_LIMIT` and `JOERN_MEMORY_BUDGET_MB` are the two you must size together —
+run `python scripts/recommend_config.py` for your host.
+
+| Variable | Default | Description |
+|---|---|---|
+| `JOERN_MEM_LIMIT` | compose: `100g` | **Caps the `codebadger-joern-server` container** (`mem_limit`) **and** is read by the MCP's over-commit guard. In `pool` mode this is the **build** container only; in `shared` mode it's the whole Joern budget (builds + query servers). MUST match the container cap. The single most important memory knob for compose. |
+| `JOERN_MEMORY_BUDGET_MB` | `0` (auto) | Query-worker pool memory ledger (MB); the pool admits/evicts servers to stay under it. `0` = auto-derive from host RAM at startup. Pool-mode invariant: `JOERN_MEM_LIMIT + JOERN_MEMORY_BUDGET_MB` ≤ Joern budget. |
+| `JOERN_RSS_EVICTION_THRESHOLD_MB` | `0` (auto) | LRU-evict when container RSS exceeds this (backstop on the reservation ledger). `0` = auto. |
+| `JOERN_JAVA_OPTS` | `-Xmx4G -Xms2G …` | Per query-server JVM opts; **`-Xmx` is the real per-server heap** (the pool also sizes `-Xmx` per CPG tier at runtime). Not to be confused with `JOERN_MEM_LIMIT`, which is the *container* cap. |
+| `MAX_ACTIVE_JOERN_SERVERS` | `16` | Safety ceiling on concurrent query servers (the memory budget is the real limiter). |
+| `JOERN_IDLE_TTL_SECONDS` | `600` | Idle query worker offloaded after this many seconds (CPG → SLEEPING; reactivates on next query). `0` = off. |
+| `JOERN_REAPER_INTERVAL_SECONDS` | `60` | How often the idle reaper scans. |
+| `JOERN_WORKER_MODE` | `shared` (compose: `pool`) | `shared` = query servers as processes in the build container; `pool` = each CPG in its own cgroup-capped container. |
+| `JOERN_WORKER_IMAGE` | `codebadger-joern-server:latest` | Image for per-CPG pool workers. |
+| `JOERN_WORKER_INTERNAL_PORT` | `8080` | Port Joern binds inside each pool worker container. |
+| `JOERN_WORKER_PORT_MIN` / `JOERN_WORKER_PORT_MAX` | `14000` / `14999` | Host port range for pool workers (must be disjoint from `JOERN_PORT_*`). |
+| `JOERN_PORT_MIN` / `JOERN_PORT_MAX` | `13371` / `13870` | Host port range the shared joern-server container publishes. |
+| `JOERN_SERVER_STARTUP_TIMEOUT` | `300` | Seconds to wait for a Joern server to come up. |
+| `JOERN_PLAYGROUND_HOST_PATH` | `` (auto-derive) | Absolute HOST playground path bind-mounted into pool workers. Compose passes `PLAYGROUND_HOST_PATH` through to this. Empty = derive from app location (only correct when the MCP runs on the host, not in a container). |
+| `JOERN_BINARY_PATH` | `joern` | Joern CLI binary path. |
+
+### CPG generation & queue
+
+| Variable | Default | Description |
+|---|---|---|
+| `CPG_BUILD_WORKERS` | `4` (compose: `4`) | Concurrent CPG builds. INVARIANT: `CPG_BUILD_WORKERS × CPG_BUILD_HEAP_GB` ≤ `JOERN_MEM_LIMIT`. |
+| `CPG_BUILD_HEAP_GB` | `6` | Per-build frontend heap (GB). Without it the JVM defaults to ~25% of the container cap and N builds can OOM the host. |
+| `CPG_GENERATION_TIMEOUT` | `1800` | CPG build timeout (s); large C/C++ trees exceed 10 min. |
+| `CPG_QUEUE_BACKEND` | `durable` | `durable` = Postgres jobs table (survives restart, dedup + backpressure); `memory` = in-process (lost on restart). |
+| `CPG_QUEUE_MAXSIZE` | `64` | Pending-job waiting room (deduped Postgres rows, no RAM cost). Too small → `queue_full` rejections under high concurrency. |
+| `MAX_REPO_SIZE_MB` | `1024` | Pre-build source-size ceiling. |
+| `CPG_LARGE_PROJECT_GUARD` | `true` | `generate_cpg` returns `large_project_warning` for a local source over the thresholds unless `force=True`. Set `false` for unattended/batch drivers. |
+| `CPG_LARGE_PROJECT_MAX_MB` | `2000` | Guard size threshold (MB). |
+| `CPG_LARGE_PROJECT_MAX_LOC` | `2000000` | Guard lines-of-code threshold. |
+| `OUTPUT_TRUNCATION_LENGTH` | `2000` | Default output truncation length. |
+
+### Query
+
+| Variable | Default | Description |
+|---|---|---|
+| `QUERY_TIMEOUT` | `300` | Per-query timeout (s); also the hard cap on caller-supplied timeouts. |
+| `QUERY_CACHE_ENABLED` | `true` | Cache tool outputs. |
+| `QUERY_CACHE_TTL` | `300` | Cache TTL (s). |
+
+### Backing services & Docker
+
+| Variable | Default | Description |
+|---|---|---|
+| `DATABASE_URL` | built from `POSTGRES_*` | Full Postgres URL override. |
+| `POSTGRES_HOST` / `POSTGRES_PORT` | `localhost` / `55432` | Compose publishes Postgres on `POSTGRES_PORT` (non-default to avoid clashing with a system Postgres). |
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `codebadger` (each) | Postgres credentials/db. |
+| `POSTGRES_DATA_PATH` | `./pgdata` | Host path for Postgres data — kept OUTSIDE the playground on purpose (see [Security](security.md)). |
+| `REDIS_URL` | built from `REDIS_*` | Full Redis URL override. |
+| `REDIS_HOST` / `REDIS_PORT` / `REDIS_DB` | `localhost` / `56379` / `0` | Redis connection. |
+| `PLAYGROUND_HOST_PATH` | `./playground` | ABSOLUTE host playground path (sources + CPG caches); compose mounts it and passes it to `JOERN_PLAYGROUND_HOST_PATH`. `scripts/deploy.sh` sets it automatically. |
+| `DOCKER_HOST` | `unix:///var/run/docker.sock` | Daemon the MCP drives. `scripts/deploy.sh` derives `DOCKER_SOCK` from it to bind-mount the (possibly rootless) socket. |
+
+### Storage & telemetry
+
+| Variable | Default | Description |
+|---|---|---|
+| `WORKSPACE_ROOT` | `/tmp/codebadger` | Server workspace root. |
+| `CLEANUP_ON_SHUTDOWN` | `true` | Clean the workspace on shutdown. |
+| `OTEL_ENABLED` | `false` | Enable OpenTelemetry export. |
+| `OTEL_SERVICE_NAME` | `codebadger` | OTEL service name. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` | OTLP collector endpoint. |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` | OTLP protocol (`grpc` or `http`). |
+
+### Startup tuning
+
+| Variable | Default | Description |
+|---|---|---|
+| `RECOMMEND_ON_STARTUP` | `true` | Log the memory-aware recommendation block at startup. |
+| `AUTO_TUNE_MEMORY` | `true` | Auto-derive `JOERN_MEMORY_BUDGET_MB` / RSS threshold from host RAM when they're `0`. |
+
 ## Sizing for your host
 
 RAM, not CPU, is the binding constraint - each Joern server is a JVM with its own

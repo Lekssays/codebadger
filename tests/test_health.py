@@ -21,8 +21,9 @@ class TestAggregateStatus:
     def test_all_up(self):
         assert main._aggregate_status(_deps()) == "up"
 
-    @pytest.mark.parametrize("dep", ["postgres", "redis", "docker", "joern"])
-    def test_critical_down_is_down(self, dep):
+    @pytest.mark.parametrize("dep", ["postgres", "redis", "docker", "joern", "cpg_queue"])
+    def test_any_dependency_down_is_down(self, dep):
+        # Every dependency is required: any one down is a full outage, not partial.
         assert main._aggregate_status(_deps(**{dep: "down"})) == "down"
 
     def test_joern_partial_is_partial(self):
@@ -31,11 +32,7 @@ class TestAggregateStatus:
     def test_queue_full_is_partial(self):
         assert main._aggregate_status(_deps(cpg_queue="partial")) == "partial"
 
-    def test_noncritical_down_is_partial_not_down(self):
-        # cpg_queue is not critical: its loss degrades, but isn't a full outage.
-        assert main._aggregate_status(_deps(cpg_queue="down")) == "partial"
-
-    def test_critical_down_outranks_partial(self):
+    def test_down_outranks_partial(self):
         assert main._aggregate_status(_deps(postgres="down", joern="partial")) == "down"
 
 

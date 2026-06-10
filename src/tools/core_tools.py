@@ -16,7 +16,7 @@ import tarfile
 from typing import Any, Dict, Optional, Annotated, Set
 from pydantic import Field
 
-from ..defaults import LANGUAGE_COMMANDS
+from ..defaults import LANGUAGE_COMMANDS, SUPPORTED_LANGUAGES
 from ..exceptions import ValidationError
 from ..models import CodebaseInfo, SessionStatus
 from ..utils.validators import (
@@ -876,10 +876,12 @@ This guard does NOT apply to GitHub URLs — size is unknown until cloned.
 
 Args:
     source_type: One of 'local', 'github' (a github.com/gitlab.com repo), or 'snippet'.
-    source_path: Absolute path (local), an https github.com/gitlab.com URL (github),
-                 or a short label (snippet).
+    source_path: REQUIRED for local (absolute path) and github (an https
+                 github.com/gitlab.com URL). OPTIONAL for snippet — a short label;
+                 when omitted the server derives one from the filename/language.
     language: Programming language (java, c, cpp, python, javascript, go, etc.).
-              Ignored for snippets that carry a <code language="..."> tag.
+              REQUIRED for local/github. Optional for snippets that carry a
+              <code language="..."> tag (the tag wins) or whose language is inferable.
     code: For snippets, the code wrapped in <code language="..."> ... </code> tag(s).
     github_token: Optional PAT for private repos (never embed it in the URL).
     branch: Optional specific git branch.
@@ -914,8 +916,8 @@ Examples:
     )
     async def generate_cpg(
         source_type: Annotated[str, Field(description="One of 'local', 'github', or 'snippet' (code pasted directly into the chat)")],
-        source_path: Annotated[str, Field(description="For local: absolute path to source directory. For github: an https URL on github.com or gitlab.com ONLY (e.g. https://github.com/user/repo or https://gitlab.com/user/repo) — other hosts/schemes/credentials/ports are rejected. For snippet: a short human label for the pasted code (e.g. a function name); may be left empty")],
-        language: Annotated[str, Field(description="Programming language - one of: java, c, cpp, javascript, python, go, kotlin, csharp, ghidra, jimple, php, ruby, swift. For a snippet whose code carries a <code language=\"...\"> tag, the tag's language wins and this is ignored.")],
+        source_path: Annotated[Optional[str], Field(description="REQUIRED for local (absolute path to source directory) and github (an https URL on github.com or gitlab.com ONLY, e.g. https://github.com/user/repo — other hosts/schemes/credentials/ports are rejected). OPTIONAL for snippet: a short human label for the pasted code (e.g. a function name); when omitted the server derives one from the filename/language.")] = None,
+        language: Annotated[str, Field(description="Programming language - one of: java, c, cpp, javascript, python, go, kotlin, csharp, ghidra, jimple, php, ruby, swift. REQUIRED for local/github. For a snippet whose code carries a <code language=\"...\"> tag, the tag's language wins and this is optional.")] = "",
         code: Annotated[Optional[str], Field(description="Required when source_type='snippet'. Wrap the code in a <code language=\"LANG\"> ... </code> tag where LANG is a supported language id, e.g. <code language=\"c\">int main(){...}</code>. Multiple blocks are concatenated but must share one language. Ignored for local/github.")] = None,
         filename: Annotated[Optional[str], Field(description="Optional filename for a snippet (e.g. 'parser.c'); defaults to snippet.<ext> from the language. Ignored for local/github.")] = None,
         github_token: Annotated[Optional[str], Field(description="GitHub Personal Access Token for private repositories (optional)")] = None,
@@ -929,6 +931,18 @@ Examples:
         """
         try:
             validate_source_type(source_type)
+            # source_path is only optional for snippets (the server derives a label
+            # on the fly). local/github have nowhere to read the source from without it.
+            if source_type in ("local", "github"):
+                if not (source_path and source_path.strip()):
+                    raise ValidationError(
+                        f"source_path is required for source_type='{source_type}' "
+                        f"({'absolute path to the source directory' if source_type == 'local' else 'an https github.com/gitlab.com repository URL'})."
+                    )
+                if not (language and language.strip()):
+                    raise ValidationError(
+                        f"language is required for source_type='{source_type}'."
+                    )
             # Chat/hosted deployment: never expose arbitrary host filesystem paths
             # through a chat-facing MCP. Disable local sources entirely; callers
             # must use a github.com/gitlab.com URL or paste the code as a snippet.
@@ -948,6 +962,17 @@ Examples:
             # refuses (with an actionable message) on mismatch or ambiguity.
             if source_type == "snippet":
                 parsed = parse_snippet_blocks(code)
+                # A snippet must carry its language somewhere: either a
+                # <code language="..."> tag or the explicit `language` arg. With
+                # neither, don't silently guess from content — ask for one clearly.
+                if not parsed and not (language and language.strip()):
+                    raise ValidationError(
+                        "For source_type='snippet', the language must be specified: "
+                        "either wrap the code in a <code language=\"...\"> ... </code> "
+                        "tag (e.g. <code language=\"c\">int main(){...}</code>) or pass "
+                        "the `language` argument. Supported languages: "
+                        f"{', '.join(SUPPORTED_LANGUAGES)}."
+                    )
                 declared = parsed[0] if parsed else language
                 if parsed:
                     code = parsed[1]
