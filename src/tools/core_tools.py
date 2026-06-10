@@ -448,9 +448,11 @@ async def _generate_cpg_async(
         joern_server_manager = services.get("joern_server_manager")
         config = services.get("config")
 
-        # Validate repository size before CPG generation
+        # Validate repository size before CPG generation. The walk is blocking I/O
+        # over the whole tree — keep it OFF the event loop (a pathologically large
+        # tree here once spun the loop and hung the entire MCP).
         if config:
-            repo_size_mb = _calculate_repo_size_mb(codebase_dir)
+            repo_size_mb = await asyncio.to_thread(_calculate_repo_size_mb, codebase_dir)
             max_size_mb = config.cpg.max_repo_size_mb
             logger.info(f"Repository size: {repo_size_mb}MB, max allowed: {max_size_mb}MB")
 
@@ -1191,6 +1193,19 @@ Examples:
                 # (see _copy_local_source_tree) so concurrent requests don't serialize
                 # and race the caller's source-dir cleanup.
                 host_path = await asyncio.to_thread(resolve_host_path, source_path)
+
+                # Refuse a source that contains (or is) the CodeBadger playground.
+                # Copying it would recursively pull in every cached codebase/CPG, and
+                # the pre-build size walk over that explosion blocks the event loop —
+                # a single such request takes the whole MCP down (observed outage).
+                real_src = os.path.realpath(host_path)
+                real_pg = os.path.realpath(playground_path)
+                if real_pg == real_src or real_pg.startswith(real_src + os.sep):
+                    raise ValidationError(
+                        "Source path contains the CodeBadger playground directory; "
+                        "refusing to analyze it (would recursively include all cached "
+                        "codebases and CPGs)."
+                    )
 
                 if not os.path.exists(codebase_dir):
                     logger.info(f"Copying source from {host_path} to {codebase_dir}")

@@ -297,6 +297,46 @@ class TestMCPTools:
                 assert str(source_dir) not in result_dict["error"]
 
     @pytest.mark.asyncio
+    async def test_generate_cpg_rejects_playground_self_inclusion(self, mock_services):
+        """A local source that contains the playground must be refused, not copied.
+
+        Regression for the outage where a cell passed CodeBadger's own dir (which
+        contains playground/) as source: the recursive copy + on-loop size walk hung
+        the entire MCP. The guard must reject it before any copy.
+        """
+        import src.tools.core_tools as core_tools
+        from src.tools.core_tools import register_core_tools
+        import json
+
+        mock_services["codebase_tracker"].get_codebase.return_value = None
+        # The real playground dir the guard derives from __file__, and its parent
+        # (an ancestor) — analyzing the parent would recursively include playground.
+        playground = os.path.abspath(
+            os.path.join(os.path.dirname(core_tools.__file__), "..", "..", "playground")
+        )
+        ancestor = os.path.dirname(playground)
+
+        with patch("src.tools.core_tools.resolve_host_path", return_value=ancestor), \
+             patch("src.tools.core_tools._get_git_commit_hash", return_value=None), \
+             patch("src.tools.core_tools._scan_repo", return_value=(0, 0)), \
+             patch("src.tools.core_tools._copy_local_source_tree") as copy_mock:
+
+            mcp = FastMCP("TestServer")
+            register_core_tools(mcp, mock_services)
+
+            async with Client(mcp) as client:
+                result = await client.call_tool(
+                    "generate_cpg",
+                    {"source_type": "local", "source_path": ancestor, "language": "c"},
+                )
+                result_dict = json.loads(result.content[0].text)
+
+            assert result_dict["success"] is False
+            assert "playground" in result_dict["error"].lower()
+            # The bomb must never be staged.
+            copy_mock.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_generate_cpg_snippet_stages_pasted_code(self, mock_services, tmp_path):
         """A pasted snippet should be written into codebases/<hash> and queued."""
         from unittest.mock import AsyncMock
