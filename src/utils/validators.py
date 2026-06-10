@@ -21,26 +21,32 @@ def validate_source_type(source_type: str) -> None:
         )
 
 
+# Single source of truth for the languages Joern can build a CPG for. Reused by
+# validate_language and the snippet helpers so error messages can list the exact
+# accepted ids and the LLM can self-correct in one shot.
+SUPPORTED_LANGUAGES = [
+    "java",
+    "c",
+    "cpp",
+    "javascript",
+    "python",
+    "go",
+    "kotlin",
+    "csharp",
+    "ghidra",
+    "jimple",
+    "php",
+    "ruby",
+    "swift",
+]
+
+
 def validate_language(language: str) -> None:
     """Validate programming language"""
-    supported = [
-        "java",
-        "c",
-        "cpp",
-        "javascript",
-        "python",
-        "go",
-        "kotlin",
-        "csharp",
-        "ghidra",
-        "jimple",
-        "php",
-        "ruby",
-        "swift",
-    ]
-    if language not in supported:
+    if language not in SUPPORTED_LANGUAGES:
         raise ValidationError(
-            f"Unsupported language '{language}'. Supported: {', '.join(supported)}"
+            f"Unsupported language '{language}'. Use one of the supported ids: "
+            f"{', '.join(SUPPORTED_LANGUAGES)}."
         )
 
 
@@ -56,23 +62,284 @@ def validate_codebase_hash(codebase_hash: str) -> None:
 
 
 
-def validate_github_url(url: str) -> bool:
-    """Validate GitHub URL format"""
+# Only these hosts may be cloned. Anything else — alternate git hosts, raw IPs,
+# localhost, cloud metadata endpoints (169.254.169.254), etc. — is rejected so a
+# repo URL can't be turned into an SSRF probe or an undefined-behavior clone.
+ALLOWED_REPO_HOSTS = frozenset(
+    {"github.com", "www.github.com", "gitlab.com", "www.gitlab.com"}
+)
+
+# Literal `https://<host>/` prefixes derived from the allowlist. Used as a cheap
+# first gate alongside the structural hostname check below: the URL must *begin*
+# with one of these exact strings, which also rejects userinfo smuggling
+# (`https://github.com@evil.com/…` starts with `https://github.com@`, not `…/`)
+# and ports (`https://github.com:22/…`) before any parsing.
+ALLOWED_REPO_URL_PREFIXES = tuple(
+    sorted(f"https://{host}/" for host in ALLOWED_REPO_HOSTS)
+)
+
+
+def validate_repo_url(url: str) -> bool:
+    """Strictly validate a remote git repository URL (github.com / gitlab.com).
+
+    Hardened against SSRF and undefined clone behavior. The URL MUST:
+      * be a string with no whitespace or control characters,
+      * use the ``https`` scheme (rejects ``git://``, ``ssh://``, ``http://``,
+        ``file://``, ``data:``, scp-style ``git@host:path``, …),
+      * carry no embedded credentials (``https://user:tok@…`` is rejected so the
+        host can't be smuggled past the allowlist via the userinfo field),
+      * resolve to an exact allowlisted host (``parsed.hostname`` is lowercased
+        and excludes userinfo/port, so ``github.com@evil.com`` → host ``evil.com``
+        → rejected),
+      * use no non-default port,
+      * have an ``/owner/repo`` path (gitlab subgroups, i.e. extra segments, are
+        allowed).
+    """
+    if not url or not isinstance(url, str):
+        raise ValidationError("Repository URL must be a non-empty string")
+
+    # Whitespace / control chars could smuggle a second git arg or a CRLF.
+    if any(ord(c) < 0x20 or ord(c) == 0x7F or c.isspace() for c in url):
+        raise ValidationError(
+            "Repository URL must not contain whitespace or control characters"
+        )
+
+    # Literal prefix gate: the string must START with an exact allowed
+    # `https://<host>/` prefix. Belt-and-suspenders with the parsed hostname
+    # check below — the literal match is case-sensitive and rejects anything
+    # that isn't canonically lowercase https://github.com/ or https://gitlab.com/.
+    if not url.startswith(ALLOWED_REPO_URL_PREFIXES):
+        raise ValidationError(
+            "Repository URL must start with one of: "
+            + ", ".join(ALLOWED_REPO_URL_PREFIXES)
+        )
+
     try:
         parsed = urlparse(url)
-        if parsed.netloc not in ["github.com", "www.github.com"]:
-            raise ValidationError("Only GitHub URLs are supported")
-
-        # Check for valid path format: /owner/repo
-        parts = parsed.path.strip("/").split("/")
-        if len(parts) < 2:
-            raise ValidationError(
-                "Invalid GitHub URL format. Expected: https://github.com/owner/repo"
-            )
-
-        return True
     except Exception as e:
-        raise ValidationError(f"Invalid GitHub URL: {str(e)}")
+        raise ValidationError(f"Invalid repository URL: {e}")
+
+    if parsed.scheme != "https":
+        raise ValidationError(
+            f"Repository URL must use https:// (got '{parsed.scheme or 'no scheme'}')"
+        )
+
+    if parsed.username or parsed.password:
+        raise ValidationError("Repository URL must not contain embedded credentials")
+
+    if parsed.hostname not in ALLOWED_REPO_HOSTS:
+        raise ValidationError(
+            "Only github.com and gitlab.com repositories are supported "
+            f"(got host '{parsed.hostname}')"
+        )
+
+    try:
+        port = parsed.port
+    except ValueError:
+        raise ValidationError("Repository URL has an invalid port")
+    if port is not None and port != 443:
+        raise ValidationError("Repository URL must not specify a non-default port")
+
+    # Path must be at least /owner/repo.
+    parts = [p for p in parsed.path.strip("/").split("/") if p]
+    if len(parts) < 2:
+        raise ValidationError(
+            "Invalid repository URL. Expected https://github.com/owner/repo "
+            "or https://gitlab.com/owner/repo"
+        )
+
+    return True
+
+
+# Backwards-compatible alias. The validator now also accepts gitlab.com, but the
+# old name is imported across the codebase and in tests.
+validate_github_url = validate_repo_url
+
+
+# LLMs are instructed (in the generate_cpg tool description) to wrap pasted code
+# as <code language="c"> ... </code>. We extract the language + body here rather
+# than trusting a free-form field, so the snippet is self-describing and parsing
+# is unambiguous. The language attribute is required; attribute order/extras and
+# single or double quotes are tolerated.
+_SNIPPET_BLOCK_RE = re.compile(
+    r"<code\b[^>]*?\b(?:language|lang)\s*=\s*[\"'](?P<lang>[^\"']+)[\"'][^>]*>"
+    r"(?P<body>.*?)"
+    r"</code\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def parse_snippet_blocks(text: Optional[str]):
+    """Extract (language, code) from one or more <code language="..."> blocks.
+
+    Returns ``(language, combined_code)`` when at least one well-formed block is
+    present, or ``None`` when the text contains no such tag (the caller then
+    falls back to the raw ``code`` + explicit ``language`` arguments). The
+    language is NOT validated here — the caller runs ``validate_language`` on the
+    result so snippet and non-snippet paths share one check.
+
+    Raises ValidationError when blocks are present but malformed: blocks
+    declaring different languages (one CPG is single-language), or all-empty
+    bodies.
+    """
+    if not text or not isinstance(text, str):
+        return None
+
+    matches = list(_SNIPPET_BLOCK_RE.finditer(text))
+    if not matches:
+        return None
+
+    langs = {m.group("lang").strip().lower() for m in matches}
+    if len(langs) != 1:
+        raise ValidationError(
+            f"All <code> blocks in one snippet must declare the same language, but "
+            f"found {', '.join(sorted(langs))}. One CPG is single-language — send one "
+            f"language per generate_cpg call (split the others into separate calls)."
+        )
+    language = langs.pop()
+
+    bodies = [m.group("body").strip("\n") for m in matches]
+    code = "\n\n".join(b for b in bodies if b.strip())
+    if not code.strip():
+        raise ValidationError(
+            "The <code language=\"...\"> tag is empty. Put the source code between the "
+            "opening and closing tags, e.g. <code language=\"c\">int main(){...}</code>."
+        )
+
+    return language, code
+
+
+# Distinctive per-language content signals (pattern, weight) used to infer or
+# cross-check a snippet's language. Intentionally heuristic and conservative —
+# the goal is to catch an obviously-mislabeled tag and to infer when no language
+# is declared, NOT to be a full language classifier. ghidra/jimple are omitted on
+# purpose: they are decompiled/IR formats that look like other languages and must
+# be declared explicitly (never inferred, never contradicted).
+_LANG_SIGNALS = {
+    "python": [
+        (r"\bdef\s+\w+\s*\(", 2), (r"\bimport\s+\w+", 1), (r"\bself\b", 1),
+        (r"\belif\b", 2), (r"__name__", 2), (r"\bprint\s*\(", 1), (r":\s*$", 1),
+    ],
+    "c": [
+        (r"#include\s*<\w+\.h>", 2), (r"\bint\s+main\s*\(", 1), (r"\bprintf\s*\(", 1),
+        (r"\bmalloc\s*\(", 2), (r"\bstruct\s+\w+", 1), (r"\bsizeof\b", 1),
+    ],
+    "cpp": [
+        (r"\bstd::", 3), (r"\btemplate\s*<", 2), (r"\bnamespace\b", 2),
+        (r"\bcout\b", 2), (r"\bnullptr\b", 2), (r"::\w", 1),
+    ],
+    "java": [
+        (r"\bpublic\s+class\b", 2), (r"\bimport\s+java\.", 3), (r"System\.out\.print", 2),
+        (r"\bpackage\s+[\w.]+;", 2), (r"@Override", 2), (r"\bpublic\s+static\s+void\s+main", 2),
+    ],
+    "javascript": [
+        (r"\bfunction\s+\w*\s*\(", 1), (r"\bconst\s+\w+\s*=", 1), (r"\blet\s+\w+", 1),
+        (r"=>", 1), (r"console\.log\s*\(", 2), (r"\brequire\s*\(", 2), (r"module\.exports", 2),
+    ],
+    "go": [
+        (r"\bpackage\s+\w+", 2), (r"\bfunc\s+\w*\s*\(", 1), (r":=", 2),
+        (r"\bfmt\.", 2), (r"\bchan\b", 2),
+    ],
+    "kotlin": [
+        (r"\bfun\s+\w+\s*\(", 2), (r"\bval\s+\w+", 1), (r"\bimport\s+kotlin", 3),
+        (r"\bprintln\s*\(", 1), (r":\s*Unit\b", 2),
+    ],
+    "csharp": [
+        (r"\busing\s+System", 3), (r"\bnamespace\s+\w+", 2), (r"Console\.Write", 2),
+        (r"\bstatic\s+void\s+Main", 2),
+    ],
+    "php": [
+        (r"<\?php", 3), (r"\$\w+", 1), (r"\becho\b", 1), (r"->\w", 1),
+    ],
+    "ruby": [
+        (r"\bend\b", 1), (r"\bputs\b", 2), (r"\bdo\s*\|", 2), (r"\bnil\b", 1),
+        (r"@\w+", 1), (r"\brequire\b", 1),
+    ],
+    "swift": [
+        (r"\bguard\b", 2), (r"\bimport\s+Swift", 3), (r"\bfunc\s+\w+\s*\(", 1),
+        (r"\blet\s+\w+", 1), (r"\bvar\s+\w+\s*:", 1),
+    ],
+}
+_LANG_SIGNALS_COMPILED = {
+    lang: [(re.compile(p, re.MULTILINE), w) for p, w in sigs]
+    for lang, sigs in _LANG_SIGNALS.items()
+}
+# Languages that can never be inferred or contradicted from content alone.
+_UNINFERABLE_LANGS = frozenset({"ghidra", "jimple"})
+
+
+def _language_signal_score(code: str, language: str) -> int:
+    """Summed weight of distinctive markers for ``language`` found in ``code``."""
+    return sum(w for pat, w in _LANG_SIGNALS_COMPILED.get(language, []) if pat.search(code))
+
+
+def infer_snippet_language(code: str) -> Optional[str]:
+    """Best-guess language for a code snippet, or None when not confident.
+
+    Confident = a single clear winner: top score >= 2 and at least double the
+    runner-up. Ambiguous or signal-less code returns None (the caller then
+    refuses and asks for an explicit language).
+    """
+    if not code or not code.strip():
+        return None
+    scores = {lang: _language_signal_score(code, lang) for lang in _LANG_SIGNALS_COMPILED}
+    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    top_lang, top = ranked[0]
+    second = ranked[1][1] if len(ranked) > 1 else 0
+    if top >= 2 and top >= 2 * max(second, 1):
+        return top_lang
+    return None
+
+
+def validate_and_infer_snippet_language(
+    code: Optional[str], declared: Optional[str] = None
+) -> str:
+    """Validate + infer the language of a snippet; refuse if anything is off.
+
+    - Empty code -> ValidationError.
+    - ``declared`` given: must be a supported language. If the code shows zero
+      signals for it AND confidently looks like a different language, the tag is
+      mislabeled -> ValidationError. (Overlapping families like c/cpp are NOT
+      refused — only a clear contradiction is.) ghidra/jimple are accepted as
+      declared without a content cross-check.
+    - ``declared`` absent: infer from content; a confident guess is returned,
+      otherwise ValidationError asking the caller to declare it.
+
+    Returns the resolved, supported language id.
+    """
+    if not code or not code.strip():
+        raise ValidationError(
+            "No snippet code was provided. Pass the code wrapped in a "
+            "<code language=\"...\"> ... </code> tag in the `code` argument."
+        )
+
+    if declared:
+        declared = declared.strip().lower()
+        validate_language(declared)  # raises (with the supported list) if unsupported
+        if declared in _UNINFERABLE_LANGS:
+            return declared
+        inferred = infer_snippet_language(code)
+        if (
+            inferred
+            and inferred != declared
+            and _language_signal_score(code, declared) == 0
+        ):
+            raise ValidationError(
+                f"Declared language '{declared}' does not match the snippet, which "
+                f"looks like '{inferred}'. Set the <code language=\"...\"> tag to the "
+                f"language the code is actually written in (or fix the code)."
+            )
+        return declared
+
+    inferred = infer_snippet_language(code)
+    if not inferred:
+        raise ValidationError(
+            "Could not determine the snippet's language from its content. Declare it "
+            "explicitly with a <code language=\"...\"> tag, e.g. "
+            "<code language=\"c\">...</code>. Supported languages: "
+            f"{', '.join(SUPPORTED_LANGUAGES)}."
+        )
+    return inferred
 
 
 def validate_local_path(path: str) -> bool:

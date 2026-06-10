@@ -20,6 +20,8 @@ from ..defaults import LANGUAGE_COMMANDS
 from ..exceptions import ValidationError
 from ..models import CodebaseInfo, SessionStatus
 from ..utils.validators import (
+    parse_snippet_blocks,
+    validate_and_infer_snippet_language,
     validate_code_snippet,
     validate_codebase_hash,
     validate_git_branch,
@@ -184,6 +186,14 @@ def get_cpg_cache_key(source_type: str, source_path: str, language: str, commit_
                 identifier = f"github:{owner}/{repo}:{language}"
             else:
                 identifier = f"github:{source_path}:{language}"
+        elif "gitlab.com/" in source_path:
+            # gitlab supports nested groups, so the project path can be deeper
+            # than owner/repo — key off the whole path (sans trailing .git) so
+            # the hash is stable and collision-free across subgroups.
+            path = source_path.split("gitlab.com/")[-1].strip("/")
+            if path.endswith(".git"):
+                path = path[:-4]
+            identifier = f"gitlab:{path}:{language}"
         else:
             identifier = f"github:{source_path}:{language}"
     else:
@@ -829,8 +839,29 @@ def register_core_tools(mcp, services: dict):
         description="""Generate a Code Property Graph (CPG) for a codebase.
 
 This tool initiates the analysis process by generating a CPG for the specified codebase.
-For GitHub repositories, it clones the repo first. For local paths, it copies the source code.
+For git repositories, it clones the repo first. For local paths, it copies the source code.
 The CPG is cached by a hash of the codebase.
+
+Accepted git repositories (source_type='github'):
+  - ONLY public/private repos on github.com or gitlab.com.
+  - The URL MUST be an https:// URL of the form:
+      https://github.com/<owner>/<repo>   or   https://gitlab.com/<owner>/<repo>
+    (gitlab nested subgroups are allowed; a trailing .git is fine).
+  - Other hosts, schemes (git://, ssh://, http://), embedded credentials, or
+    custom ports are rejected. Use github_token for a private repo, do NOT embed
+    the token in the URL.
+
+Pasting code directly (source_type='snippet'):
+  Wrap the code in a <code> tag whose `language` attribute is one of the supported
+  languages, and pass the whole tagged string in the `code` argument. The server
+  parses the language and body out of the tag — do not also rely on the `language`
+  argument, the tag wins. Use the EXACT supported language id (see Notes).
+    Single block:
+      <code language="c">
+      int main(void){ char b[8]; gets(b); return 0; }
+      </code>
+    Multiple blocks are concatenated into one file, but they MUST all declare the
+    SAME language (one CPG is single-language).
 
 IMPORTANT — large project guard:
 Before calling this tool for a local path, check the project size. If the project has more than
@@ -844,10 +875,13 @@ they want the full project. Pass force=True when the user confirms the full proj
 This guard does NOT apply to GitHub URLs — size is unknown until cloned.
 
 Args:
-    source_type: Either 'local' or 'github'.
-    source_path: Absolute path (local) or full GitHub URL.
+    source_type: One of 'local', 'github' (a github.com/gitlab.com repo), or 'snippet'.
+    source_path: Absolute path (local), an https github.com/gitlab.com URL (github),
+                 or a short label (snippet).
     language: Programming language (java, c, cpp, python, javascript, go, etc.).
-    github_token: Optional PAT for private repos.
+              Ignored for snippets that carry a <code language="..."> tag.
+    code: For snippets, the code wrapped in <code language="..."> ... </code> tag(s).
+    github_token: Optional PAT for private repos (never embed it in the URL).
     branch: Optional specific git branch.
     force: Set to True to skip the large-project size warning (use when the user has
            explicitly confirmed they want to analyze the full project).
@@ -864,19 +898,25 @@ Notes:
     - This is an async operation. Use get_cpg_status to check progress.
     - Large codebases may take several minutes to analyze.
     - Supported languages: c, cpp, java, javascript, python, go, kotlin, csharp, php, ruby, swift.
+    - Git repos: only https://github.com/... and https://gitlab.com/... are accepted.
 
 Examples:
     generate_cpg(
         source_type="github",
-        source_path="https://github.com/joernio/sample-repo",
+        source_path="https://gitlab.com/owner/repo",
         language="java"
+    )
+    generate_cpg(
+        source_type="snippet",
+        source_path="overflow_demo",
+        code="<code language=\\"c\\">int main(void){ char b[8]; gets(b); }</code>"
     )""",
     )
     async def generate_cpg(
         source_type: Annotated[str, Field(description="One of 'local', 'github', or 'snippet' (code pasted directly into the chat)")],
-        source_path: Annotated[str, Field(description="For local: absolute path to source directory. For github: full GitHub URL (e.g., https://github.com/user/repo). For snippet: a short human label for the pasted code (e.g. a function name); may be left empty")],
-        language: Annotated[str, Field(description="Programming language - one of: java, c, cpp, javascript, python, go, kotlin, csharp, ghidra, jimple, php, ruby, swift")],
-        code: Annotated[Optional[str], Field(description="The source code itself, required when source_type='snippet'. Ignored for local/github.")] = None,
+        source_path: Annotated[str, Field(description="For local: absolute path to source directory. For github: an https URL on github.com or gitlab.com ONLY (e.g. https://github.com/user/repo or https://gitlab.com/user/repo) — other hosts/schemes/credentials/ports are rejected. For snippet: a short human label for the pasted code (e.g. a function name); may be left empty")],
+        language: Annotated[str, Field(description="Programming language - one of: java, c, cpp, javascript, python, go, kotlin, csharp, ghidra, jimple, php, ruby, swift. For a snippet whose code carries a <code language=\"...\"> tag, the tag's language wins and this is ignored.")],
+        code: Annotated[Optional[str], Field(description="Required when source_type='snippet'. Wrap the code in a <code language=\"LANG\"> ... </code> tag where LANG is a supported language id, e.g. <code language=\"c\">int main(){...}</code>. Multiple blocks are concatenated but must share one language. Ignored for local/github.")] = None,
         filename: Annotated[Optional[str], Field(description="Optional filename for a snippet (e.g. 'parser.c'); defaults to snippet.<ext> from the language. Ignored for local/github.")] = None,
         github_token: Annotated[Optional[str], Field(description="GitHub Personal Access Token for private repositories (optional)")] = None,
         branch: Annotated[Optional[str], Field(description="Specific git branch to checkout (optional, defaults to default branch)")] = None,
@@ -889,6 +929,18 @@ Examples:
         """
         try:
             validate_source_type(source_type)
+            # For snippets the code may be wrapped in <code language="..."> tags;
+            # extract the language + body from them so the snippet is
+            # self-describing. The tag (when present) provides the declared
+            # language; otherwise fall back to the explicit `language` arg. The
+            # helper then validates the language, infers it when absent, and
+            # refuses (with an actionable message) on mismatch or ambiguity.
+            if source_type == "snippet":
+                parsed = parse_snippet_blocks(code)
+                declared = parsed[0] if parsed else language
+                if parsed:
+                    code = parsed[1]
+                language = validate_and_infer_snippet_language(code, declared or None)
             validate_language(language)
             # Validate every caller-supplied input up front (no-ops when unset).
             validate_git_branch(branch)

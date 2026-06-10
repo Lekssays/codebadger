@@ -192,39 +192,194 @@ class TestValidateLanguage:
         with pytest.raises(ValidationError) as exc_info:
             validate_language("rust")
 
-        assert "Unsupported language 'rust'" in str(exc_info.value)
-        assert "Supported:" in str(exc_info.value)
+        msg = str(exc_info.value)
+        assert "Unsupported language 'rust'" in msg
+        # The message must list the accepted ids so the caller can self-correct.
+        assert "java" in msg and "swift" in msg
 
 
 class TestValidateGithubUrl:
     """Test GitHub URL validation"""
 
-    def test_valid_github_urls(self):
-        """Test valid GitHub URLs"""
+    def test_valid_repo_urls(self):
+        """Valid github.com / gitlab.com https URLs are accepted."""
         valid_urls = [
             "https://github.com/user/repo",
             "https://github.com/user/repo.git",
             "https://www.github.com/user/repo",
             "https://github.com/user-name/repo_name",
             "https://github.com/user/repo/issues",
+            "https://gitlab.com/user/repo",
+            "https://gitlab.com/user/repo.git",
+            "https://www.gitlab.com/user/repo",
+            "https://gitlab.com/group/subgroup/project",  # nested gitlab group
         ]
 
         for url in valid_urls:
             # Should not raise
             validate_github_url(url)
 
-    def test_invalid_github_urls(self):
-        """Test invalid GitHub URLs"""
+    def test_invalid_repo_urls(self):
+        """Malformed or off-allowlist URLs are rejected."""
         invalid_urls = [
-            "https://gitlab.com/user/repo",  # Wrong domain
+            "https://bitbucket.org/user/repo",  # Wrong domain
             "https://github.com/user",  # Missing repo
             "https://github.com/",  # Incomplete
             "not-a-url",
+            "",
+            None,
         ]
 
         for url in invalid_urls:
             with pytest.raises(ValidationError):
                 validate_github_url(url)
+
+    def test_ssrf_and_scheme_hardening(self):
+        """SSRF / undefined-behavior vectors must all be rejected."""
+        malicious = [
+            "http://github.com/user/repo",            # non-https scheme
+            "git://github.com/user/repo",             # git protocol
+            "ssh://git@github.com/user/repo",         # ssh
+            "file:///etc/passwd",                     # local file
+            "https://github.com@evil.com/user/repo",  # userinfo host smuggling
+            "https://user:tok@github.com/user/repo",  # embedded credentials
+            "https://github.com:22/user/repo",        # non-default port
+            "https://localhost/user/repo",            # internal host
+            "https://169.254.169.254/latest/meta",    # cloud metadata endpoint
+            "https://github.com.evil.com/user/repo",  # suffix look-alike
+            "https://github.com/user/repo\n.git",     # control char injection
+        ]
+
+        for url in malicious:
+            with pytest.raises(ValidationError):
+                validate_github_url(url)
+
+    def test_literal_prefix_gate(self):
+        """The string must literally begin with an allowed https://host/ prefix."""
+        from src.utils.validators import ALLOWED_REPO_URL_PREFIXES
+
+        # The canonical lowercase prefixes are exactly the four allowed hosts.
+        assert ALLOWED_REPO_URL_PREFIXES == (
+            "https://github.com/",
+            "https://gitlab.com/",
+            "https://www.github.com/",
+            "https://www.gitlab.com/",
+        )
+
+        # Case-variant scheme/host pass urlparse's hostname check but must be
+        # rejected by the literal (case-sensitive) prefix gate.
+        for url in [
+            "HTTPS://github.com/user/repo",
+            "https://GitHub.com/user/repo",
+            " https://github.com/user/repo",  # leading space (also caught earlier)
+        ]:
+            with pytest.raises(ValidationError):
+                validate_github_url(url)
+
+
+class TestParseSnippetBlocks:
+    """<code language="..."> snippet extraction."""
+
+    def _parse(self, text):
+        from src.utils.validators import parse_snippet_blocks
+        return parse_snippet_blocks(text)
+
+    def test_single_block(self):
+        lang, code = self._parse('<code language="c">int main(){}</code>')
+        assert lang == "c"
+        assert code == "int main(){}"
+
+    def test_strips_surrounding_newlines(self):
+        lang, code = self._parse('<code language="python">\nprint(1)\n</code>')
+        assert lang == "python"
+        assert code == "print(1)"
+
+    def test_lang_alias_and_single_quotes_and_extra_attrs(self):
+        lang, code = self._parse("<code id='x' lang='go' >package main</code>")
+        assert lang == "go"
+        assert code == "package main"
+
+    def test_case_insensitive_tag_and_attr(self):
+        lang, code = self._parse('<CODE LANGUAGE="Java">class A{}</CODE>')
+        assert lang == "java"  # lowercased
+        assert code == "class A{}"
+
+    def test_multiple_same_language_concatenated(self):
+        lang, code = self._parse(
+            '<code language="c">int a;</code>\nnoise\n<code language="c">int b;</code>'
+        )
+        assert lang == "c"
+        assert code == "int a;\n\nint b;"
+
+    def test_multiple_languages_rejected(self):
+        with pytest.raises(ValidationError):
+            self._parse('<code language="c">x</code><code language="go">y</code>')
+
+    def test_empty_body_rejected(self):
+        with pytest.raises(ValidationError):
+            self._parse('<code language="c">   </code>')
+
+    @pytest.mark.parametrize("text", [None, "", "int main(){}", "<code>no lang</code>"])
+    def test_no_tag_returns_none(self, text):
+        # No well-formed tag -> caller falls back to raw code + language arg.
+        assert self._parse(text) is None
+
+
+class TestSnippetLanguageInferAndValidate:
+    """validate_and_infer_snippet_language + infer_snippet_language."""
+
+    def _vi(self, code, declared=None):
+        from src.utils.validators import validate_and_infer_snippet_language
+        return validate_and_infer_snippet_language(code, declared)
+
+    def _infer(self, code):
+        from src.utils.validators import infer_snippet_language
+        return infer_snippet_language(code)
+
+    C_CODE = '#include <stdio.h>\nint main(void){ char b[8]; malloc(8); return 0; }'
+    PY_CODE = 'def foo():\n    import os\n    print(os)\n'
+    CPP_CODE = '#include <iostream>\nint main(){ std::cout << "x"; }'
+
+    def test_declared_matches_is_returned(self):
+        assert self._vi(self.C_CODE, "c") == "c"
+
+    def test_declared_mismatch_refused_with_helpful_message(self):
+        from src.exceptions import ValidationError
+        with pytest.raises(ValidationError) as e:
+            self._vi(self.C_CODE, "python")
+        msg = str(e.value)
+        assert "does not match" in msg and "language=" in msg  # actionable
+
+    def test_overlapping_family_not_refused(self):
+        # cpp code declared as c: c still has signals, so we don't refuse.
+        assert self._vi(self.CPP_CODE, "c") == "c"
+
+    def test_infers_when_no_declaration(self):
+        assert self._vi(self.PY_CODE) == "python"
+
+    def test_ambiguous_without_declaration_refused(self):
+        from src.exceptions import ValidationError
+        with pytest.raises(ValidationError) as e:
+            self._vi("x = 1")
+        assert "Supported languages" in str(e.value)  # lists ids to self-correct
+
+    def test_uninferable_language_accepted_as_declared(self):
+        # ghidra/jimple look like other languages but must be trusted as declared.
+        assert self._vi(self.C_CODE, "ghidra") == "ghidra"
+
+    def test_empty_code_refused(self):
+        from src.exceptions import ValidationError
+        with pytest.raises(ValidationError):
+            self._vi("   ", "c")
+
+    def test_unsupported_declared_refused(self):
+        from src.exceptions import ValidationError
+        with pytest.raises(ValidationError):
+            self._vi(self.C_CODE, "rust")
+
+    def test_infer_returns_none_when_unsure(self):
+        assert self._infer("x = 1") is None
+        assert self._infer("") is None
 
 
 class TestValidateLocalPath:

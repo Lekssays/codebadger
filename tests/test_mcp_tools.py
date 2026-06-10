@@ -360,7 +360,9 @@ class TestMCPTools:
         import json
         result_dict = json.loads(result.content[0].text)
         assert result_dict["success"] is False
-        assert "code is required" in result_dict["error"]
+        # Helpful, actionable message telling the LLM how to supply the code.
+        err = result_dict["error"]
+        assert "no snippet code" in err.lower() and "<code language=" in err
 
     @pytest.mark.asyncio
     async def test_get_cpg_status_exists(self, mock_services):
