@@ -33,7 +33,7 @@ flowchart TB
     end
 
     subgraph CONTROL["🔒 Control plane — MCP container (root-equivalent on host)"]
-        V["Input validation layer<br/>hash · language · branch · token ·<br/>snippet · regex · CPGQL blocklist · path confinement"]
+        V["Input validation layer<br/>hash · language · branch · token · repo-URL allowlist ·<br/>snippet · regex · CPGQL blocklist · path confinement"]
         ORCH["Orchestrator<br/>queue · admission · escaping · clamps"]
     end
 
@@ -73,7 +73,10 @@ The numbered controls are the boundary checks; each is described below.
 | # | Boundary | Control | Where |
 |---|----------|---------|-------|
 | ① | Tool input → MCP | **Allowlist/format validation of every parameter**: `source_type`, `language` (whitelist), `codebase_hash` (`^[a-f0-9]{16}$`), `github_token` & `branch` (anti URL-/arg-injection, e.g. blocks `--upload-pack`), snippet `code`/`filename`/label, regex `pattern` (length + ReDoS shapes). | `src/utils/validators.py` |
-| ② | Source staging | **Path confinement + symlink-safe copy.** Local paths resolved with `realpath` and a system-dir denylist; snapshot reads confined with `realpath`+prefix / `commonpath`; local copy never dereferences symlinks whose target escapes the source tree. | `validators.py`, `core_tools.py` |
+| ①a | Repo URL → clone (**SSRF/undefined-clone prevention**) | **Strict allowlist on remote repos**: only `https://github.com/` or `https://gitlab.com/` (incl. `www.`). Enforced by **two independent gates** — a literal, case-sensitive `https://<host>/` prefix match *and* a parsed-`hostname` allowlist — plus rejection of any non-`https` scheme (`git://`, `ssh://`, `file://`, …), embedded credentials (`user:tok@`), non-default ports, and whitespace/control chars. Blocks userinfo host-smuggling (`https://github.com@evil/…`), internal/metadata hosts, and look-alike domains. | `validators.py` (`validate_repo_url`) |
+| ①b | Snippet code → CPG | **Language validated *and* inferred.** Pasted code is supplied in `<code language="…">` tags (parsed by regex); the declared language must be supported, and a content-signal check **refuses an obviously mislabeled tag** or **ambiguous/undeclared** language — every refusal returns an actionable message rather than building a wrong-language CPG. | `validators.py` (`parse_snippet_blocks`, `validate_and_infer_snippet_language`) |
+| ② | Source staging | **Path confinement + symlink-safe copy.** Local paths must be absolute, are rejected if they contain null bytes/control chars, then `realpath`-canonicalized (collapsing `..` and resolving symlinks *before* any check) and screened against a system-dir denylist (`/etc`, `/proc`, `/sys`, `/root`, …). An optional `ALLOWED_SOURCE_ROOTS` allowlist hard-contains local sources to named roots. Snapshot reads confined with `realpath`+prefix / `commonpath`; the copy never dereferences symlinks whose target escapes the source tree. | `validators.py` (`resolve_host_path`), `core_tools.py` |
+| ②a | Deployment posture | **`CHAT_DEPLOY=true` disables `source_type='local'` entirely** so a chat-facing / multi-tenant MCP cannot read arbitrary host paths — callers must use an allowlisted repo URL or a pasted snippet. | `core_tools.py`, `config.py` |
 | ③ | Parameterized queries → Joern | **Scala string-literal escaping** (`escape_scala_string`, applied at every template/query site) so method names, filters, file names, etc. cannot break out of the query and inject code. Numeric params are int-cast. | `src/utils/query_rendering.py` |
 | ④ | Query execution | **Resource caps**: timeout ≤ 300 s, ≤ 10 000 rows, ≤ 5 MB output (visible `truncated` flag, never silent), ≤ 5 000-line snippet spans, and caller-supplied `limit`/`take(n)`/`depth` clamped at the query loader. A timed-out query kills the JVM and the CPG auto-wakes on the next call. | `query_executor.py`, `tools/queries/__init__.py` |
 | ⑤ | Raw CPGQL escape hatch | **Denylist on `run_cpgql_query`**, always enforced, blocking process exec, file read/write, network, dynamic dependency load, reflection. **Defense-in-depth, not a boundary** (see below). | `validators.py`, `code_browsing_tools.py` |
@@ -114,7 +117,9 @@ flowchart LR
    it directly to untrusted networks.
 4. **Single-tenant by design.** There is no per-user isolation between codebases
    inside one deployment — anyone who can call the API can read any CPG/source it has
-   staged.
+   staged. `CHAT_DEPLOY=true` removes the *arbitrary-host-path* vector (it disables
+   `source_type='local'`), but it does **not** add cross-CPG access control between
+   callers; treat one deployment as one trust domain.
 5. **Denial-of-service is bounded, not eliminated.** Caps and timeouts prevent
    unbounded resource use per call, but a flood of expensive analyses can still
    saturate the host; use the queue backpressure (`queue_full`/`503`) and rate-limit
@@ -125,6 +130,11 @@ flowchart LR
 - [ ] **Dedicate the host** to codebadger (Docker socket = host root).
 - [ ] **Front the MCP with auth** (reverse proxy / mTLS / network policy); bind
       `MCP_HOST=127.0.0.1` behind it.
+- [ ] **For a chat-facing / untrusted deployment, set `CHAT_DEPLOY=true`** so
+      `source_type='local'` is disabled (no arbitrary host-path access; only
+      allowlisted repo URLs and pasted snippets). On a trusted batch host that
+      builds from local checkouts, leave it false and optionally pin
+      `ALLOWED_SOURCE_ROOTS` to the dirs you actually build from.
 - [ ] **Sandbox the Joern workers**: deny outbound network egress, and mount only
       the CPG/source each worker needs rather than the whole `/playground`.
 - [x] **Keep `pgdata` outside the Joern-visible mount** — done by default (the

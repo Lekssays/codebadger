@@ -61,6 +61,18 @@ services:
       # Scale knobs: HTTP in-flight cap (503 past this) and the pre-build repo-size cap.
       MAX_MCP_CONNECTIONS: ${MAX_MCP_CONNECTIONS:-16}
       MAX_REPO_SIZE_MB: ${MAX_REPO_SIZE_MB:-1024}
+      # Port the MCP binds (host networking, so this is also the host port).
+      MCP_PORT: ${MCP_PORT:-4242}
+      # Pending CPG-build queue depth, independent of build concurrency. Too small
+      # and a high-concurrency client gets ~30% of generations rejected (queue_full).
+      CPG_QUEUE_MAXSIZE: ${CPG_QUEUE_MAXSIZE:-64}
+      # Security posture. CHAT_DEPLOY=true DISABLES source_type='local' so a
+      # chat-facing MCP can't read arbitrary host paths (callers use a github.com/
+      # gitlab.com URL or a pasted snippet). ALLOWED_SOURCE_ROOTS optionally
+      # hard-contains local sources to the given ':'-separated dirs AS SEEN INSIDE
+      # this container — local sources live under /app/playground here.
+      CHAT_DEPLOY: ${CHAT_DEPLOY:-false}
+      ALLOWED_SOURCE_ROOTS: ${ALLOWED_SOURCE_ROOTS:-}
     depends_on:
       codebadger-postgres:
         condition: service_healthy

@@ -126,6 +126,41 @@ CPGs are written to `playground/cpgs/<hash>` and cached there, so re-analysis an
 sleeping/auto-wake are cheap. The `./playground` volume is the durable artifact —
 back it up / put it on fast storage.
 
+### Hardening a chat-facing deployment (`CHAT_DEPLOY`)
+
+The three source types above are not equally safe to expose. `source_type="local"`
+lets the caller name a host path; on a chat-facing or multi-user MCP that is an
+arbitrary-host-path read primitive you almost certainly don't want. Set:
+
+```bash
+CHAT_DEPLOY=true     # in .env (passed through to the container by compose)
+```
+
+With `CHAT_DEPLOY=true` the MCP **refuses `source_type="local"`** and returns a
+message steering the caller to the safe inputs. What remains:
+
+- **Git repos** — only `https://github.com/…` and `https://gitlab.com/…` are
+  accepted. The URL is checked twice (a literal `https://<host>/` prefix *and* a
+  parsed-hostname allowlist) and rejects other hosts, non-`https` schemes
+  (`git://`, `ssh://`, `file://`), embedded credentials, ports, and look-alike
+  domains — so a repo URL can't be turned into an SSRF probe.
+- **Pasted snippets** — `source_type="snippet"` with the code in a
+  `<code language="…">` tag; the language is validated/inferred and a mislabeled
+  or ambiguous snippet is refused. Nothing touches the host filesystem.
+
+Leave `CHAT_DEPLOY=false` (the default) only on a **trusted, single-tenant** host
+that intentionally builds CPGs from local checkouts. There you can additionally
+pin `ALLOWED_SOURCE_ROOTS` to hard-contain local sources to specific directories
+**as the MCP sees them** — inside the container that is under `/app/playground`,
+so e.g. `ALLOWED_SOURCE_ROOTS=/app/playground`. Any local path that doesn't
+canonically resolve under an allowed root (after symlink resolution) is rejected.
+
+`CHAT_DEPLOY` is **not** a substitute for the host boundary: it removes the
+local-path vector, but the MCP still holds the Docker socket and there's no
+cross-CPG access control between callers. See
+[Security](security.md) for the full picture — front the MCP with auth and treat
+one deployment as one trust domain.
+
 ## Running the MCP on the host (development)
 
 To iterate on the server itself, run the backing services in Compose and the MCP
