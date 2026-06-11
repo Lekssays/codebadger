@@ -420,25 +420,35 @@ class JoernServerManager:
                 f"Starting pooled Joern server for {codebase_hash} on port {port} "
                 f"(heap {heap_gb}G, reserve {reserve_mb}MB)"
             )
+            # Mark as spawning so the watchdog won't health-check (and kill) this
+            # server while its JVM is still booting. The port is registered in
+            # self._ports below, before _wait_for_server returns, so without this
+            # guard a watchdog tick landing mid-boot would terminate a server that
+            # simply hasn't bound its port yet (the cause of the "is dead,
+            # respawning" 4s after launch churn under host load).
+            self._spawning.add(codebase_hash)
             try:
-                self._start_worker_container(codebase_hash, port, java_opts, reserve_mb)
-                rp.set_worker(codebase_hash, self._worker_name(codebase_hash))
-                self._exec_ids[codebase_hash] = f"exec-{codebase_hash}"
-                self._ports[codebase_hash] = port
-            except Exception as e:
-                logger.error(f"Failed to start pooled worker for {codebase_hash}: {e}")
-                self.terminate_server(codebase_hash)  # rm container + release Redis state
-                raise
+                try:
+                    self._start_worker_container(codebase_hash, port, java_opts, reserve_mb)
+                    rp.set_worker(codebase_hash, self._worker_name(codebase_hash))
+                    self._exec_ids[codebase_hash] = f"exec-{codebase_hash}"
+                    self._ports[codebase_hash] = port
+                except Exception as e:
+                    logger.error(f"Failed to start pooled worker for {codebase_hash}: {e}")
+                    self.terminate_server(codebase_hash)  # rm container + release Redis state
+                    raise
 
-            startup_timeout = self.config.joern.server_startup_timeout if self.config else 120
-            if self._wait_for_server(port, timeout=startup_timeout):
-                rp.touch(codebase_hash)
-                logger.info(f"Pooled Joern server for {codebase_hash} ready on port {port}")
-                return port
-            logger.error(f"Pooled Joern server for {codebase_hash} failed to become ready on port {port}")
-            self._dump_server_log(codebase_hash)
-            self.terminate_server(codebase_hash)
-            raise RuntimeError(f"Pooled Joern server for {codebase_hash} failed to start on port {port}")
+                startup_timeout = self.config.joern.server_startup_timeout if self.config else 120
+                if self._wait_for_server(port, timeout=startup_timeout):
+                    rp.touch(codebase_hash)
+                    logger.info(f"Pooled Joern server for {codebase_hash} ready on port {port}")
+                    return port
+                logger.error(f"Pooled Joern server for {codebase_hash} failed to become ready on port {port}")
+                self._dump_server_log(codebase_hash)
+                self.terminate_server(codebase_hash)
+                raise RuntimeError(f"Pooled Joern server for {codebase_hash} failed to start on port {port}")
+            finally:
+                self._spawning.discard(codebase_hash)
 
     def spawn_server(self, codebase_hash: str) -> int:
         if self._redis_pool:
@@ -607,21 +617,49 @@ class JoernServerManager:
             logger.warning(f"Orphan worker cleanup skipped: {e}")
 
     def _dump_server_log(self, codebase_hash: str) -> None:
-        """Log the tail of a failed server's output (mode-aware), best-effort."""
+        """Log the tail of a failed server's output (mode-aware).
+
+        Always emits something at ERROR so a startup failure is diagnosable: the
+        worker's own log if present, or an explicit reason when there's nothing to
+        read (container already gone, or JVM never produced output). Previously a
+        missing container name or an empty log made this silently return nothing,
+        leaving "failed to start on port" with no accompanying cause.
+        """
         try:
             if self.worker_mode == "pool":
-                name = self._worker_containers.get(codebase_hash)
-                if name:
+                name = (
+                    self._worker_containers.get(codebase_hash)
+                    or (self._redis_pool.get_worker(codebase_hash) if self._redis_pool else None)
+                    or self._worker_name(codebase_hash)
+                )
+                try:
                     c = self.docker_client.containers.get(name)
-                    logger.error(f"Worker {name} log:\n{c.logs(tail=50).decode('utf-8', 'replace')}")
+                except NotFound:
+                    logger.error(
+                        f"Worker {name} ({codebase_hash}) produced no log: container is already "
+                        f"gone — removed before its JVM bound (killed mid-startup or OOM-reaped)."
+                    )
+                    return
+                logs = c.logs(tail=50).decode("utf-8", "replace").strip()
+                logger.error(
+                    f"Worker {name} ({codebase_hash}) startup failed [container status={c.status}]; "
+                    f"last 50 log lines:\n"
+                    + (logs or "<no output — JVM likely never started: OOM at mem_limit or host starvation>")
+                )
             else:
                 log_file = f"/tmp/joern-{codebase_hash}.log"
                 container = self.docker_client.containers.get(self.container_name)
                 res = container.exec_run(cmd=["cat", log_file], stream=False)
                 if res.exit_code == 0:
-                    logger.error(f"Joern server log:\n{res.output.decode('utf-8', 'replace')}")
+                    out = res.output.decode("utf-8", "replace").strip()
+                    logger.error(f"Joern server log for {codebase_hash}:\n" + (out or "<empty log file>"))
+                else:
+                    logger.error(
+                        f"No Joern server log at {log_file} for {codebase_hash} "
+                        f"(cat exit {res.exit_code}) — process likely never wrote one."
+                    )
         except Exception as e:
-            logger.warning(f"Could not read server log for {codebase_hash}: {e}")
+            logger.warning(f"Could not read server log for {codebase_hash}: {e}", exc_info=True)
 
     def reactivate(self, codebase_hash: str, cpg_path: str) -> int:
         """Spawn a fresh Joern process and load the existing CPG binary (no regeneration)."""
@@ -881,6 +919,11 @@ class JoernServerManager:
             try:
                 await asyncio.sleep(30)
                 for codebase_hash, port in list(self._ports.items()):
+                    # Skip servers still inside their startup window — their JVM
+                    # may not have bound the port yet, and killing it here is the
+                    # race that caused booting servers to be reaped under load.
+                    if codebase_hash in self._spawning:
+                        continue
                     if not await self._is_server_healthy(port):
                         logger.warning(f"Joern server {codebase_hash}:{port} is dead, respawning")
                         self.terminate_server(codebase_hash)
