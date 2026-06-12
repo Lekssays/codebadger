@@ -668,7 +668,19 @@ class JoernServerManager:
                 working_dir="/tmp",
                 mem_limit=f"{mem_limit_mb}m",
                 ports={f"{self.worker_internal_port}/tcp": ("127.0.0.1", port)},
-                volumes={self.playground_host_path: {"bind": "/playground", "mode": "rw"}},
+                # Read-only playground: a query worker only LOADS its cpg.bin and
+                # works in /tmp (Joern's workspace), never writing under
+                # /playground — verified end-to-end. Mounting ro means a query
+                # that escapes the CPGQL denylist can't tamper with or plant files
+                # in other tenants' CPGs/source. The build container (compose)
+                # keeps rw since it writes the CPGs.
+                # NOTE (defense-in-depth follow-ups, not done here): mounting only
+                # this hash's cpg dir would also block cross-tenant *reads*, and
+                # restricting egress would contain exfiltration — but the worker
+                # is an HTTP server reached via its published port, so a blanket
+                # network_mode="none" would make it unreachable; an egress-only
+                # firewall/dedicated network is the right tool there.
+                volumes={self.playground_host_path: {"bind": "/playground", "mode": "ro"}},
                 detach=True,
                 labels={"codebadger.role": "joern-worker", "codebadger.hash": codebase_hash},
             )

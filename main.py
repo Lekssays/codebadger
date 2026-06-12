@@ -317,6 +317,40 @@ def _get_cache_size() -> dict:
     }
 
 
+def _check_exposure(config) -> list:
+    """Flag a fail-open network-exposure posture as startup issue(s).
+
+    The riskiest shipped combination is: the MCP bound to all interfaces
+    (MCP_HOST=0.0.0.0), source_type='local' enabled (CHAT_DEPLOY=false), and no
+    ALLOWED_SOURCE_ROOTS containment — anyone who can reach the port can ask the
+    server to build a CPG from an arbitrary host path and read it back. The MCP
+    has no built-in auth, so this must be a deliberate, fronted deployment. Warn
+    loudly (and surface in /health) so it can't pass unnoticed.
+    """
+    issues: list = []
+    host = getattr(config.server, "host", "127.0.0.1")
+    chat_deploy = getattr(config.server, "chat_deploy", False)
+    allowed_roots = os.getenv("ALLOWED_SOURCE_ROOTS", "").strip()
+    on_all_interfaces = host in ("0.0.0.0", "::", "")
+
+    if on_all_interfaces and not chat_deploy and not allowed_roots:
+        issues.append(
+            "INSECURE EXPOSURE: MCP is bound to all interfaces (MCP_HOST=%s) with "
+            "source_type='local' enabled (CHAT_DEPLOY=false) and no "
+            "ALLOWED_SOURCE_ROOTS — any client that reaches this port can read "
+            "arbitrary host paths. Bind to 127.0.0.1, set CHAT_DEPLOY=true, set "
+            "ALLOWED_SOURCE_ROOTS, and/or front the MCP with authenticated TLS."
+            % host
+        )
+    elif on_all_interfaces:
+        issues.append(
+            "MCP is bound to all interfaces (MCP_HOST=%s) and has no built-in "
+            "auth; ensure it is fronted by an authenticated proxy / firewalled."
+            % host
+        )
+    return issues
+
+
 @lifespan
 async def app_lifespan(server: FastMCP):
     """Startup and shutdown logic for the FastMCP server"""
@@ -385,6 +419,9 @@ async def app_lifespan(server: FastMCP):
         # (Joern server restarts) onto this loop via run_coroutine_threadsafe.
         services['event_loop'] = asyncio.get_running_loop()
         services['startup_issues'] = []
+        for _issue in _check_exposure(config):
+            services['startup_issues'].append(_issue)
+            logger.warning(_issue)
         services['codebase_tracker'] = CodebaseTracker(db_manager)
         services['git_manager'] = GitManager(config.storage.workspace_root)
 

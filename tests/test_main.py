@@ -443,3 +443,32 @@ class TestMiddleware:
         assert response.headers["Retry-After"] == "5"
         assert response.body == b"Server busy - too many concurrent requests"
         mock_call_next.assert_not_called()
+
+
+class TestExposureCheck:
+    """_check_exposure flags fail-open network exposure (item 17)."""
+
+    def _cfg(self, host, chat_deploy):
+        import types
+        return types.SimpleNamespace(server=types.SimpleNamespace(host=host, chat_deploy=chat_deploy))
+
+    def test_unsafe_combination_flagged(self, monkeypatch):
+        monkeypatch.delenv("ALLOWED_SOURCE_ROOTS", raising=False)
+        issues = main._check_exposure(self._cfg("0.0.0.0", False))
+        assert any("INSECURE EXPOSURE" in i for i in issues)
+
+    def test_loopback_is_safe(self, monkeypatch):
+        monkeypatch.delenv("ALLOWED_SOURCE_ROOTS", raising=False)
+        assert main._check_exposure(self._cfg("127.0.0.1", False)) == []
+
+    def test_chat_deploy_suppresses_local_risk(self, monkeypatch):
+        monkeypatch.delenv("ALLOWED_SOURCE_ROOTS", raising=False)
+        issues = main._check_exposure(self._cfg("0.0.0.0", True))
+        # still warns about all-interfaces+no-auth, but not the local-path read risk
+        assert not any("INSECURE EXPOSURE" in i for i in issues)
+        assert any("no built-in" in i for i in issues)
+
+    def test_allowed_roots_suppresses_local_risk(self, monkeypatch):
+        monkeypatch.setenv("ALLOWED_SOURCE_ROOTS", "/srv/code")
+        issues = main._check_exposure(self._cfg("0.0.0.0", False))
+        assert not any("INSECURE EXPOSURE" in i for i in issues)
