@@ -138,50 +138,34 @@
           val method = freeCall.method
           val postFreeUsages = mutable.ListBuffer[(Int, String, String, String, String)]()
 
-          // Track reassignments
-          val reassignmentLines = mutable.Set[Int]()
-          method.assignment.l.foreach { assign =>
-            val assignLine = assign.lineNumber.getOrElse(-1)
-            if (assignLine > freeLine && assign.target.code == freedPtr) {
-              reassignmentLines += assignLine
-            }
-          }
-          
-          // === PHASE 1: Intraprocedural usages (same method) ===
+          // === PHASE 1: Intraprocedural post-free use via DATA FLOW ===
+          // A genuine post-free use is one the freed pointer's VALUE actually
+          // reaches along a control-flow path. Gating on dataflow rather than a
+          // `callLine > freeLine` line-number test (plus the old reassignment /
+          // early-return / mutually-exclusive line heuristics) is strictly more
+          // accurate: it catches same-line `free(p); use(p);` and loop-carried
+          // uses those missed, while still excluding (a) a use after the pointer
+          // is reassigned, (b) a use on a mutually-exclusive branch, and (c) dead
+          // code after an unconditional return — in every case the freed value
+          // simply does not flow there. Verified end-to-end against the fixture
+          // matrix in tests/test_use_after_free_live.py.
+          val freedArgNode = freeCall.argument(1)
           method.call.l.foreach { call =>
             val callLine = call.lineNumber.getOrElse(-1)
-            if (callLine > freeLine && !call.name.matches("free|cfree")) {
-              val reassignedBefore = reassignmentLines.exists(rl => rl > freeLine && rl < callLine)
-              
-              // Check for an unconditional early return between free and usage.
-              // A return is only a real guard when it is NOT nested inside a control
-              // structure (loop/if/switch) that starts AFTER the free — because such a
-              // return can be bypassed (e.g. loop body may not execute every iteration).
-              val methodCss = csCache.getOrElseUpdate(method.fullName, method.ast.isControlStructure.l)
-              val hasEarlyReturn = retCache.getOrElseUpdate(method.fullName, method.ast.isReturn.l).exists { ret =>
-                val retLine = ret.lineNumber.getOrElse(-1)
-                retLine > freeLine && retLine < callLine && {
-                  val nestedInControlStructure = methodCss.exists { cs =>
-                    val csStart = cs.lineNumber.getOrElse(-1)
-                    val csLines = cs.ast.lineNumber.l.filter(_ > 0)
-                    val csEnd   = if (csLines.nonEmpty) csLines.max else csStart
-                    csStart > freeLine && csStart <= retLine && csEnd >= retLine
-                  }
-                  !nestedInControlStructure
-                }
-              }
-              
-              // Check if free and usage are in mutually exclusive if/else branches
-              val inDifferentBranches = areInMutuallyExclusiveBranches(method, freeLine, callLine)
-
-              if (!reassignedBefore && !hasEarlyReturn && !inDifferentBranches) {
+            if (!call.name.matches("free|cfree")) {
+              val reachedByFreed =
+                try { call.argument.reachableBy(freedArgNode).nonEmpty }
+                catch { case _: Throwable => false }
+              if (reachedByFreed) {
+                // Keep only DIRECT references to the freed pointer at this site;
+                // transitive aliases are Phase 2's job, and the assignment LHS
+                // that merely stores the pointer is propagation, not a use.
                 val relevantArgs = call.argument.l.filterNot { arg =>
                   call.name == "<operator>.assignment" && arg.argumentIndex == 1 && arg.code == freedPtr
                 }
-
                 val argsContainPtr = relevantArgs.exists { arg =>
                   val argCode = arg.code
-                  argCode == freedPtr || 
+                  argCode == freedPtr ||
                   argCode.startsWith(freedPtr + "->") ||
                   argCode.startsWith(freedPtr + "[") ||
                   argCode.startsWith("*" + freedPtr)

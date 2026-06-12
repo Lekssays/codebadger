@@ -103,6 +103,16 @@
     "xmalloc", "xcalloc", "xrealloc", "xstrdup", "xstrndup"
   )
 
+  // True when an operand's code is a null constant. c2cpg renders the
+  // (typically unresolved) NULL macro operand as "<unknown> NULL", so a plain
+  // == "NULL" comparison silently fails on the most common guard — strip that
+  // synthetic prefix before matching.
+  def isNullConstCode(c0: String): Boolean = {
+    val t = c0.trim.stripPrefix("<unknown>").trim
+    t == "NULL" || t == "0" || t == "nullptr" ||
+    t == "((void *)0)" || t == "((void*)0)" || t == "(void *)0" || t == "(void*)0"
+  }
+
   // Find all allocation calls
   val allocCalls = cpg.call.name(allocFunctions).l
 
@@ -227,16 +237,20 @@
             method.controlStructure.filter(_.controlStructureType == "IF").l.foreach { ifStmt =>
               val condLine = ifStmt.lineNumber.getOrElse(-1)
               if (condLine > allocLine) {
-                val condAst = ifStmt.condition.ast
+                // Materialize to a List: `ifStmt.condition.ast` is a single-use
+                // Traversal, and the four checks below each re-scan it. Left as a
+                // lazy iterator, the first check consumes it and the rest see an
+                // EMPTY traversal — which silently dropped every `!ptr`, `ptr &&`
+                // guard after an (already-failing) equality check, the root of the
+                // false positives on `if (ptr == NULL) return;` / `if (!ptr) ...`.
+                val condAst = ifStmt.condition.ast.l
 
                 // Semantic check 1: ptr == NULL / ptr != NULL / ptr == 0 / 0 == ptr / ptr == nullptr
                 val hasEqualityNullCheck = condAst.isCall
                   .name("<operator>.equals|<operator>.notEquals").l.exists { cmp =>
                     val argCodes = cmp.argument.code.l.map(_.trim)
                     val hasPtr = argCodes.contains(assignedPtr)
-                    val hasNull = argCodes.exists(c =>
-                      c == "NULL" || c == "0" || c == "nullptr" || c == "((void *)0)" || c == "((void*)0)"
-                    )
+                    val hasNull = argCodes.exists(isNullConstCode)
                     hasPtr && hasNull
                   }
 
@@ -377,7 +391,10 @@
                             m.controlStructure.filter(_.controlStructureType == "IF").l.exists { ifStmt =>
                               val condLine = ifStmt.lineNumber.getOrElse(-1)
                               condLine >= mStartLine && condLine <= sinkLine && {
-                                val condAst = ifStmt.condition.ast
+                                // Materialize: single-use Traversal reused by the
+                                // checks below (see the Phase 3 note) — leaving it
+                                // lazy dropped every guard after the first check.
+                                val condAst = ifStmt.condition.ast.l
 
                                 candidates.exists { candidate =>
                                   val qCand = java.util.regex.Pattern.quote(candidate)
@@ -387,7 +404,7 @@
                                     .name("<operator>.equals|<operator>.notEquals").l.exists { cmp =>
                                       val argCodes = cmp.argument.code.l.map(_.trim)
                                       argCodes.contains(candidate) &&
-                                        argCodes.exists(c => c == "NULL" || c == "0" || c == "nullptr" || c == "((void *)0)" || c == "((void*)0)")
+                                        argCodes.exists(isNullConstCode)
                                     }
 
                                   // Semantic: !candidate

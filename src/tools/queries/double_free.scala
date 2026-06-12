@@ -201,9 +201,31 @@
                     // Check if the two frees are in mutually exclusive if/else branches
                     val inDifferentBranches = areInMutuallyExclusiveBranches(method, firstLine, secondLine)
 
-                    // Only report if not a safe pattern and first-free not already paired
+                    // Decide whether this pair is a genuine double-free.
+                    //   Same pointer: DATA FLOW is authoritative. If the value freed
+                    //   at the first site still reaches the second free's argument,
+                    //   it is the same live allocation freed twice. Dataflow is
+                    //   path-sensitive, so it already accounts for reallocation,
+                    //   reassignment, early return and mutually-exclusive branches —
+                    //   and, unlike the line-number checks above, it stays correct
+                    //   when several statements share a line (e.g. macro expansions
+                    //   or `free(p); p = malloc(); free(p);` on one line, which the
+                    //   line tests mis-handled as both a false positive here and a
+                    //   missed reassignment).
+                    //   Alias (q = p; free(p); free(q)): the freed value does not
+                    //   flow from the first arg to the second, so fall back to the
+                    //   line-based safety checks for that rarer shape.
+                    val isSamePtr = firstPtr == secondPtr
+                    val dataflowReaches =
+                      try { secondFree.argument(1).reachableBy(firstFree.argument(1)).nonEmpty }
+                      catch { case _: Throwable => false }
+                    val isDoubleFree =
+                      if (isSamePtr) dataflowReaches
+                      else (!hasRealloc && !hasReassignment && !hasEarlyExit && !inDifferentBranches)
+
+                    // Only report if it's a genuine double-free and first-free not already paired
                     val pairKey = s"$firstPtr:$firstFile:$firstLine"
-                    if (!hasRealloc && !hasReassignment && !hasEarlyExit && !inDifferentBranches && !pairedFirstFrees.contains(pairKey)) {
+                    if (isDoubleFree && !pairedFirstFrees.contains(pairKey)) {
                       val flowType = if (firstPtr == secondPtr) "same-ptr" else s"alias($secondPtr=$firstPtr)"
                       doubleFreeIssues += ((firstFile, methodName, firstPtr, firstLine, firstCode, secondLine, secondCode, flowType))
                       pairedFirstFrees += pairKey
