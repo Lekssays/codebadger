@@ -325,3 +325,62 @@ async def test_find_toctou_query_error(toctou_services):
         result = res.content[0].text
 
         assert "Error" in result
+
+
+# ── atomic source copy (A5) ───────────────────────────────────────────────────
+
+def _seed_src(tmp_path):
+    src = tmp_path / "src"
+    (src / "sub").mkdir(parents=True)
+    (src / "a.c").write_text("int a;\n")
+    (src / "sub" / "b.c").write_text("int b;\n")
+    return src
+
+
+def test_copy_local_source_tree_produces_complete_tree(tmp_path):
+    from src.tools.core_tools import _copy_local_source_tree
+    src = _seed_src(tmp_path)
+    dst = tmp_path / "codebases" / "hash1"
+    _copy_local_source_tree(str(src), str(dst))
+    assert (dst / "a.c").read_text() == "int a;\n"
+    assert (dst / "sub" / "b.c").read_text() == "int b;\n"
+    # no temp dir left behind
+    assert not any(p.name.startswith("hash1.tmp.") for p in (tmp_path / "codebases").iterdir())
+
+
+def test_copy_local_source_tree_is_noop_when_dest_exists(tmp_path):
+    from src.tools.core_tools import _copy_local_source_tree
+    src = _seed_src(tmp_path)
+    dst = tmp_path / "codebases" / "hash2"
+    dst.mkdir(parents=True)
+    (dst / "winner.txt").write_text("kept")  # simulate a concurrent winner's snapshot
+    _copy_local_source_tree(str(src), str(dst))
+    # existing snapshot untouched, our copy skipped
+    assert (dst / "winner.txt").read_text() == "kept"
+    assert not (dst / "a.c").exists()
+
+
+def test_copy_local_source_tree_concurrent_calls_are_safe(tmp_path):
+    import threading
+    from src.tools.core_tools import _copy_local_source_tree
+    src = _seed_src(tmp_path)
+    dst = tmp_path / "codebases" / "hash3"
+    (tmp_path / "codebases").mkdir(parents=True)
+    errors = []
+
+    def run():
+        try:
+            _copy_local_source_tree(str(src), str(dst))
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    threads = [threading.Thread(target=run) for _ in range(4)]
+    for t in threads: t.start()
+    for t in threads: t.join()
+
+    assert not errors
+    assert (dst / "a.c").read_text() == "int a;\n"
+    assert (dst / "sub" / "b.c").read_text() == "int b;\n"
+    # all temp dirs cleaned up; only the final snapshot remains
+    leftover = [p.name for p in (tmp_path / "codebases").iterdir() if ".tmp." in p.name]
+    assert leftover == []

@@ -63,3 +63,17 @@ def test_redis_lock_times_out_when_held():
         with pytest.raises(QueryLockTimeout):
             with busy.codebase_query_lock("contended"):
                 pass
+
+
+@redis_only
+def test_generation_lock_is_single_flight():
+    """Second concurrent holder gets False (a build is already being prepared)."""
+    c1 = make_coordinator(REDIS_URL)
+    c2 = make_coordinator(REDIS_URL)
+    with c1.codebase_generation_lock("genhash") as a:
+        assert a is True
+        with c2.codebase_generation_lock("genhash") as b:
+            assert b is False          # someone else holds it -> caller short-circuits
+    # Released after the first holder exits -> acquirable again.
+    with c2.codebase_generation_lock("genhash") as c:
+        assert c is True

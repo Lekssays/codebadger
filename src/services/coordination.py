@@ -60,6 +60,35 @@ class RedisCoordinator:
                 # Lock may have already expired (timeout) — safe to ignore.
                 pass
 
+    @contextmanager
+    def codebase_generation_lock(self, codebase_hash: str) -> Iterator[bool]:
+        """Best-effort cross-process single-flight for CPG generation.
+
+        Non-blocking: yields True if this caller acquired the lock (it should do
+        the source copy + enqueue), or False if another caller already holds it
+        for the same codebase (a build is already being prepared — short-circuit
+        as a duplicate). Correctness never depends on this lock — the atomic
+        source copy and the durable queue's dedup index already guarantee one
+        clean build — it only avoids wasted duplicate copies/scans. The lock
+        auto-expires so a crashed holder can't wedge generation.
+        """
+        lock = self._redis.lock(
+            f"codebadger:genlock:{codebase_hash}",
+            timeout=self._lock_timeout,
+            blocking=False,
+        )
+        acquired = False
+        try:
+            acquired = lock.acquire(blocking=False)
+            yield acquired
+        finally:
+            if acquired:
+                try:
+                    lock.release()
+                except Exception:
+                    # Lock may have already expired (timeout) — safe to ignore.
+                    pass
+
     @property
     def backend(self) -> str:
         return "redis"

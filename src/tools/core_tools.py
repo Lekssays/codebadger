@@ -5,6 +5,8 @@ Provides core CPG management functionality
 """
 
 import asyncio
+import uuid
+from contextlib import nullcontext
 import docker
 import hashlib
 import io
@@ -296,10 +298,16 @@ def _classify_cpg_build_failure(exit_code, output: str, build_heap_gb: int) -> t
 
 
 def _copy_local_source_tree(host_path: str, codebase_dir: str) -> None:
-    """Copy a local source tree into the playground snapshot dir.
+    """Copy a local source tree into the playground snapshot dir, atomically.
 
     Symlink-safe: never dereferences symlinks whose target escapes the source root
     (prevents pulling arbitrary host files into the readable snapshot).
+
+    Atomic: the tree is built in a sibling temp dir and then os.replace()'d into
+    place, so two concurrent generate_cpg calls for the same path can never produce
+    a half-merged/corrupt snapshot (the cause of spurious empty/parse-failed CPGs).
+    The first rename wins; a loser whose destination already exists discards its
+    temp and reuses the winner's complete copy.
 
     Blocking I/O — invoke via asyncio.to_thread so it never runs on the event loop.
     Doing it on the loop serializes concurrent generate_cpg calls, which inflates
@@ -307,22 +315,38 @@ def _copy_local_source_tree(host_path: str, codebase_dir: str) -> None:
     that cleans up its source dirs on a timer, a delayed copy races the cleanup and
     fails with "Path does not exist".
     """
-    os.makedirs(codebase_dir, exist_ok=True)
+    if os.path.exists(codebase_dir):
+        return  # a concurrent caller already captured a complete snapshot
+    # Build into a sibling temp dir on the same filesystem so the final move is a
+    # cheap, atomic rename rather than a cross-device copy.
+    tmp_dir = f"{codebase_dir}.tmp.{uuid.uuid4().hex}"
+    os.makedirs(tmp_dir, exist_ok=True)
     real_root = os.path.realpath(host_path)
-    for item in os.listdir(host_path):
-        src_item = os.path.join(host_path, item)
-        dst_item = os.path.join(codebase_dir, item)
+    try:
+        for item in os.listdir(host_path):
+            src_item = os.path.join(host_path, item)
+            dst_item = os.path.join(tmp_dir, item)
 
-        if os.path.islink(src_item):
-            if not os.path.realpath(src_item).startswith(real_root + os.sep):
-                logger.warning(f"Skipping symlink escaping source root: {item}")
-                continue
+            if os.path.islink(src_item):
+                if not os.path.realpath(src_item).startswith(real_root + os.sep):
+                    logger.warning(f"Skipping symlink escaping source root: {item}")
+                    continue
 
-        if os.path.isdir(src_item):
-            # symlinks=True: copy nested links as links, never dereference out of tree.
-            shutil.copytree(src_item, dst_item, dirs_exist_ok=True, symlinks=True)
-        else:
-            shutil.copy2(src_item, dst_item, follow_symlinks=False)
+            if os.path.isdir(src_item):
+                # symlinks=True: copy nested links as links, never dereference out of tree.
+                shutil.copytree(src_item, dst_item, dirs_exist_ok=True, symlinks=True)
+            else:
+                shutil.copy2(src_item, dst_item, follow_symlinks=False)
+
+        try:
+            os.replace(tmp_dir, codebase_dir)  # atomic when dest doesn't exist
+        except OSError:
+            # A concurrent caller won the race and populated codebase_dir first;
+            # their snapshot is complete, so drop ours.
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+    except BaseException:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
 
 
 def _calculate_repo_size_mb(source_path: str) -> int:
@@ -1196,133 +1220,153 @@ Examples:
 
             repository_url = source_path if source_type == "github" else None
 
-            if source_type == "github":
-                validate_github_url(source_path)
-
-                if not os.path.exists(codebase_dir):
-                    os.makedirs(codebase_dir, exist_ok=True)
-                    await git_manager.clone_repository(
-                        repo_url=source_path,
-                        target_path=codebase_dir,
-                        branch=branch,
-                        token=github_token,
-                    )
-                    logger.info(f"Cloned repository to {codebase_dir}")
-                else:
-                    logger.info(f"Using existing cloned repository at {codebase_dir}")
-            elif source_type == "snippet":
-                snippet_name = snippet_filename(language, filename)
-                # Label the DB record with the filename when no explicit label was given.
-                if not source_path:
-                    source_path = snippet_name
-
-                if not os.path.exists(codebase_dir):
-                    os.makedirs(codebase_dir, exist_ok=True)
-                    snippet_file = os.path.join(codebase_dir, snippet_name)
-                    try:
-                        with open(snippet_file, "w", encoding="utf-8") as f:
-                            f.write(code)
-                        logger.info(f"Wrote snippet to {snippet_file}")
-                    except OSError as e:
-                        logger.error(f"Failed to write snippet for {codebase_hash}: {e}")
-                        raise ValidationError("Failed to stage code snippet")
-                else:
-                    logger.info(f"Using existing snippet at {codebase_dir}")
-            else:
-                # resolve + copy are blocking FS work — keep them off the event loop
-                # (see _copy_local_source_tree) so concurrent requests don't serialize
-                # and race the caller's source-dir cleanup.
-                host_path = await asyncio.to_thread(resolve_host_path, source_path)
-
-                # Refuse a source that contains (or is) the CodeBadger playground.
-                # Copying it would recursively pull in every cached codebase/CPG, and
-                # the pre-build size walk over that explosion blocks the event loop —
-                # a single such request takes the whole MCP down (observed outage).
-                real_src = os.path.realpath(host_path)
-                real_pg = os.path.realpath(playground_path)
-                if real_pg == real_src or real_pg.startswith(real_src + os.sep):
-                    raise ValidationError(
-                        "Source path contains the CodeBadger playground directory; "
-                        "refusing to analyze it (would recursively include all cached "
-                        "codebases and CPGs)."
-                    )
-
-                if not os.path.exists(codebase_dir):
-                    logger.info(f"Copying source from {host_path} to {codebase_dir}")
-                    try:
-                        await asyncio.to_thread(_copy_local_source_tree, host_path, codebase_dir)
-                        logger.info(f"Source copied successfully to {codebase_dir}")
-                    except OSError as e:
-                        logger.error(f"Failed to copy local source directory for {codebase_hash}: {e}")
-                        raise ValidationError("Failed to copy local source directory")
-                else:
-                    logger.info(f"Using existing source at {codebase_dir}")
-
-            cpg_dir = os.path.join(playground_path, "cpgs", codebase_hash)
-            cpg_path = os.path.join(cpg_dir, "cpg.bin")
-            container_cpg_path = f"/playground/cpgs/{codebase_hash}/cpg.bin"
-            os.makedirs(cpg_dir, exist_ok=True)
-            logger.info(f"CPG directory ready: {cpg_dir}")
-
-            # Store initial metadata in DB before CPG generation begins.
-            codebase_tracker.save_codebase(
-                codebase_hash=codebase_hash,
-                source_type=source_type,
-                source_path=source_path,
-                language=language,
-                cpg_path=None,  # Updated after generation
-                joern_port=None,  # Updated after the server starts
-                metadata={
-                    "container_codebase_path": container_codebase_path,
-                    "container_cpg_path": container_cpg_path,
-                    "repository": repository_url,
-                    "status": SessionStatus.GENERATING
-                }
+            # Single-flight: if another request is already preparing/submitting this
+            # exact codebase, skip the duplicate source copy + enqueue. Correctness is
+            # still guaranteed by the atomic copy and the durable queue's dedup index;
+            # this only avoids wasted work. Best-effort, so a non-Redis coordinator just
+            # proceeds (nullcontext yields True).
+            _coordinator = services.get("coordinator")
+            _gen_cm = (
+                _coordinator.codebase_generation_lock(codebase_hash)
+                if _coordinator is not None and hasattr(_coordinator, "codebase_generation_lock")
+                else nullcontext(True)
             )
-
-            # Submit to the bounded queue (dedup + concurrency limit).
-            job = dict(
-                codebase_hash=codebase_hash,
-                codebase_dir=codebase_dir,
-                cpg_path=cpg_path,
-                language=language,
-                container_cpg_path=container_cpg_path,
-                services=services,
-            )
-            cpg_queue = services.get("cpg_queue")
-            if cpg_queue:
-                submit_result = await cpg_queue.submit(codebase_hash, job)
-                if submit_result == CPGGenerationQueue.DUPLICATE:
+            with _gen_cm as _gen_acquired:
+                if not _gen_acquired:
                     return {
                         "success": True,
                         "codebase_hash": codebase_hash,
                         "status": SessionStatus.GENERATING,
                         "message": "CPG build already in progress for this codebase.",
                     }
-                if submit_result == CPGGenerationQueue.QUEUE_FULL:
-                    return {
-                        "success": False,
-                        "codebase_hash": codebase_hash,
-                        "status": "queue_full",
-                        "message": "CPG generation queue is full. Try again shortly.",
-                    }
-            else:
-                asyncio.create_task(_generate_cpg_async(**job))
 
-            estimate = _estimate_processing_time(codebase_dir, language, has_cpg=False)
+                if source_type == "github":
+                    validate_github_url(source_path)
 
-            return {
-                "success": True,
-                "codebase_hash": codebase_hash,
-                "status": SessionStatus.GENERATING,
-                "message": f"CPG generation started in background. Estimated time: {estimate}. Use get_cpg_status to check progress.",
-                "estimated_time": estimate,
-                **_public_codebase_fields(
+                    if not os.path.exists(codebase_dir):
+                        os.makedirs(codebase_dir, exist_ok=True)
+                        await git_manager.clone_repository(
+                            repo_url=source_path,
+                            target_path=codebase_dir,
+                            branch=branch,
+                            token=github_token,
+                        )
+                        logger.info(f"Cloned repository to {codebase_dir}")
+                    else:
+                        logger.info(f"Using existing cloned repository at {codebase_dir}")
+                elif source_type == "snippet":
+                    snippet_name = snippet_filename(language, filename)
+                    # Label the DB record with the filename when no explicit label was given.
+                    if not source_path:
+                        source_path = snippet_name
+
+                    if not os.path.exists(codebase_dir):
+                        os.makedirs(codebase_dir, exist_ok=True)
+                        snippet_file = os.path.join(codebase_dir, snippet_name)
+                        try:
+                            with open(snippet_file, "w", encoding="utf-8") as f:
+                                f.write(code)
+                            logger.info(f"Wrote snippet to {snippet_file}")
+                        except OSError as e:
+                            logger.error(f"Failed to write snippet for {codebase_hash}: {e}")
+                            raise ValidationError("Failed to stage code snippet")
+                    else:
+                        logger.info(f"Using existing snippet at {codebase_dir}")
+                else:
+                    # resolve + copy are blocking FS work — keep them off the event loop
+                    # (see _copy_local_source_tree) so concurrent requests don't serialize
+                    # and race the caller's source-dir cleanup.
+                    host_path = await asyncio.to_thread(resolve_host_path, source_path)
+
+                    # Refuse a source that contains (or is) the CodeBadger playground.
+                    # Copying it would recursively pull in every cached codebase/CPG, and
+                    # the pre-build size walk over that explosion blocks the event loop —
+                    # a single such request takes the whole MCP down (observed outage).
+                    real_src = os.path.realpath(host_path)
+                    real_pg = os.path.realpath(playground_path)
+                    if real_pg == real_src or real_pg.startswith(real_src + os.sep):
+                        raise ValidationError(
+                            "Source path contains the CodeBadger playground directory; "
+                            "refusing to analyze it (would recursively include all cached "
+                            "codebases and CPGs)."
+                        )
+
+                    if not os.path.exists(codebase_dir):
+                        logger.info(f"Copying source from {host_path} to {codebase_dir}")
+                        try:
+                            await asyncio.to_thread(_copy_local_source_tree, host_path, codebase_dir)
+                            logger.info(f"Source copied successfully to {codebase_dir}")
+                        except OSError as e:
+                            logger.error(f"Failed to copy local source directory for {codebase_hash}: {e}")
+                            raise ValidationError("Failed to copy local source directory")
+                    else:
+                        logger.info(f"Using existing source at {codebase_dir}")
+
+                cpg_dir = os.path.join(playground_path, "cpgs", codebase_hash)
+                cpg_path = os.path.join(cpg_dir, "cpg.bin")
+                container_cpg_path = f"/playground/cpgs/{codebase_hash}/cpg.bin"
+                os.makedirs(cpg_dir, exist_ok=True)
+                logger.info(f"CPG directory ready: {cpg_dir}")
+
+                # Store initial metadata in DB before CPG generation begins.
+                codebase_tracker.save_codebase(
+                    codebase_hash=codebase_hash,
                     source_type=source_type,
                     source_path=source_path,
                     language=language,
-                ),
-            }
+                    cpg_path=None,  # Updated after generation
+                    joern_port=None,  # Updated after the server starts
+                    metadata={
+                        "container_codebase_path": container_codebase_path,
+                        "container_cpg_path": container_cpg_path,
+                        "repository": repository_url,
+                        "status": SessionStatus.GENERATING
+                    }
+                )
+
+                # Submit to the bounded queue (dedup + concurrency limit).
+                job = dict(
+                    codebase_hash=codebase_hash,
+                    codebase_dir=codebase_dir,
+                    cpg_path=cpg_path,
+                    language=language,
+                    container_cpg_path=container_cpg_path,
+                    services=services,
+                )
+                cpg_queue = services.get("cpg_queue")
+                if cpg_queue:
+                    submit_result = await cpg_queue.submit(codebase_hash, job)
+                    if submit_result == CPGGenerationQueue.DUPLICATE:
+                        return {
+                            "success": True,
+                            "codebase_hash": codebase_hash,
+                            "status": SessionStatus.GENERATING,
+                            "message": "CPG build already in progress for this codebase.",
+                        }
+                    if submit_result == CPGGenerationQueue.QUEUE_FULL:
+                        return {
+                            "success": False,
+                            "codebase_hash": codebase_hash,
+                            "status": "queue_full",
+                            "message": "CPG generation queue is full. Try again shortly.",
+                        }
+                else:
+                    asyncio.create_task(_generate_cpg_async(**job))
+
+                estimate = _estimate_processing_time(codebase_dir, language, has_cpg=False)
+
+                return {
+                    "success": True,
+                    "codebase_hash": codebase_hash,
+                    "status": SessionStatus.GENERATING,
+                    "message": f"CPG generation started in background. Estimated time: {estimate}. Use get_cpg_status to check progress.",
+                    "estimated_time": estimate,
+                    **_public_codebase_fields(
+                        source_type=source_type,
+                        source_path=source_path,
+                        language=language,
+                    ),
+                }
 
         except ValidationError as e:
             logger.error(f"Validation error: {e}")
