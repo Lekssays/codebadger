@@ -10,7 +10,6 @@ import logging
 from .core_tools import register_core_tools
 from .code_browsing_tools import register_code_browsing_tools
 from .taint_analysis_tools import register_taint_analysis_tools
-from .prompts import register_prompts
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +20,6 @@ def register_tools(mcp, services: dict):
     register_core_tools(mcp, services)
     register_code_browsing_tools(mcp, services)
     register_taint_analysis_tools(mcp, services)
-    register_prompts(mcp)
 
     try:
         from .custom_tools import register_custom_tools
