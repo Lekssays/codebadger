@@ -58,6 +58,37 @@ def guard_pool_memory(config, rec) -> None:
         config.joern.memory_budget_mb = safe_worker_mb
 
 
+# Non-heap memory (metaspace, code cache, thread stacks, OS) per build-frontend
+# JVM, on top of -Xmx. Matches the overhead the recommender budgets (recommend.py).
+BUILD_JVM_OVERHEAD_GB = 1
+
+
+def guard_build_concurrency(config, build_limit_mb) -> None:
+    """Clamp build_workers so concurrent build JVMs fit the build container's cap.
+
+    Builds run as `docker exec` into the single joern-server container, each a
+    `c2cpg`/`javasrc2cpg`/... JVM at `-Xmx{build_heap_gb}G`. Nothing previously
+    enforced that ``build_workers × build_heap`` stayed within that container's
+    memory limit, so an over-provisioned `CPG_BUILD_WORKERS` produced OOM-killed
+    builds (exit 137). Clamp it to what actually fits.
+    """
+    if not build_limit_mb or build_limit_mb <= 0:
+        return  # unknown container cap — can't guard
+    heap = max(1, int(getattr(config.cpg, "build_heap_gb", 6)))
+    per_build_mb = (heap + BUILD_JVM_OVERHEAD_GB) * 1024
+    max_workers = max(1, int(build_limit_mb) // per_build_mb)
+    current = int(getattr(config.cpg, "build_workers", 2))
+    if current > max_workers:
+        logger.warning(
+            f"Build over-commit guard: {current} build workers × "
+            f"({heap}+{BUILD_JVM_OVERHEAD_GB})GB = {current * per_build_mb}MB exceeds the build "
+            f"container cap {build_limit_mb}MB — OOM-killed builds would result. Clamping "
+            f"CPG_BUILD_WORKERS to {max_workers}. Raise JOERN_MEM_LIMIT (and recreate the "
+            f"container) or lower CPG_BUILD_HEAP_GB to regain build concurrency."
+        )
+        config.cpg.build_workers = max_workers
+
+
 def container_mem_limit_mb(joern_manager, container_name: str):
     """Actual mem_limit (MB) of the running build container, or None.
 
@@ -117,5 +148,15 @@ def apply_startup_tuning(config) -> None:
         # Joern budget so they can't jointly over-commit host RAM.
         if getattr(config.joern, "worker_mode", "shared") == "pool":
             guard_pool_memory(config, rec)
+        # In any mode, builds exec into the joern-server container; clamp build
+        # concurrency to what its memory cap can hold (prefer the live container's
+        # real limit, else the configured JOERN_MEM_LIMIT, else the recommendation).
+        container_name = os.getenv("JOERN_CONTAINER_NAME", "codebadger-joern-server")
+        build_limit_mb = (
+            container_mem_limit_mb(None, container_name)
+            or parse_mem_to_mb(os.getenv("JOERN_MEM_LIMIT"))
+            or (getattr(rec, "build_container_cap_gb", 0) or 0) * 1024
+        )
+        guard_build_concurrency(config, build_limit_mb)
     except Exception as e:
         logger.warning(f"Could not apply startup memory auto-tuning: {e}")

@@ -31,3 +31,40 @@ def test_guard_pool_memory_clamps_overcommit(monkeypatch):
     # build 90 GB + worker 50 GB > 100 GB budget -> worker clamped to 100-90=10 GB
     guard_pool_memory(config, rec)
     assert config.joern.memory_budget_mb == 10 * 1024
+
+
+# ── guard_build_concurrency (A3) ──────────────────────────────────────────────
+
+def _cfg(build_workers, build_heap_gb=6):
+    return types.SimpleNamespace(
+        cpg=types.SimpleNamespace(build_workers=build_workers, build_heap_gb=build_heap_gb)
+    )
+
+
+def test_guard_build_concurrency_clamps_overcommit():
+    from src.startup_tuning import guard_build_concurrency
+    cfg = _cfg(build_workers=4, build_heap_gb=6)  # 4 × (6+1) = 28 GB
+    guard_build_concurrency(cfg, build_limit_mb=24 * 1024)  # fits 24//7 = 3
+    assert cfg.cpg.build_workers == 3
+
+
+def test_guard_build_concurrency_leaves_safe_config_alone():
+    from src.startup_tuning import guard_build_concurrency
+    cfg = _cfg(build_workers=2, build_heap_gb=6)  # 2 × 7 = 14 GB <= 24
+    guard_build_concurrency(cfg, build_limit_mb=24 * 1024)
+    assert cfg.cpg.build_workers == 2
+
+
+def test_guard_build_concurrency_floors_at_one():
+    from src.startup_tuning import guard_build_concurrency
+    cfg = _cfg(build_workers=4, build_heap_gb=6)
+    guard_build_concurrency(cfg, build_limit_mb=4 * 1024)  # one build doesn't even fit
+    assert cfg.cpg.build_workers == 1
+
+
+def test_guard_build_concurrency_noop_when_cap_unknown():
+    from src.startup_tuning import guard_build_concurrency
+    cfg = _cfg(build_workers=8, build_heap_gb=6)
+    guard_build_concurrency(cfg, build_limit_mb=None)
+    guard_build_concurrency(cfg, build_limit_mb=0)
+    assert cfg.cpg.build_workers == 8  # unchanged
