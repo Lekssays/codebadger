@@ -359,6 +359,44 @@ def _estimate_processing_time(source_path: str, language: str, has_cpg: bool = F
             return "~30-90 seconds (CPG generation + server loading)"
 
 
+# Strong refs to in-flight fire-and-forget warm-up futures so they aren't GC'd
+# before they finish (asyncio only weakly references bare tasks/futures).
+_warmup_tasks: set = set()
+
+
+def _schedule_warmup(services: dict, codebase_hash: str) -> None:
+    """Warm the query cache OFF the build-worker critical path (fire-and-forget).
+
+    The CPG is marked READY and is fully queryable before this runs, so warm-up
+    is a best-effort cache optimization. Awaiting it inline pinned a build worker
+    (and an executor thread) for the serial cost of several heavy queries before
+    it could claim the next build, throttling generation throughput. Schedule it
+    on the loop and return immediately; the per-codebase query lock serializes it
+    against any real user query that arrives in the meantime.
+    """
+    if "code_browsing_service" not in services:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return  # no running loop (e.g. a sync test) — skip warm-up
+    logger.info(f"Scheduling background cache warm-up for {codebase_hash}")
+    fut = loop.run_in_executor(
+        None, services["code_browsing_service"].warm_up_cache, codebase_hash
+    )
+    _warmup_tasks.add(fut)
+
+    def _done(f) -> None:
+        _warmup_tasks.discard(f)
+        exc = None if f.cancelled() else f.exception()
+        if exc is not None:
+            logger.warning(f"Background cache warm-up failed for {codebase_hash}: {exc}")
+        else:
+            logger.info(f"Background cache warm-up complete for {codebase_hash}")
+
+    fut.add_done_callback(_done)
+
+
 async def _restart_server_async(
     codebase_hash: str,
     container_cpg_path: str,
@@ -407,14 +445,9 @@ async def _restart_server_async(
             metadata={"status": SessionStatus.READY}
         )
 
-        if "code_browsing_service" in services:
-            logger.info(f"Async: starting cache warm-up for {codebase_hash}")
-            try:
-                loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, services["code_browsing_service"].warm_up_cache, codebase_hash)
-                logger.info(f"Async: cache warm-up complete for {codebase_hash}")
-            except Exception as e:
-                logger.warning(f"Async: cache warm-up failed for {codebase_hash}: {e}")
+        # Fire-and-forget so the restart returns promptly; warm-up runs in the
+        # background (the CPG is already READY and queryable).
+        _schedule_warmup(services, codebase_hash)
 
         logger.info(f"Async: server restart complete for {codebase_hash}")
     except Exception as e:
@@ -647,15 +680,10 @@ async def _generate_cpg_async(
         
         logger.info(f"CPG generation complete for {codebase_hash}, port: {joern_port}")
 
-        if "code_browsing_service" in services:
-            logger.info(f"Starting cache warm-up for {codebase_hash}")
-            try:
-                loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, services["code_browsing_service"].warm_up_cache, codebase_hash)
-                logger.info(f"Cache warm-up complete for {codebase_hash}")
-            except Exception as e:
-                logger.error(f"Cache warm-up failed for {codebase_hash}: {e}")
-        
+        # Fire-and-forget: the CPG is already marked READY above, so the build
+        # worker can claim its next job without waiting on warm-up queries.
+        _schedule_warmup(services, codebase_hash)
+
     except Exception as e:
         logger.error(f"Error in async CPG generation for {codebase_hash}: {e}", exc_info=True)
         try:

@@ -447,33 +447,26 @@ class CodeBrowsingService:
         return self._get_cached_or_execute("find_literals", codebase_hash, cache_params, execute_query)
 
     def warm_up_cache(self, codebase_hash: str):
-        """Run default queries to warm up the cache in parallel"""
+        """Run default queries to warm the cache.
+
+        These all target the same CPG, so they serialize on the per-codebase
+        query lock regardless — the old ThreadPoolExecutor was false parallelism
+        (5 threads idling on the lock). Run them sequentially; a failing query is
+        logged and skipped so it doesn't abort the rest. Callers run this off the
+        build-worker critical path (see core_tools._schedule_warmup).
+        """
         logger.info(f"Warming up cache for codebase {codebase_hash}")
-        
-        import concurrent.futures
-        
         tasks = [
-            (self.list_methods, [codebase_hash]),
-            (self.list_files, [codebase_hash]),
-            (self.list_calls, [codebase_hash]),
-            (self.list_parameters, [codebase_hash]),
-            (self.find_literals, [codebase_hash])
+            self.list_methods,
+            self.list_files,
+            self.list_calls,
+            self.list_parameters,
+            self.find_literals,
         ]
-        
-        try:
-            # Use ThreadPoolExecutor to run queries in parallel
-            # We use 5 workers since we have 5 distinct tasks
-            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-                futures = {executor.submit(func, *args): func.__name__ for func, args in tasks}
-                
-                for future in concurrent.futures.as_completed(futures):
-                    func_name = futures[future]
-                    try:
-                        future.result()
-                        logger.info(f"Cache warm-up task {func_name} completed for {codebase_hash}")
-                    except Exception as e:
-                        logger.error(f"Cache warm-up task {func_name} failed for {codebase_hash}: {e}")
-            
-            logger.info(f"Cache warm-up complete for {codebase_hash}")
-        except Exception as e:
-            logger.error(f"Error during cache warm-up for {codebase_hash}: {e}")
+        for func in tasks:
+            try:
+                func(codebase_hash)
+                logger.info(f"Cache warm-up task {func.__name__} completed for {codebase_hash}")
+            except Exception as e:
+                logger.error(f"Cache warm-up task {func.__name__} failed for {codebase_hash}: {e}")
+        logger.info(f"Cache warm-up complete for {codebase_hash}")
