@@ -10,6 +10,7 @@ import types
 import pytest
 
 from src.config import load_config
+from src.models import SessionStatus
 from src.services.joern_server_manager import JoernServerManager
 from src.utils.recommend import tier_for_cpg_size_gb
 
@@ -101,3 +102,100 @@ def test_legacy_count_cap_when_budget_disabled():
     evicted = _stub_evict(m)
     m._make_room(0)  # at the count cap (2 >= 2) -> evict exactly one
     assert len(evicted) == 1
+
+
+# --- Redis pool: container teardown is deferred off the admit lock (HIGH-1) ---
+
+
+class _FakeRedisPool:
+    """In-memory stand-in for RedisPoolStore exercising the make-room ledger."""
+
+    def __init__(self):
+        self.resv = {}        # hash -> reserved MB
+        self.reg = {}         # hash -> host port
+        self.workers = {}     # hash -> container name
+        self.lru = []         # hashes, oldest first
+
+    def seed(self, h, mb, port):
+        self.resv[h] = mb
+        self.reg[h] = port
+        self.workers[h] = f"codebadger-joern-{h}"
+        self.lru.append(h)
+
+    def total_reserved_mb(self):
+        return sum(self.resv.values())
+
+    def oldest(self, exclude=()):
+        excl = set(exclude)
+        for h in self.lru:
+            if h not in excl and h in self.resv:
+                return h
+        return None
+
+    def allocate_port(self, pmin, pmax):
+        taken = set(self.reg.values())
+        for p in range(pmin, pmax + 1):
+            if p not in taken:
+                return p
+        return None
+
+    def get_worker(self, h):
+        return self.workers.get(h)
+
+    def release(self, h):
+        self.resv.pop(h, None)
+        self.reg.pop(h, None)
+        self.workers.pop(h, None)
+        if h in self.lru:
+            self.lru.remove(h)
+
+
+def test_redis_make_room_frees_ledger_but_defers_container_teardown(manager, monkeypatch):
+    """The Redis make-room loop must release the ledger (so the loop sees
+    reclaimed capacity) WITHOUT removing containers under the admit lock."""
+    rp = _FakeRedisPool()
+    manager._redis_pool = rp
+    manager._memory_budget_mb = 20480  # 20 GB
+    pmin = manager.port_manager.port_min
+    for i, h in enumerate(["a", "b", "c"]):  # 3 x 8 GB = 24 GB reserved
+        rp.seed(h, 8192, pmin + i)
+
+    removed = []
+    monkeypatch.setattr(manager, "_remove_worker_container", lambda name: removed.append(name))
+
+    victims = manager._make_room(8192)  # need another 8 GB
+
+    # Evicted a then b (24+8>20 -> 16+8>20 -> 8+8<=20), returning them to reap.
+    assert [h for h, _ in victims] == ["a", "b"]
+    assert [n for _, n in victims] == ["codebadger-joern-a", "codebadger-joern-b"]
+    # Ledger reclaimed: only c (8 GB) remains, so the new 8 GB fits the budget.
+    assert rp.total_reserved_mb() == 8192
+    assert "a" not in rp.resv and "b" not in rp.resv
+    # ...but NO container was torn down under the lock — that is deferred.
+    assert removed == []
+
+
+def test_reap_evicted_removes_containers_and_marks_sleeping(manager, monkeypatch):
+    removed = []
+    monkeypatch.setattr(manager, "_remove_worker_container", lambda name: removed.append(name))
+    updates = []
+    manager.codebase_tracker = types.SimpleNamespace(
+        update_codebase=lambda h, **kw: updates.append((h, kw))
+    )
+
+    manager._reap_evicted([("a", "codebadger-joern-a"), ("b", "codebadger-joern-b")])
+
+    assert removed == ["codebadger-joern-a", "codebadger-joern-b"]
+    assert [h for h, _ in updates] == ["a", "b"]
+    assert all(kw["metadata"]["status"] == SessionStatus.SLEEPING for _, kw in updates)
+
+
+def test_reap_evicted_continues_when_one_removal_fails(manager, monkeypatch):
+    def _remove(name):
+        if name == "codebadger-joern-a":
+            raise RuntimeError("docker boom")
+
+    monkeypatch.setattr(manager, "_remove_worker_container", _remove)
+    manager.codebase_tracker = None
+    # Must not raise even though the first removal failed.
+    manager._reap_evicted([("a", "codebadger-joern-a"), ("b", "codebadger-joern-b")])

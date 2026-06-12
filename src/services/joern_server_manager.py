@@ -216,6 +216,73 @@ class JoernServerManager:
             except Exception as e:
                 logger.warning(f"Failed to update sleeping status for {codebase_hash}: {e}")
 
+    def _evict_ledger(self, codebase_hash: str) -> Tuple[str, str]:
+        """Free a victim's ledger + local state WITHOUT the blocking Docker
+        teardown; return ``(codebase_hash, container_name)`` to remove later.
+
+        Redis make-room only. Releasing the reservation/port in the shared ledger
+        here (fast Redis ops) lets the make-room loop see reclaimed capacity
+        immediately, while the slow ``docker remove --force`` is deferred to
+        ``_reap_evicted`` off the global admit lock (HIGH-1: a container teardown
+        under that lock serializes every process's admission on Docker I/O).
+        """
+        rp = self._redis_pool
+        # Resolve the container name before we drop the registry entry.
+        name = (
+            self._worker_containers.get(codebase_hash)
+            or (rp.get_worker(codebase_hash) if rp else None)
+            or self._worker_name(codebase_hash)
+        )
+        # Free the shared ledger (reservation + port + worker + LRU) so the loop's
+        # budget/port checks see the reclaimed capacity. Idempotent.
+        if rp:
+            rp.release(codebase_hash)
+        with self._state_lock:
+            self._exec_ids.pop(codebase_hash, None)
+            self._ports.pop(codebase_hash, None)
+            self._reservations.pop(codebase_hash, None)
+            self._worker_containers.pop(codebase_hash, None)
+            self._lru.pop(codebase_hash, None)
+            self._last_touch.pop(codebase_hash, None)
+            self._lru_eviction_count += 1
+            # Local PortManager isn't the allocation authority in Redis mode, but
+            # release defensively in case this hash was ever locally tracked.
+            if self.port_manager.get_port(codebase_hash) is not None:
+                self.port_manager.release_port(codebase_hash)
+        # Drop the cached HTTP client; its worker is going away.
+        client = self._clients.pop(codebase_hash, None)
+        if client:
+            try:
+                client.close()
+            except Exception as e:
+                logger.warning(f"Error closing HTTP session for {codebase_hash}: {e}")
+        return codebase_hash, name
+
+    def _reap_evicted(self, victims: list) -> None:
+        """Tear down ledger-evicted victims' containers, OFF the admit lock.
+
+        Called after ``_spawn_server_redis`` drops the global admit lock so the
+        blocking ``docker remove --force`` doesn't serialize other processes'
+        admissions, and before the new worker publishes its port so the host port
+        is guaranteed free. Marks each codebase SLEEPING once its container is
+        gone. Best-effort; a failure here doesn't abort the spawn.
+        """
+        for codebase_hash, name in victims:
+            try:
+                self._remove_worker_container(name)
+                logger.info(f"Reaped evicted worker {name} ({codebase_hash})")
+            except Exception as e:
+                logger.warning(f"Failed to reap evicted worker {name}: {e}")
+            if self.codebase_tracker:
+                try:
+                    self.codebase_tracker.update_codebase(
+                        codebase_hash,
+                        joern_port=None,
+                        metadata={"status": SessionStatus.SLEEPING},
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to update sleeping status for {codebase_hash}: {e}")
+
     def _evict_under_rss_pressure(self) -> None:
         """Evict the LRU server if container RSS is over the configured threshold.
 
@@ -237,7 +304,7 @@ class JoernServerManager:
             )
             self._evict(lru_hash)
 
-    def _make_room(self, needed_mb: int) -> None:
+    def _make_room(self, needed_mb: int) -> list:
         """Evict servers so a new ``needed_mb`` reservation can be admitted.
 
         Memory mode (budget > 0): evict LRU until the reservation fits the
@@ -245,37 +312,47 @@ class JoernServerManager:
         (budget == 0): the original count-based single eviction. Both then apply
         the RSS-pressure backstop.
 
+        Returns a list of ``(codebase_hash, container_name)`` victims whose
+        *ledger* entries were freed but whose containers still need removing — the
+        Redis caller reaps them via ``_reap_evicted`` AFTER dropping the admit
+        lock. The non-Redis branches evict synchronously and return ``[]``.
+
         Locking: the local (non-Redis) branch reads in-process state and must be
-        called with ``_state_lock`` held. The Redis branch is serialized across
-        processes by the caller's Redis admit lock; its eviction mutates local
-        state only via ``_evict``, which takes ``_state_lock`` itself.
+        called with ``_state_lock`` held; it evicts synchronously via ``_evict``.
+        The Redis branch is serialized across processes by the caller's Redis
+        admit lock. Crucially it does NOT do the blocking ``docker remove`` under
+        that lock — that would serialize every process's admission on Docker I/O
+        (HIGH-1). ``_evict_ledger`` frees the shared ledger entry (so the loop
+        sees reclaimed capacity immediately) and defers the container teardown to
+        the caller, off the lock.
         """
         if self._redis_pool:
             # Multi-process: evict from the GLOBAL ledger/LRU. Caller holds the
             # Redis admit lock, so make-room + allocate + reserve are atomic
-            # across processes. Eviction tears down whichever worker is globally
-            # oldest, even if another process spawned it.
+            # across processes. Eviction frees the ledger for whichever worker is
+            # globally oldest, even if another process spawned it.
             rp = self._redis_pool
             pmin, pmax = self.port_manager.port_min, self.port_manager.port_max
-            # Track victims we've already evicted this call. _evict purges the
-            # shared ledger, but excluding seen hashes is a belt-and-suspenders
+            # Track victims we've already evicted this call. _evict_ledger purges
+            # the shared ledger, but excluding seen hashes is a belt-and-suspenders
             # against a Redis hiccup leaving an entry behind: never re-pick the
             # same victim, so the loop always terminates.
             seen: set[str] = set()
+            evicted: list = []
             if self._memory_budget_mb > 0:
                 while rp.total_reserved_mb() + needed_mb > self._memory_budget_mb:
                     victim = rp.oldest(exclude=seen)
                     if not victim:
                         break
                     seen.add(victim)
-                    self._evict(victim)
+                    evicted.append(self._evict_ledger(victim))
             while rp.allocate_port(pmin, pmax) is None:
                 victim = rp.oldest(exclude=seen)
                 if not victim:
                     break
                 seen.add(victim)
-                self._evict(victim)
-            return
+                evicted.append(self._evict_ledger(victim))
+            return evicted
 
         if self._memory_budget_mb > 0:
             # Memory governs admission — not a fixed server count — so a batch of
@@ -297,12 +374,13 @@ class JoernServerManager:
                 logger.info(f"Port pool exhausted — evicting LRU {lru_hash} to free a port")
                 self._evict(lru_hash)
             self._evict_under_rss_pressure()
-            return
+            return []
 
         # Legacy count-based behavior.
         if len(self._ports) >= self._max_active and self._lru:
             self._evict(next(iter(self._lru)))
         self._evict_under_rss_pressure()
+        return []
 
     # heap sizing (B?)
 
@@ -405,15 +483,24 @@ class JoernServerManager:
                 self.terminate_server(codebase_hash)
 
             heap_gb, reserve_mb = self._plan_server(codebase_hash)
-            with rp.admit_lock():
-                self._make_room(reserve_mb)
-                port = rp.allocate_port(self.port_manager.port_min, self.port_manager.port_max)
-                if port is None:
-                    raise RuntimeError("No free worker ports available")
-                # Reserve + register port + touch LRU as ONE transaction so a
-                # crash here can't leave a half-claimed (reserved-but-unregistered)
-                # entry that make-room would spin on.
-                rp.claim(codebase_hash, port, reserve_mb)
+            pending_kills: list = []
+            try:
+                with rp.admit_lock():
+                    pending_kills = self._make_room(reserve_mb)
+                    port = rp.allocate_port(self.port_manager.port_min, self.port_manager.port_max)
+                    if port is None:
+                        raise RuntimeError("No free worker ports available")
+                    # Reserve + register port + touch LRU as ONE transaction so a
+                    # crash here can't leave a half-claimed (reserved-but-unregistered)
+                    # entry that make-room would spin on.
+                    rp.claim(codebase_hash, port, reserve_mb)
+            finally:
+                # Reap evicted victims' containers HERE, off the admit lock and
+                # whether or not we got a port: _make_room already freed their
+                # ledger entries, so the containers must be removed regardless to
+                # avoid orphans. Doing it before the publish below also guarantees
+                # the host port is free when the new worker binds it.
+                self._reap_evicted(pending_kills)
 
             java_opts = self._java_opts_for(heap_gb)
             logger.info(
