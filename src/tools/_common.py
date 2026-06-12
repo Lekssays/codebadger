@@ -7,12 +7,22 @@ modules (and had drifted), so they live here as single sources of truth.
 """
 
 import logging
-# (no typing imports needed)
+from typing import Optional
 
 from ..exceptions import ValidationError
 from ..utils.validators import validate_codebase_hash
 
 logger = logging.getLogger(__name__)
+
+# Prefixes a string-returning tool uses to signal failure. Centralized so the
+# cache layer (which must not cache failures) stays in lock-step with the tools
+# that emit these strings (unwrap_result, the tool try/except handlers).
+ERROR_PREFIXES = ("Error:", "Validation Error:", "Internal Error:")
+
+
+def is_error_output(text) -> bool:
+    """True if a string tool result is an error sentinel (so: don't cache it)."""
+    return isinstance(text, str) and text.startswith(ERROR_PREFIXES)
 
 
 def require_cpg(services: dict, codebase_hash: str):
@@ -46,3 +56,57 @@ def unwrap_result(result) -> str:
         first = data[0]
         return first.strip() if isinstance(first, str) else str(first)
     return f"Query returned unexpected format: {type(data)}"
+
+
+def run_query(
+    services: dict,
+    codebase_hash: str,
+    cpg_path: str,
+    query: str,
+    *,
+    timeout: int = 60,
+    tool_name: Optional[str] = None,
+    cache_params: Optional[dict] = None,
+) -> str:
+    """Execute a rendered CPGQL query (with optional DB caching) and return text.
+
+    Returns the extracted <codebadger_result> text. Raises RuntimeError on query
+    failure — callers that want a string-returning tool catch (ValidationError,
+    RuntimeError). Used by the custom tools; the taint tools use their own
+    cache wrapper (_cached_taint_query) instead.
+    """
+    db = services.get("db_manager")
+
+    if tool_name and cache_params is not None and db:
+        try:
+            cached = db.get_cached_tool_output(tool_name, codebase_hash, cache_params)
+        except Exception:
+            cached = None
+        if cached is not None:
+            logger.debug(f"Cache hit for {tool_name}")
+            return cached
+
+    result = services["query_executor"].execute_query(
+        codebase_hash=codebase_hash,
+        cpg_path=cpg_path,
+        query=query,
+        timeout=timeout,
+    )
+
+    if not result.success:
+        raise RuntimeError(result.error or "Query failed")
+
+    if isinstance(result.data, str):
+        output = result.data.strip()
+    elif isinstance(result.data, list) and len(result.data) > 0:
+        output = result.data[0].strip() if isinstance(result.data[0], str) else str(result.data[0])
+    else:
+        output = str(result.data)
+
+    if tool_name and cache_params is not None and db:
+        try:
+            db.cache_tool_output(tool_name, codebase_hash, cache_params, output)
+        except Exception:
+            pass
+
+    return output

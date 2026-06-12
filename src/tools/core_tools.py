@@ -1043,6 +1043,7 @@ Examples:
                 size_mb, loc = await asyncio.to_thread(_scan_repo, resolved)
                 if size_mb > max_mb or loc > max_loc:
                     return {
+                        "success": True,  # no error; an informational soft-decline
                         "status": "large_project_warning",
                         "size_mb": size_mb,
                         "lines_of_code": loc,
@@ -1082,6 +1083,7 @@ Examples:
                     # can decide whether to regenerate (delete the CPG and call again).
                     logger.warning(f"Codebase {codebase_hash} has a failed CPG — returning failed status")
                     return {
+                        "success": False,
                         "codebase_hash": codebase_hash,
                         "status": SessionStatus.FAILED,
                         "message": existing_codebase.metadata.get("error", "Previous CPG generation or load failed."),
@@ -1107,6 +1109,7 @@ Examples:
 
                 if server_running:
                     return {
+                        "success": True,
                         "codebase_hash": codebase_hash,
                         "status": SessionStatus.READY,
                         "message": "CPG already exists and Joern server is running.",
@@ -1126,6 +1129,7 @@ Examples:
                         )
                         estimate = _estimate_processing_time(codebase_dir, existing_codebase.language, has_cpg=True)
                         return {
+                            "success": True,
                             "codebase_hash": codebase_hash,
                             "status": SessionStatus.LOADING,
                             "message": (
@@ -1165,6 +1169,7 @@ Examples:
                     estimate = _estimate_processing_time(codebase_dir, existing_codebase.language, has_cpg=True)
 
                     return {
+                        "success": True,
                         "codebase_hash": codebase_hash,
                         "status": SessionStatus.LOADING,
                         "message": (
@@ -1293,12 +1298,14 @@ Examples:
                 submit_result = await cpg_queue.submit(codebase_hash, job)
                 if submit_result == CPGGenerationQueue.DUPLICATE:
                     return {
+                        "success": True,
                         "codebase_hash": codebase_hash,
                         "status": SessionStatus.GENERATING,
                         "message": "CPG build already in progress for this codebase.",
                     }
                 if submit_result == CPGGenerationQueue.QUEUE_FULL:
                     return {
+                        "success": False,
                         "codebase_hash": codebase_hash,
                         "status": "queue_full",
                         "message": "CPG generation queue is full. Try again shortly.",
@@ -1309,6 +1316,7 @@ Examples:
             estimate = _estimate_processing_time(codebase_dir, language, has_cpg=False)
 
             return {
+                "success": True,
                 "codebase_hash": codebase_hash,
                 "status": SessionStatus.GENERATING,
                 "message": f"CPG generation started in background. Estimated time: {estimate}. Use get_cpg_status to check progress.",

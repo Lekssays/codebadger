@@ -5,7 +5,7 @@ import types
 import pytest
 
 from src.exceptions import ValidationError
-from src.tools._common import require_cpg, unwrap_result
+from src.tools._common import require_cpg, unwrap_result, is_error_output, ERROR_PREFIXES
 
 
 def _services(info):
@@ -53,3 +53,20 @@ def test_unwrap_result_list_first_element():
 def test_unwrap_result_unexpected_format():
     out = unwrap_result(_Result(True, data={"k": 1}))
     assert "unexpected format" in out
+
+
+@pytest.mark.parametrize("prefix", ERROR_PREFIXES)
+def test_is_error_output_detects_each_prefix(prefix):
+    assert is_error_output(f"{prefix} something went wrong")
+
+
+def test_is_error_output_false_for_normal_output():
+    assert not is_error_output("<codebadger_result>\nFound 3 issues\n</codebadger_result>")
+    assert not is_error_output("")
+    assert not is_error_output(None)
+
+
+def test_unwrap_failure_is_recognized_as_error_output():
+    # The cache layer must treat a unwrap_result failure as non-cacheable.
+    failed = unwrap_result(_Result(False, error="boom"))
+    assert is_error_output(failed)

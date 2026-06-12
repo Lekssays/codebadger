@@ -15,7 +15,7 @@ from ..utils.query_rendering import escape_scala_string
 from ..utils.validators import clamp_int, validate_codebase_hash
 from ..defaults import MAX_RESULT_ROWS
 from .queries import QueryLoader
-from ._common import require_cpg, unwrap_result
+from ._common import require_cpg, unwrap_result, is_error_output
 
 logger = logging.getLogger(__name__)
 
@@ -281,7 +281,7 @@ def _cached_taint_query(
             should_cache = False
             if isinstance(result, dict) and result.get("success", False):
                 should_cache = True
-            elif isinstance(result, str) and not result.startswith(("Error:", "Validation Error:", "Internal Error:")):
+            elif isinstance(result, str) and not is_error_output(result):
                 should_cache = True
 
             if should_cache:
