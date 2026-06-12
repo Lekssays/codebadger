@@ -60,6 +60,7 @@ def load_config(config_path: Optional[str] = None) -> Config:
                 idle_ttl_seconds=int(os.getenv("JOERN_IDLE_TTL_SECONDS", str(defaults.JOERN_IDLE_TTL_SECONDS))),
                 reaper_interval_seconds=int(os.getenv("JOERN_REAPER_INTERVAL_SECONDS", str(defaults.JOERN_REAPER_INTERVAL_SECONDS))),
                 verify_timeout_seconds=int(os.getenv("JOERN_VERIFY_TIMEOUT_SECONDS", str(defaults.JOERN_VERIFY_TIMEOUT_SECONDS))),
+                load_max_attempts=int(os.getenv("JOERN_LOAD_MAX_ATTEMPTS", str(defaults.JOERN_LOAD_MAX_ATTEMPTS))),
                 worker_mode=os.getenv("JOERN_WORKER_MODE", defaults.JOERN_WORKER_MODE),
                 worker_image=os.getenv("JOERN_WORKER_IMAGE", defaults.JOERN_WORKER_IMAGE),
                 worker_internal_port=int(os.getenv("JOERN_WORKER_INTERNAL_PORT", str(defaults.JOERN_WORKER_INTERNAL_PORT))),

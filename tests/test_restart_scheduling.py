@@ -72,8 +72,7 @@ def test_schedule_returns_false_when_no_loop_available(monkeypatch):
 @pytest.mark.asyncio
 async def test_restart_marks_failed_when_reload_fails():
     mgr = MagicMock()
-    mgr.spawn_server.return_value = 14000
-    mgr.load_cpg.return_value = False  # reload fails
+    mgr.reload_with_retry.return_value = None  # reload fails after all retries
     tracker = MagicMock()
     services = {"joern_server_manager": mgr, "codebase_tracker": tracker}
 
@@ -92,8 +91,7 @@ async def test_restart_marks_failed_when_reload_fails():
 @pytest.mark.asyncio
 async def test_restart_marks_ready_when_reload_succeeds():
     mgr = MagicMock()
-    mgr.spawn_server.return_value = 14000
-    mgr.load_cpg.return_value = True
+    mgr.reload_with_retry.return_value = 14000
     tracker = MagicMock()
     services = {"joern_server_manager": mgr, "codebase_tracker": tracker}
 

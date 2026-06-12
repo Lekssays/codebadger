@@ -414,19 +414,16 @@ async def _restart_server_async(
 
         logger.info(f"Async: starting Joern server for {codebase_hash}")
         loop = asyncio.get_running_loop()
+        # reload_with_retry spawns + loads, retrying transient failures (each
+        # re-spawning) before giving up; an empty/broken build is not retried.
         joern_port = await loop.run_in_executor(
-            None, joern_server_manager.spawn_server, codebase_hash
+            None, joern_server_manager.reload_with_retry, codebase_hash, container_cpg_path
         )
-        logger.info(f"Async: Joern server started on port {joern_port}, loading CPG...")
-
-        loaded = await loop.run_in_executor(
-            None, joern_server_manager.load_cpg, codebase_hash, container_cpg_path
-        )
-        if not loaded:
-            # The reload failed (load_cpg already terminated the server). Mark
-            # FAILED so we don't leave a "ready" codebase whose server is dead —
-            # that caused the restart-fail churn (server not running for ready
-            # codebase -> retry -> fail -> repeat).
+        if not joern_port:
+            # The reload failed after all retries (the server was already
+            # terminated). Mark FAILED so we don't leave a "ready" codebase whose
+            # server is dead — that caused the restart-fail churn (server not
+            # running for ready codebase -> retry -> fail -> repeat).
             logger.error(f"Async: CPG reload failed for {codebase_hash}; marking failed")
             codebase_tracker.update_codebase(
                 codebase_hash=codebase_hash,
@@ -637,17 +634,14 @@ async def _generate_cpg_async(
         joern_port = None
         if joern_server_manager:
             try:
-                logger.info(f"Spawning Joern server for {codebase_hash}")
+                logger.info(f"Spawning Joern server and loading CPG for {codebase_hash}")
+                # reload_with_retry spawns + loads, retrying transient first-load
+                # failures so a freshly-built CPG isn't condemned by a momentary
+                # stall under host pressure; an empty build is not retried.
                 joern_port = await loop.run_in_executor(
-                    None, joern_server_manager.spawn_server, codebase_hash
+                    None, joern_server_manager.reload_with_retry, codebase_hash, container_cpg_path
                 )
-                logger.info(f"Joern server started on port {joern_port}")
-
-                # Load CPG using the container path, not the host path
-                loaded = await loop.run_in_executor(
-                    None, joern_server_manager.load_cpg, codebase_hash, container_cpg_path
-                )
-                if loaded:
+                if joern_port:
                     logger.info(f"CPG loaded into Joern server on port {joern_port}")
                 else:
                     logger.warning("Failed to load CPG into Joern server")

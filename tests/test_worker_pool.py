@@ -234,3 +234,60 @@ def test_shared_mode_does_not_touch_worker_containers(monkeypatch):
     assert m.worker_mode == "shared"
     assert (m.port_manager.port_min, m.port_manager.port_max) == (13371, 13870)
     fake.containers.list.assert_not_called()  # no orphan sweep in shared mode
+
+
+# ── reload_with_retry: transient retried, empty not (A2) ──────────────────────
+
+def test_reload_with_retry_retries_transient_then_succeeds(pool, monkeypatch):
+    m, _ = pool
+    monkeypatch.setattr(jsm.time, "sleep", lambda *_: None)  # no backoff delay
+    spawns = []
+    monkeypatch.setattr(m, "spawn_server", lambda h: (spawns.append(h) or 14000))
+
+    calls = {"n": 0}
+
+    def fake_load(h, cpg_path, timeout=0):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            m._last_load_cause = "error"  # transient
+            return False
+        m._last_load_cause = "ok"
+        return True
+
+    monkeypatch.setattr(m, "load_cpg", fake_load)
+    port = m.reload_with_retry("abc", "/playground/cpgs/abc/cpg.bin")
+    assert port == 14000
+    assert len(spawns) == 3  # re-spawned each retry
+
+
+def test_reload_with_retry_does_not_retry_empty_build(pool, monkeypatch):
+    from src.services.joern_client import JoernServerClient
+    m, _ = pool
+    monkeypatch.setattr(jsm.time, "sleep", lambda *_: None)
+    spawns = []
+    monkeypatch.setattr(m, "spawn_server", lambda h: (spawns.append(h) or 14000))
+
+    def fake_load(h, cpg_path, timeout=0):
+        m._last_load_cause = JoernServerClient._VERIFY_EMPTY
+        return False
+
+    monkeypatch.setattr(m, "load_cpg", fake_load)
+    port = m.reload_with_retry("abc", "/playground/cpgs/abc/cpg.bin")
+    assert port is None
+    assert len(spawns) == 1  # empty build is never retried
+
+
+def test_reload_with_retry_gives_up_after_max_attempts(pool, monkeypatch):
+    m, _ = pool
+    monkeypatch.setattr(jsm.time, "sleep", lambda *_: None)
+    spawns = []
+    monkeypatch.setattr(m, "spawn_server", lambda h: (spawns.append(h) or 14000))
+
+    def fake_load(h, cpg_path, timeout=0):
+        m._last_load_cause = "error"
+        return False
+
+    monkeypatch.setattr(m, "load_cpg", fake_load)
+    port = m.reload_with_retry("abc", "/playground/cpgs/abc/cpg.bin")
+    assert port is None
+    assert len(spawns) == m.config.joern.load_max_attempts

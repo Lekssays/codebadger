@@ -83,6 +83,10 @@ class JoernServerManager:
             self._max_active = 3
         self._lru: OrderedDict[str, None] = OrderedDict()
         self._lru_eviction_count: int = 0
+        # Cause of the most recent load_cpg() (a JoernServerClient._VERIFY_* value
+        # or "error"), captured before the server is torn down so reload_with_retry
+        # can skip retrying a genuinely empty build.
+        self._last_load_cause: Optional[str] = None
 
         # Memory-aware admission. When _memory_budget_mb > 0, servers
         # are admitted while the sum of per-CPG heap reservations stays under the
@@ -760,11 +764,46 @@ class JoernServerManager:
         except Exception as e:
             logger.warning(f"Could not read server log for {codebase_hash}: {e}", exc_info=True)
 
+    def reload_with_retry(self, codebase_hash: str, cpg_path: str) -> Optional[int]:
+        """Spawn + load an existing cpg.bin, retrying transient load failures.
+
+        Each failed load terminates the server, so every retry re-spawns. A
+        transient cause (timeout, connection error, no-project race) is retried up
+        to ``load_max_attempts``; a genuinely empty/broken build
+        (``_VERIFY_EMPTY``) is never retried — reloading it can't help. Returns the
+        serving port on success, or ``None`` if all attempts failed.
+        """
+        from .joern_client import JoernServerClient
+
+        max_attempts = max(1, self.config.joern.load_max_attempts if self.config else 3)
+        for attempt in range(1, max_attempts + 1):
+            port = self.spawn_server(codebase_hash)
+            if self.load_cpg(codebase_hash, cpg_path):
+                if attempt > 1:
+                    logger.info(f"CPG reload for {codebase_hash} succeeded on attempt {attempt}")
+                return port
+            cause = self._last_load_cause
+            if cause == JoernServerClient._VERIFY_EMPTY:
+                logger.error(
+                    f"CPG for {codebase_hash} is empty/broken (not a transient "
+                    f"failure) — not retrying reload"
+                )
+                return None
+            if attempt < max_attempts:
+                logger.warning(
+                    f"Transient CPG load failure for {codebase_hash} "
+                    f"(cause={cause}, attempt {attempt}/{max_attempts}) — re-spawning and retrying"
+                )
+                time.sleep(min(2.0 * attempt, 10.0))  # linear backoff, capped
+        logger.error(f"CPG reload for {codebase_hash} failed after {max_attempts} attempts")
+        return None
+
     def reactivate(self, codebase_hash: str, cpg_path: str) -> int:
         """Spawn a fresh Joern process and load the existing CPG binary (no regeneration)."""
         logger.info(f"Reactivating sleeping codebase {codebase_hash}")
-        port = self.spawn_server(codebase_hash)
-        self.load_cpg(codebase_hash, cpg_path)
+        port = self.reload_with_retry(codebase_hash, cpg_path)
+        if port is None:
+            raise RuntimeError(f"Failed to reload CPG for {codebase_hash} during reactivation")
         if self.codebase_tracker:
             try:
                 self.codebase_tracker.update_codebase(
@@ -840,6 +879,9 @@ class JoernServerManager:
             )
 
             success = client.load_cpg(container_cpg_path, project_name=codebase_hash, timeout=timeout)
+            # Capture the failure cause BEFORE terminate_server drops the client,
+            # so reload_with_retry can tell a transient miss from an empty build.
+            self._last_load_cause = getattr(client, "last_load_outcome", None)
 
             if success:
                 logger.info(f"CPG loaded successfully for {codebase_hash}")
@@ -858,6 +900,8 @@ class JoernServerManager:
 
         except Exception as e:
             logger.error(f"Error loading CPG for {codebase_hash}: {e}")
+            # A manager-level error (no server, network) is transient, not empty.
+            self._last_load_cause = "error"
             self.terminate_server(codebase_hash)
             return False
 

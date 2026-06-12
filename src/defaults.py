@@ -226,6 +226,12 @@ JOERN_REAPER_INTERVAL_SECONDS = 60
 # valid CPGs as failed/empty during load. The probe is still polled and the total
 # verify time is bounded by the load_cpg timeout, so this only sets the per-poll cap.
 JOERN_VERIFY_TIMEOUT_SECONDS = 60
+# How many times to (re-spawn and) reload an existing cpg.bin from disk before
+# marking a codebase permanently failed. A transient stall (host CPU/memory
+# pressure) during reactivation used to fail the codebase on the first miss even
+# though the CPG was valid on disk; a few bounded retries reclaim it without
+# regenerating. A genuinely empty/broken build is never retried.
+JOERN_LOAD_MAX_ATTEMPTS = 3
 
 # MCP connection concurrency limit
 MAX_MCP_CONNECTIONS = 16

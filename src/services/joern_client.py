@@ -61,6 +61,11 @@ class JoernServerClient:
         self.base_url = f"http://{host}:{port}"
         self.auth = (username, password) if username and password else None
         self.config = config or {}
+        # Cause of the most recent load_cpg() (one of the _VERIFY_* constants) so
+        # callers can distinguish a genuinely empty build (no retry) from a
+        # transient load failure (retryable). Captured before the server is torn
+        # down, since termination drops this client.
+        self.last_load_outcome: Optional[str] = None
 
         # Initialize session with connection pooling
         self.session = self._create_session()
@@ -335,6 +340,7 @@ class JoernServerClient:
                 # The import statement itself blew up; a verify poll can still
                 # confirm a prior successful load in rare connection-reset cases.
                 outcome, count = self._verify_loaded(verify_deadline)
+                self.last_load_outcome = outcome
                 if outcome == self._VERIFY_OK:
                     logger.info(f"CPG verified despite import exception: {count} methods")
                     return True
@@ -350,6 +356,7 @@ class JoernServerClient:
                 )
 
             outcome, count = self._verify_loaded(verify_deadline)
+            self.last_load_outcome = outcome
             if outcome == self._VERIFY_OK:
                 logger.info(f"CPG verified: {count} methods found")
                 return True

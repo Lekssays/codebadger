@@ -150,6 +150,10 @@ class JoernConfig:
     # probe so a CPG that is slow to answer its first query under load isn't
     # mistaken for a failed/empty build.
     verify_timeout_seconds: int = 60
+    # Max attempts to (re-spawn and) reload an existing cpg.bin before marking a
+    # codebase failed. Retries cover transient reactivation stalls only; a
+    # genuinely empty build is never retried.
+    load_max_attempts: int = 3
     # HTTP Connection Pooling
     http_pool_connections: int = 10
     http_pool_maxsize: int = 10
