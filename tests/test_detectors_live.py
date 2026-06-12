@@ -220,6 +220,75 @@ def test_toctou_matrix(server):
     assert not fire("fp_diffliteral"), "stat(\"file\")/open(\"file2\") are different paths"
 
 
+HEAP_OVERFLOW_FIXTURE = r"""
+#include <stdlib.h>
+#include <string.h>
+void ho_const_overflow(const char *src){
+    char *p = malloc(16);
+    memcpy(p, src, 32);
+}
+void ho_safe_const(const char *src){
+    char *p = malloc(64);
+    memcpy(p, src, 16);
+}
+void ho_strcpy(const char *src){
+    char *p = malloc(8);
+    strcpy(p, src);
+}
+void ho_same_var(const char *src, int n){
+    char *p = malloc(n);
+    memcpy(p, src, n);
+}
+void ho_bounded(const char *src, int n, int m){
+    char *p = malloc(n);
+    if (m <= n) {
+        memcpy(p, src, m);
+    }
+}
+"""
+
+
+def test_heap_overflow_matrix(server):
+    out = _run_detector(server, HEAP_OVERFLOW_FIXTURE, "heap_overflow")
+    fire = lambda fn: f"in {fn}()" in out
+    assert fire("ho_const_overflow"), "memcpy 32 into malloc(16) overflows"
+    assert fire("ho_strcpy"), "strcpy into a heap buffer is unbounded"
+    # Numeric size comparison: 16 < 64 is safe (string compare reported it before).
+    assert not fire("ho_safe_const"), "memcpy 16 into malloc(64) is safe"
+    assert not fire("ho_same_var"), "write size == allocation size is safe"
+    assert not fire("ho_bounded"), "a real m<=n bounds check guards the write"
+
+
+STACK_OVERFLOW_FIXTURE = r"""
+#include <string.h>
+void so_overflow(const char *src){
+    char buf[16];
+    memcpy(buf, src, 32);
+}
+void so_safe(const char *src){
+    char buf[64];
+    memcpy(buf, src, 16);
+}
+void so_strcpy(const char *src){
+    char buf[8];
+    strcpy(buf, src);
+}
+void so_sizeof(const char *src){
+    char buf[16];
+    memcpy(buf, src, sizeof(buf));
+}
+"""
+
+
+def test_stack_overflow_matrix(server):
+    out = _run_detector(server, STACK_OVERFLOW_FIXTURE, "stack_overflow")
+    fire = lambda fn: f"in {fn}()" in out
+    assert fire("so_overflow"), "memcpy 32 into char[16] overflows"
+    assert fire("so_strcpy"), "strcpy into a fixed-size stack buffer is unbounded"
+    assert not fire("so_safe"), "memcpy 16 into char[64] is safe"
+    assert not fire("so_sizeof"), "memcpy sizeof(buf) into buf is safe"
+
+
 def test_null_pointer_deref_matrix(server):
     out = _run_detector(server, NPD_FIXTURE, "null_pointer_deref")
     fire = lambda fn: f"in {fn}()" in out

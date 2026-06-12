@@ -13,6 +13,18 @@
     "(^|.*/)" + escaped + "$"
   }
 
+  /** Parse a size expression as an integer constant (decimal or 0x hex, with an
+    * optional u/l suffix), or None if it isn't a plain integer literal. Lets the
+    * overflow check compare constant sizes by value instead of by text. */
+  def parseIntLit(s: String): Option[Long] = {
+    val t = s.trim.replaceAll("[uUlL]+$", "")
+    try {
+      if (t.startsWith("0x") || t.startsWith("0X")) Some(java.lang.Long.parseLong(t.substring(2), 16))
+      else if (t.nonEmpty && t.forall(_.isDigit)) Some(t.toLong)
+      else None
+    } catch { case _: Throwable => None }
+  }
+
   /** Check if two line numbers are in mutually exclusive branches of the same IF. */
   def areInMutuallyExclusiveBranches(method: Method, lineA: Int, lineB: Int): Boolean = {
     method.ast.isControlStructure.l.exists { cs =>
@@ -134,6 +146,16 @@
                   val reason: Option[String] = if (sizeOrder == 0) {
                     // Unbounded write — always risky (strcpy, gets, sprintf, etc.)
                     Some(s"Unbounded write (${writeCall.name}) — no size limit enforced")
+                  } else if (parseIntLit(writeSizeExpr).isDefined && parseIntLit(allocSizeExpr).isDefined) {
+                    // Both sizes are integer constants — compare by VALUE, not text.
+                    // The old string test reported `malloc(64); memcpy(.., 16)` as an
+                    // overflow (16 != "64" and "64" doesn't contain "16") even though
+                    // 16 < 64 is safe, and couldn't affirm `malloc(16); memcpy(.., 32)`
+                    // as a definite overflow. A numeric compare does both precisely.
+                    val w = parseIntLit(writeSizeExpr).get
+                    val a = parseIntLit(allocSizeExpr).get
+                    if (w > a) Some(s"Write size $w exceeds allocation size $a")
+                    else None
                   } else {
                     // Size-bounded write: flag if write size expression is NOT the same
                     // as allocation size and there is no obvious bounds check in between.
