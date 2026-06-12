@@ -31,6 +31,50 @@ class QueryLoader:
         "max_depth": MAX_TRAVERSAL_DEPTH,
     }
 
+    # Placeholders interpolated into the query as BARE integers (line numbers,
+    # node ids — e.g. `val sourceLine = {{source_line}}`, `{{source_node_id}}L`),
+    # not inside a string literal. They have no natural ceiling, but they MUST be
+    # integers: string-escaping them (the default path) would let a non-numeric
+    # value land as a raw Scala token — a syntax break at best, an injection at
+    # worst. Coerce to int and fail fast otherwise.
+    _INT_PLACEHOLDERS = frozenset({
+        "line_num", "source_line", "sink_line", "source_node_id", "sink_node_id",
+    })
+
+    # Placeholders interpolated as bare Scala booleans (`val includeForward =
+    # {{include_forward}}`). Rendered as lowercase true/false so a stray Python
+    # `True` (which str()s to "True") can't produce invalid Scala.
+    _BOOL_PLACEHOLDERS = frozenset({
+        "include_backward", "include_forward", "include_control_flow",
+    })
+
+    _TRUE_STRINGS = frozenset({"true", "1", "yes"})
+    _FALSE_STRINGS = frozenset({"false", "0", "no"})
+
+    @classmethod
+    def _coerce_int(cls, key: str, value) -> str:
+        """Render a bare-integer placeholder, raising on a non-integer value."""
+        try:
+            return str(int(value))
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"Query placeholder '{key}' must be an integer, got {value!r}"
+            )
+
+    @classmethod
+    def _coerce_bool(cls, key: str, value) -> str:
+        """Render a bare-boolean placeholder as lowercase Scala true/false."""
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        s = str(value).strip().lower()
+        if s in cls._TRUE_STRINGS:
+            return "true"
+        if s in cls._FALSE_STRINGS:
+            return "false"
+        raise ValueError(
+            f"Query placeholder '{key}' must be a boolean, got {value!r}"
+        )
+
     @classmethod
     def _sanitize_value(cls, value: str) -> str:
         """Sanitize a value to prevent template injection.
@@ -86,6 +130,10 @@ class QueryLoader:
             placeholder = f"{{{{{key}}}}}"  # {{key}}
             if key in cls._NUMERIC_CEILINGS:
                 sanitized_value = str(clamp_int(value, cls._NUMERIC_CEILINGS[key]))
+            elif key in cls._INT_PLACEHOLDERS:
+                sanitized_value = cls._coerce_int(key, value)
+            elif key in cls._BOOL_PLACEHOLDERS:
+                sanitized_value = cls._coerce_bool(key, value)
             else:
                 sanitized_value = cls._sanitize_value(str(value))
             template = template.replace(placeholder, sanitized_value)
