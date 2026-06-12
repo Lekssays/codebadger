@@ -15,6 +15,7 @@ from ..utils.query_rendering import escape_scala_string
 from ..utils.validators import clamp_int, validate_codebase_hash
 from ..defaults import MAX_RESULT_ROWS
 from .queries import QueryLoader
+from ._common import require_cpg, unwrap_result
 
 logger = logging.getLogger(__name__)
 
@@ -377,16 +378,7 @@ def _find_taint_flows_auto(
             timeout=timeout,
         )
 
-        if not result.success:
-            return f"Error: {result.error}"
-
-        if isinstance(result.data, str):
-            return result.data.strip()
-        elif isinstance(result.data, list) and len(result.data) > 0:
-            output = result.data[0] if isinstance(result.data[0], str) else str(result.data[0])
-            return output.strip()
-        else:
-            return f"Query returned unexpected format: {type(result.data)}"
+        return unwrap_result(result)
 
     return _cached_taint_query(services, "find_taint_flows_auto", codebase_hash, cache_params, _execute)
 
@@ -436,13 +428,10 @@ Examples:
         try:
             validate_codebase_hash(codebase_hash)
 
-            codebase_tracker = services["codebase_tracker"]
             query_executor = services["query_executor"]
 
             # Verify CPG exists for this codebase
-            codebase_info = codebase_tracker.get_codebase(codebase_hash)
-            if not codebase_info or not codebase_info.cpg_path:
-                raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
+            codebase_info = require_cpg(services, codebase_hash)
 
             # Determine language and patterns
             lang = language or codebase_info.language or "c"
@@ -562,13 +551,10 @@ Examples:
         try:
             validate_codebase_hash(codebase_hash)
 
-            codebase_tracker = services["codebase_tracker"]
             query_executor = services["query_executor"]
 
             # Verify CPG exists for this codebase
-            codebase_info = codebase_tracker.get_codebase(codebase_hash)
-            if not codebase_info or not codebase_info.cpg_path:
-                raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
+            codebase_info = require_cpg(services, codebase_hash)
 
             lang = language or codebase_info.language or "c"
             
@@ -737,13 +723,10 @@ Examples:
 
             validate_codebase_hash(codebase_hash)
 
-            codebase_tracker = services["codebase_tracker"]
             query_executor = services["query_executor"]
 
             # Verify CPG exists
-            codebase_info = codebase_tracker.get_codebase(codebase_hash)
-            if not codebase_info or not codebase_info.cpg_path:
-                raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first.")
+            codebase_info = require_cpg(services, codebase_hash)
 
             # --- AUTO MODE ---
             if mode == "auto":
@@ -885,16 +868,7 @@ Examples:
                     timeout=timeout,
                 )
 
-                if not result.success:
-                    return f"Error: {result.error}"
-
-                if isinstance(result.data, str):
-                    return result.data.strip()
-                elif isinstance(result.data, list) and len(result.data) > 0:
-                    output = result.data[0] if isinstance(result.data[0], str) else str(result.data[0])
-                    return output.strip()
-                else:
-                    return f"Query returned unexpected format: {type(result.data)}"
+                return unwrap_result(result)
 
             return _cached_taint_query(services, "find_taint_flows", codebase_hash, cache_params, _execute)
 
@@ -951,13 +925,10 @@ Examples:
             if direction not in ["backward", "forward"]:
                 raise ValidationError("direction must be 'backward' or 'forward'")
 
-            codebase_tracker = services["codebase_tracker"]
             query_executor = services["query_executor"]
 
             # Verify CPG exists
-            codebase_info = codebase_tracker.get_codebase(codebase_hash)
-            if not codebase_info or not codebase_info.cpg_path:
-                raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
+            codebase_info = require_cpg(services, codebase_hash)
 
             # Parse location
             parts = location.split(":")
@@ -1002,16 +973,7 @@ Examples:
                     timeout=timeout,
                 )
 
-                if not result.success:
-                    return f"Error: {result.error}"
-
-                if isinstance(result.data, str):
-                    return result.data.strip()
-                elif isinstance(result.data, list) and len(result.data) > 0:
-                    output = result.data[0] if isinstance(result.data[0], str) else str(result.data[0])
-                    return output.strip()
-                else:
-                    return f"Query returned unexpected format: {type(result.data)}"
+                return unwrap_result(result)
 
             return _cached_taint_query(services, "get_program_slice", codebase_hash, cache_params, _execute)
 
@@ -1077,13 +1039,10 @@ Examples:
             if direction not in ["backward", "forward"]:
                 raise ValidationError("direction must be 'backward' or 'forward'")
 
-            codebase_tracker = services["codebase_tracker"]
             query_executor = services["query_executor"]
 
             # Verify CPG exists for this codebase
-            codebase_info = codebase_tracker.get_codebase(codebase_hash)
-            if not codebase_info or not codebase_info.cpg_path:
-                raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
+            codebase_info = require_cpg(services, codebase_hash)
 
             cache_params = {
                 "location": location,
@@ -1108,16 +1067,7 @@ Examples:
                     timeout=60,
                 )
 
-                if not result.success:
-                    return f"Error: {result.error}"
-
-                if isinstance(result.data, str):
-                    return result.data.strip()
-                elif isinstance(result.data, list) and len(result.data) > 0:
-                    output = result.data[0] if isinstance(result.data[0], str) else str(result.data[0])
-                    return output.strip()
-                else:
-                    return f"Query returned unexpected format: {type(result.data)}"
+                return unwrap_result(result)
 
             return _cached_taint_query(services, "get_variable_flow", codebase_hash, cache_params, _execute)
 
@@ -1173,13 +1123,10 @@ Notes:
         try:
             validate_codebase_hash(codebase_hash)
 
-            codebase_tracker = services["codebase_tracker"]
             query_executor = services["query_executor"]
 
             # Verify CPG exists
-            codebase_info = codebase_tracker.get_codebase(codebase_hash)
-            if not codebase_info or not codebase_info.cpg_path:
-                raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
+            codebase_info = require_cpg(services, codebase_hash)
 
             cache_params = {
                 "filename": filename,
@@ -1200,16 +1147,7 @@ Notes:
                     timeout=timeout,
                 )
 
-                if not result.success:
-                    return f"Error: {result.error}"
-
-                if isinstance(result.data, str):
-                    return result.data.strip()
-                elif isinstance(result.data, list) and len(result.data) > 0:
-                    output = result.data[0] if isinstance(result.data[0], str) else str(result.data[0])
-                    return output.strip()
-                else:
-                    return f"Query returned unexpected format: {type(result.data)}"
+                return unwrap_result(result)
 
             return _cached_taint_query(services, "find_use_after_free", codebase_hash, cache_params, _execute)
 
@@ -1258,13 +1196,10 @@ Returns:
         try:
             validate_codebase_hash(codebase_hash)
 
-            codebase_tracker = services["codebase_tracker"]
             query_executor = services["query_executor"]
 
             # Verify CPG exists
-            codebase_info = codebase_tracker.get_codebase(codebase_hash)
-            if not codebase_info or not codebase_info.cpg_path:
-                raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
+            codebase_info = require_cpg(services, codebase_hash)
 
             cache_params = {
                 "filename": filename,
@@ -1285,16 +1220,7 @@ Returns:
                     timeout=timeout,
                 )
 
-                if not result.success:
-                    return f"Error: {result.error}"
-
-                if isinstance(result.data, str):
-                    return result.data.strip()
-                elif isinstance(result.data, list) and len(result.data) > 0:
-                    output = result.data[0] if isinstance(result.data[0], str) else str(result.data[0])
-                    return output.strip()
-                else:
-                    return f"Query returned unexpected format: {type(result.data)}"
+                return unwrap_result(result)
 
             return _cached_taint_query(services, "find_double_free", codebase_hash, cache_params, _execute)
 
@@ -1354,13 +1280,10 @@ Notes:
         try:
             validate_codebase_hash(codebase_hash)
 
-            codebase_tracker = services["codebase_tracker"]
             query_executor = services["query_executor"]
 
             # Verify CPG exists
-            codebase_info = codebase_tracker.get_codebase(codebase_hash)
-            if not codebase_info or not codebase_info.cpg_path:
-                raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
+            codebase_info = require_cpg(services, codebase_hash)
 
             cache_params = {
                 "filename": filename,
@@ -1381,16 +1304,7 @@ Notes:
                     timeout=timeout,
                 )
 
-                if not result.success:
-                    return f"Error: {result.error}"
-
-                if isinstance(result.data, str):
-                    return result.data.strip()
-                elif isinstance(result.data, list) and len(result.data) > 0:
-                    output = result.data[0] if isinstance(result.data[0], str) else str(result.data[0])
-                    return output.strip()
-                else:
-                    return f"Query returned unexpected format: {type(result.data)}"
+                return unwrap_result(result)
 
             return _cached_taint_query(services, "find_null_pointer_deref", codebase_hash, cache_params, _execute)
 
@@ -1452,13 +1366,10 @@ Notes:
         try:
             validate_codebase_hash(codebase_hash)
 
-            codebase_tracker = services["codebase_tracker"]
             query_executor = services["query_executor"]
 
             # Verify CPG exists
-            codebase_info = codebase_tracker.get_codebase(codebase_hash)
-            if not codebase_info or not codebase_info.cpg_path:
-                raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
+            codebase_info = require_cpg(services, codebase_hash)
 
             cache_params = {
                 "filename": filename,
@@ -1479,16 +1390,7 @@ Notes:
                     timeout=timeout,
                 )
 
-                if not result.success:
-                    return f"Error: {result.error}"
-
-                if isinstance(result.data, str):
-                    return result.data.strip()
-                elif isinstance(result.data, list) and len(result.data) > 0:
-                    output = result.data[0] if isinstance(result.data[0], str) else str(result.data[0])
-                    return output.strip()
-                else:
-                    return f"Query returned unexpected format: {type(result.data)}"
+                return unwrap_result(result)
 
             return _cached_taint_query(services, "find_integer_overflow", codebase_hash, cache_params, _execute)
 
@@ -1539,12 +1441,9 @@ Examples:
         try:
             validate_codebase_hash(codebase_hash)
 
-            codebase_tracker = services["codebase_tracker"]
             query_executor = services["query_executor"]
 
-            codebase_info = codebase_tracker.get_codebase(codebase_hash)
-            if not codebase_info or not codebase_info.cpg_path:
-                raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
+            codebase_info = require_cpg(services, codebase_hash)
 
             cache_params = {"filename": filename, "limit": limit}
 
@@ -1560,15 +1459,7 @@ Examples:
                     query=query,
                     timeout=timeout,
                 )
-                if not result.success:
-                    return f"Error: {result.error}"
-                if isinstance(result.data, str):
-                    return result.data.strip()
-                elif isinstance(result.data, list) and len(result.data) > 0:
-                    output = result.data[0] if isinstance(result.data[0], str) else str(result.data[0])
-                    return output.strip()
-                else:
-                    return f"Query returned unexpected format: {type(result.data)}"
+                return unwrap_result(result)
 
             return _cached_taint_query(services, "find_format_string_vulns", codebase_hash, cache_params, _execute)
 
@@ -1620,12 +1511,9 @@ Examples:
         try:
             validate_codebase_hash(codebase_hash)
 
-            codebase_tracker = services["codebase_tracker"]
             query_executor = services["query_executor"]
 
-            codebase_info = codebase_tracker.get_codebase(codebase_hash)
-            if not codebase_info or not codebase_info.cpg_path:
-                raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
+            codebase_info = require_cpg(services, codebase_hash)
 
             cache_params = {"filename": filename, "limit": limit}
 
@@ -1641,15 +1529,7 @@ Examples:
                     query=query,
                     timeout=timeout,
                 )
-                if not result.success:
-                    return f"Error: {result.error}"
-                if isinstance(result.data, str):
-                    return result.data.strip()
-                elif isinstance(result.data, list) and len(result.data) > 0:
-                    output = result.data[0] if isinstance(result.data[0], str) else str(result.data[0])
-                    return output.strip()
-                else:
-                    return f"Query returned unexpected format: {type(result.data)}"
+                return unwrap_result(result)
 
             return _cached_taint_query(services, "find_heap_overflow", codebase_hash, cache_params, _execute)
 
@@ -1700,12 +1580,9 @@ Examples:
         try:
             validate_codebase_hash(codebase_hash)
 
-            codebase_tracker = services["codebase_tracker"]
             query_executor = services["query_executor"]
 
-            codebase_info = codebase_tracker.get_codebase(codebase_hash)
-            if not codebase_info or not codebase_info.cpg_path:
-                raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
+            codebase_info = require_cpg(services, codebase_hash)
 
             cache_params = {"filename": filename, "limit": limit}
 
@@ -1721,15 +1598,7 @@ Examples:
                     query=query,
                     timeout=timeout,
                 )
-                if not result.success:
-                    return f"Error: {result.error}"
-                if isinstance(result.data, str):
-                    return result.data.strip()
-                elif isinstance(result.data, list) and len(result.data) > 0:
-                    output = result.data[0] if isinstance(result.data[0], str) else str(result.data[0])
-                    return output.strip()
-                else:
-                    return f"Query returned unexpected format: {type(result.data)}"
+                return unwrap_result(result)
 
             return _cached_taint_query(services, "find_stack_overflow", codebase_hash, cache_params, _execute)
 
@@ -1778,12 +1647,9 @@ Examples:
         try:
             validate_codebase_hash(codebase_hash)
 
-            codebase_tracker = services["codebase_tracker"]
             query_executor = services["query_executor"]
 
-            codebase_info = codebase_tracker.get_codebase(codebase_hash)
-            if not codebase_info or not codebase_info.cpg_path:
-                raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
+            codebase_info = require_cpg(services, codebase_hash)
 
             cache_params = {"filename": filename, "limit": limit}
 
@@ -1799,15 +1665,7 @@ Examples:
                     query=query,
                     timeout=timeout,
                 )
-                if not result.success:
-                    return f"Error: {result.error}"
-                if isinstance(result.data, str):
-                    return result.data.strip()
-                elif isinstance(result.data, list) and len(result.data) > 0:
-                    output = result.data[0] if isinstance(result.data[0], str) else str(result.data[0])
-                    return output.strip()
-                else:
-                    return f"Query returned unexpected format: {type(result.data)}"
+                return unwrap_result(result)
 
             return _cached_taint_query(services, "find_toctou", codebase_hash, cache_params, _execute)
 
@@ -1859,12 +1717,9 @@ Examples:
         try:
             validate_codebase_hash(codebase_hash)
 
-            codebase_tracker = services["codebase_tracker"]
             query_executor = services["query_executor"]
 
-            codebase_info = codebase_tracker.get_codebase(codebase_hash)
-            if not codebase_info or not codebase_info.cpg_path:
-                raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
+            codebase_info = require_cpg(services, codebase_hash)
 
             cache_params = {"filename": filename, "limit": limit}
 
@@ -1880,15 +1735,7 @@ Examples:
                     query=query,
                     timeout=timeout,
                 )
-                if not result.success:
-                    return f"Error: {result.error}"
-                if isinstance(result.data, str):
-                    return result.data.strip()
-                elif isinstance(result.data, list) and len(result.data) > 0:
-                    output = result.data[0] if isinstance(result.data[0], str) else str(result.data[0])
-                    return output.strip()
-                else:
-                    return f"Query returned unexpected format: {type(result.data)}"
+                return unwrap_result(result)
 
             return _cached_taint_query(services, "find_uninitialized_reads", codebase_hash, cache_params, _execute)
 

@@ -19,6 +19,7 @@ from ..utils.validators import (
     validate_search_pattern,
 )
 from .queries import QueryLoader
+from ._common import require_cpg, unwrap_result
 
 logger = logging.getLogger(__name__)
 
@@ -206,12 +207,9 @@ Examples:
         try:
             validate_codebase_hash(codebase_hash)
 
-            codebase_tracker = services["codebase_tracker"]
             query_executor = services["query_executor"]
 
-            codebase_info = codebase_tracker.get_codebase(codebase_hash)
-            if not codebase_info or not codebase_info.cpg_path:
-                raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
+            codebase_info = require_cpg(services, codebase_hash)
 
             query_parts = [f'cpg.method.name("{escape_scala_string(method_name)}")']
 
@@ -436,12 +434,9 @@ Examples:
             if direction not in ["outgoing", "incoming"]:
                 raise ValidationError("Direction must be 'outgoing' or 'incoming'")
 
-            codebase_tracker = services["codebase_tracker"]
             query_executor = services["query_executor"]
 
-            codebase_info = codebase_tracker.get_codebase(codebase_hash)
-            if not codebase_info or not codebase_info.cpg_path:
-                raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
+            codebase_info = require_cpg(services, codebase_hash)
 
             query = QueryLoader.load(
                 "call_graph",
@@ -458,17 +453,7 @@ Examples:
                 limit=500,
             )
 
-            if not result.success:
-                return f"Error: {result.error}"
-
-            # Query now returns human-readable text directly
-            if isinstance(result.data, str):
-                return result.data.strip()
-            elif isinstance(result.data, list) and len(result.data) > 0:
-                output = result.data[0] if isinstance(result.data[0], str) else str(result.data[0])
-                return output.strip()
-            else:
-                return f"Query returned unexpected format: {type(result.data)}"
+            return unwrap_result(result)
 
         except ValidationError as e:
             logger.error(f"Error getting call graph: {e}")
@@ -566,12 +551,9 @@ Examples:
         try:
             validate_codebase_hash(codebase_hash)
 
-            codebase_tracker = services["codebase_tracker"]
             query_executor = services["query_executor"]
 
-            codebase_info = codebase_tracker.get_codebase(codebase_hash)
-            if not codebase_info or not codebase_info.cpg_path:
-                raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
+            codebase_info = require_cpg(services, codebase_hash)
 
             # Single query gathers all stats in one round trip.
             stats_query = """
@@ -741,11 +723,8 @@ Examples:
                     f"Line range too large (max {MAX_SNIPPET_SPAN_LINES} lines per request)"
                 )
 
-            codebase_tracker = services["codebase_tracker"]
 
-            codebase_info = codebase_tracker.get_codebase(codebase_hash)
-            if not codebase_info or not codebase_info.cpg_path:
-                raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
+            codebase_info = require_cpg(services, codebase_hash)
 
             source_dir = _get_source_snapshot_dir(codebase_hash)
 
@@ -850,12 +829,9 @@ Examples:
             # Defense-in-depth: the real boundary is the Joern worker sandbox.
             validate_cpgql_query(query.strip())
 
-            codebase_tracker = services["codebase_tracker"]
             query_executor = services["query_executor"]
 
-            codebase_info = codebase_tracker.get_codebase(codebase_hash)
-            if not codebase_info or not codebase_info.cpg_path:
-                raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
+            codebase_info = require_cpg(services, codebase_hash)
 
             validation_result = None
             if validate:
@@ -972,12 +948,9 @@ Examples:
             except ValueError:
                 raise ValidationError(f"Invalid line number: {line_str}")
 
-            codebase_tracker = services["codebase_tracker"]
             query_executor = services["query_executor"]
 
-            codebase_info = codebase_tracker.get_codebase(codebase_hash)
-            if not codebase_info or not codebase_info.cpg_path:
-                raise ValidationError(f"CPG not found for codebase {codebase_hash}. Generate it first using generate_cpg.")
+            codebase_info = require_cpg(services, codebase_hash)
 
             query = QueryLoader.load(
                 "bounds_checks",
@@ -1157,12 +1130,9 @@ Examples:
         """Get nodes and edges representing control flow in a method."""
         try:
             validate_codebase_hash(codebase_hash)
-            codebase_tracker = services["codebase_tracker"]
             query_executor = services["query_executor"]
 
-            codebase_info = codebase_tracker.get_codebase(codebase_hash)
-            if not codebase_info or not codebase_info.cpg_path:
-                raise ValidationError(f"CPG not found for codebase {codebase_hash}")
+            codebase_info = require_cpg(services, codebase_hash)
 
             query = QueryLoader.load(
                 "cfg",
@@ -1178,17 +1148,7 @@ Examples:
                 limit=max_nodes,
             )
 
-            if not result.success:
-                return f"Error: {result.error}"
-
-            # Query now returns human-readable text directly
-            if isinstance(result.data, str):
-                return result.data.strip()
-            elif isinstance(result.data, list) and len(result.data) > 0:
-                output = result.data[0] if isinstance(result.data[0], str) else str(result.data[0])
-                return output.strip()
-            else:
-                return f"Query returned unexpected format: {type(result.data)}"
+            return unwrap_result(result)
 
         except ValidationError as e:
             logger.error(f"Error getting CFG: {e}")
@@ -1234,12 +1194,9 @@ Examples:
         """Get struct/class definition with member names and types."""
         try:
             validate_codebase_hash(codebase_hash)
-            codebase_tracker = services["codebase_tracker"]
             query_executor = services["query_executor"]
 
-            codebase_info = codebase_tracker.get_codebase(codebase_hash)
-            if not codebase_info or not codebase_info.cpg_path:
-                raise ValidationError(f"CPG not found for codebase {codebase_hash}")
+            codebase_info = require_cpg(services, codebase_hash)
 
             query = QueryLoader.load(
                 "type_definition",
@@ -1327,12 +1284,9 @@ Examples:
         """Detect potential macro expansions using naming heuristics."""
         try:
             validate_codebase_hash(codebase_hash)
-            codebase_tracker = services["codebase_tracker"]
             query_executor = services["query_executor"]
 
-            codebase_info = codebase_tracker.get_codebase(codebase_hash)
-            if not codebase_info or not codebase_info.cpg_path:
-                raise ValidationError(f"CPG not found for codebase {codebase_hash}")
+            codebase_info = require_cpg(services, codebase_hash)
 
             line_filter = f".lineNumber({line_number})" if line_number else ""
             query = QueryLoader.load(
