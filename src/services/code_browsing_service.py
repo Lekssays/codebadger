@@ -1,8 +1,7 @@
 import logging
-import os
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional
 from ..exceptions import ValidationError
-from ..utils.validators import sanitize_path, validate_codebase_hash
+from ..utils.validators import validate_codebase_hash
 from ..utils.query_rendering import escape_scala_string
 
 logger = logging.getLogger(__name__)
@@ -139,121 +138,6 @@ class CodeBrowsingService:
             "total_pages": (total + page_size - 1) // page_size if page_size > 0 else 1
         }
 
-    def list_files(
-        self,
-        codebase_hash: str,
-        local_path: Optional[str] = None,
-        page: int = 1,
-        page_size: int = 100,
-    ) -> str:
-        """List files in the codebase as a tree structure with pagination.
-        
-        Args:
-            codebase_hash: The codebase hash.
-            local_path: Optional path inside the codebase to list.
-            page: Page number (1-indexed).
-            page_size: Number of files per page (default 100).
-        
-        Returns:
-            str: A text-based tree representation of the directory structure.
-                 Includes pagination info at the end if there are more pages.
-        """
-        validate_codebase_hash(codebase_hash)
-
-        codebase_info = self.codebase_tracker.get_codebase(codebase_hash)
-        if not codebase_info:
-            raise ValidationError(f"Codebase not found for codebase {codebase_hash}")
-        
-        # Determine the actual filesystem path to list
-        playground_path = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "..", "..", "playground")
-        )
-
-        # Always use the playground snapshot copy — this is the exact state used for
-        # CPG generation, and avoids relying on the original path still being accessible.
-        playground_snapshot = os.path.join(playground_path, "codebases", codebase_hash)
-        if os.path.exists(playground_snapshot) and os.path.isdir(playground_snapshot):
-            source_dir = playground_snapshot
-        elif codebase_info.source_type == "github":
-            # Fallback: shouldn't normally be needed, but recalculate just in case
-            from ..tools.core_tools import get_cpg_cache_key
-            cpg_cache_key = get_cpg_cache_key(
-                codebase_info.source_type,
-                codebase_info.source_path,
-                codebase_info.language,
-            )
-            source_dir = os.path.join(playground_path, "codebases", cpg_cache_key)
-        else:
-            source_path = codebase_info.source_path
-            if not os.path.isabs(source_path):
-                source_path = os.path.abspath(source_path)
-            source_dir = source_path
-
-        if not os.path.exists(source_dir) or not os.path.isdir(source_dir):
-            raise ValidationError(f"Source directory not found for codebase {codebase_hash}")
-
-        # Resolve target directory if a local_path is provided; otherwise, use source_dir
-        if local_path:
-            target_dir = sanitize_path(local_path, allowed_root=source_dir)
-        else:
-            target_dir = source_dir
-
-        # Folders to ignore
-        ignored_folders = {".git"}
-
-        def _collect_all_files(root: str, prefix: str = "") -> List[tuple]:
-            """Collect all files/dirs as (prefix, connector, name, is_dir) tuples."""
-            try:
-                entries = sorted(os.listdir(root))
-            except OSError:
-                entries = []
-
-            # Filter out ignored folders
-            entries = [e for e in entries if e not in ignored_folders]
-            
-            items = []
-            for i, name in enumerate(entries):
-                path = os.path.join(root, name)
-                is_last = (i == len(entries) - 1)
-                connector = "└── " if is_last else "├── "
-                is_dir = os.path.isdir(path)
-                
-                if is_dir:
-                    items.append((prefix, connector, f"{name}/", True))
-                    # Extend prefix for children
-                    extension = "    " if is_last else "│   "
-                    items.extend(_collect_all_files(path, prefix + extension))
-                else:
-                    items.append((prefix, connector, name, False))
-            
-            return items
-
-        # Collect all items
-        all_items = _collect_all_files(target_dir, "")
-        total_items = len(all_items)
-        
-        # Calculate pagination
-        start_idx = (page - 1) * page_size
-        end_idx = start_idx + page_size
-        paged_items = all_items[start_idx:end_idx]
-        total_pages = (total_items + page_size - 1) // page_size if page_size > 0 else 1
-        
-        # Build tree text for this page
-        root_name = os.path.basename(target_dir) or target_dir
-        tree_lines = [f"{root_name}/"]
-        
-        for prefix, connector, name, is_dir in paged_items:
-            tree_lines.append(f"{prefix}{connector}{name}")
-        
-        tree_text = "\n".join(tree_lines)
-        
-        # Add pagination info if there are multiple pages
-        if total_pages > 1:
-            tree_text += f"\n\n--- Page {page}/{total_pages} | Showing {len(paged_items)} of {total_items} items ---"
-            if page < total_pages:
-                tree_text += f"\n(Use page={page + 1} to see more)"
-
-        return tree_text
 
     def list_calls(
         self,
@@ -458,7 +342,6 @@ class CodeBrowsingService:
         logger.info(f"Warming up cache for codebase {codebase_hash}")
         tasks = [
             self.list_methods,
-            self.list_files,
             self.list_calls,
             self.list_parameters,
             self.find_literals,

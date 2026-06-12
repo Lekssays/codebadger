@@ -24,7 +24,7 @@ def _make_service(calls, failing=()):
                 raise RuntimeError(f"{name} boom")
         return _q
 
-    for name in ("list_methods", "list_files", "list_calls", "list_parameters", "find_literals"):
+    for name in ("list_methods", "list_calls", "list_parameters", "find_literals"):
         setattr(svc, name, make(name))
     return svc
 
@@ -32,14 +32,14 @@ def _make_service(calls, failing=()):
 def test_warm_up_cache_runs_all_queries_in_order():
     calls = []
     _make_service(calls).warm_up_cache("h1")
-    assert calls == ["list_methods", "list_files", "list_calls", "list_parameters", "find_literals"]
+    assert calls == ["list_methods", "list_calls", "list_parameters", "find_literals"]
 
 
 def test_warm_up_cache_continues_after_a_failing_query():
     calls = []
     # A failure in the middle must not abort the remaining warm-up queries.
     _make_service(calls, failing={"list_calls"}).warm_up_cache("h1")
-    assert calls == ["list_methods", "list_files", "list_calls", "list_parameters", "find_literals"]
+    assert calls == ["list_methods", "list_calls", "list_parameters", "find_literals"]
 
 
 @pytest.mark.asyncio

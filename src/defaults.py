@@ -311,5 +311,4 @@ MAX_QUERY_TIMEOUT_SECONDS = 300   # hard cap for any caller-supplied query timeo
 MAX_RESULT_ROWS = 10000           # hard ceiling on rows a single query may return
 MAX_QUERY_OUTPUT_BYTES = 5_000_000  # max raw Joern stdout we will parse / return
 MAX_SEARCH_PATTERN_LEN = 512      # max length of a caller-supplied regex/name filter
-MAX_SNIPPET_SPAN_LINES = 5000     # max line span returned by get_code_snippet
 MAX_TRAVERSAL_DEPTH = 64          # max caller-supplied graph depth (call-graph / slice)

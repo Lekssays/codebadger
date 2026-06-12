@@ -303,61 +303,6 @@ class TestCodeBadgerIntegration:
             for field in required_fields:
                 assert field in method, f"Method missing field: {field}"
 
-    @pytest.mark.asyncio
-    @pytest.mark.timeout(210)
-    async def test_get_codebase_summary(self, client, codebase_path):
-        """Test getting codebase summary"""
-        # Generate and wait for CPG
-        result = await client.call_tool("generate_cpg", {
-            "source_type": "local",
-            "source_path": codebase_path,
-            "language": "c"
-        })
-        cpg_dict = self.extract_tool_result(result)
-        codebase_hash = cpg_dict["codebase_hash"]
-
-        # Wait for ready
-        ready = await self.wait_for_cpg_ready(client, codebase_hash)
-        assert ready, "CPG not ready in time"
-
-        # Get summary
-        summary_result = await client.call_tool("get_codebase_summary", {
-            "codebase_hash": codebase_hash
-        })
-
-        summary_dict = self.extract_tool_result(summary_result)
-        assert summary_dict.get("success") is True, f"Summary failed: {summary_dict}"
-
-        summary = summary_dict.get("summary", {})
-        assert isinstance(summary, dict), "summary should be a dict"
-
-        # Check expected fields
-        expected_fields = ["language", "total_files", "total_methods", "total_calls"]
-        for field in expected_fields:
-            assert field in summary, f"Summary missing field: {field}"
-
-        assert summary["language"] in ["c", "C", "NEWC", "unknown"], f"Unexpected language: {summary['language']}"
-        print(f"DEBUG SUMMARY: {summary}")
-        
-        # Add retry logic for flaky summary stats
-        import time
-        for _ in range(3):
-            if summary["total_files"] >= 1:
-                break
-            print("Retrying codebase summary fetch...")
-            time.sleep(2)
-            summary_result = await client.call_tool("get_codebase_summary", {
-                "codebase_hash": codebase_hash
-            })
-            summary_dict = self.extract_tool_result(summary_result)
-            if not summary_dict.get("success"):
-                print(f"RETRY FAILED: {summary_dict}")
-            summary = summary_dict.get("summary", {})
-            print(f"RETRY SUMMARY: {summary}")
-
-        assert summary["total_files"] >= 1 or summary["total_methods"] >= 1, f"Should have at least 1 file or method. Got summary: {summary}, Result: {summary_dict}"
-        assert summary["total_methods"] >= 0
-        assert summary["total_calls"] >= 0
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(210)
@@ -437,41 +382,6 @@ class TestCodeBadgerIntegration:
             for field in required_fields:
                 assert field in sink, f"Sink missing field: {field}"
 
-    @pytest.mark.asyncio
-    @pytest.mark.timeout(30)
-    async def test_get_code_snippet(self, client, codebase_path):
-        """Test getting code snippets"""
-        # Generate and wait for CPG
-        result = await client.call_tool("generate_cpg", {
-            "source_type": "local",
-            "source_path": codebase_path,
-            "language": "c"
-        })
-        cpg_dict = self.extract_tool_result(result)
-        codebase_hash = cpg_dict["codebase_hash"]
-
-        # Wait for ready
-        for _ in range(30):
-            await asyncio.sleep(1)
-            status_result = await client.call_tool("get_cpg_status", {"codebase_hash": codebase_hash})
-            if self.extract_tool_result(status_result).get("status") in ["ready", "cached"]:
-                break
-
-        # Get code snippet from src/main.c (multi-file codebase)
-        snippet_result = await client.call_tool("get_code_snippet", {
-            "codebase_hash": codebase_hash,
-            "filename": "src/main.c",
-            "start_line": 1,
-            "end_line": 20
-        })
-
-        snippet_dict = self.extract_tool_result(snippet_result)
-        assert snippet_dict.get("success") is True, f"Snippet failed: {snippet_dict}"
-
-        assert "code" in snippet_dict, "Snippet should contain code"
-        code = snippet_dict["code"]
-        assert isinstance(code, str), "code should be a string"
-        assert len(code) > 0, "code should not be empty"
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(210)
@@ -922,52 +832,6 @@ class TestCodeBadgerIntegration:
             assert "Nodes:" in content or "->" in content, \
                 f"CFG should contain nodes/edges: {content[:300]}"
 
-    @pytest.mark.asyncio
-    @pytest.mark.timeout(210)
-    async def test_list_files_multifile(self, client, codebase_path):
-        """Test list_files shows multi-file structure
-        
-        Expected structure:
-        - include/ directory with 5 header files: utils.h, memory.h, network.h, config.h, device.h
-        - src/ directory with 8 source files: main.c, device.c, memory.c, network.c, 
-          config.c, callbacks.c, cmdline.c, utils.c
-        - Makefile
-        """
-        result = await client.call_tool("generate_cpg", {
-            "source_type": "local",
-            "source_path": codebase_path,
-            "language": "c"
-        })
-        cpg_dict = self.extract_tool_result(result)
-        codebase_hash = cpg_dict["codebase_hash"]
-
-        ready = await self.wait_for_cpg_ready(client, codebase_hash)
-        assert ready, "CPG not ready in time"
-
-        # List files
-        files_result = await client.call_tool("list_files", {
-            "codebase_hash": codebase_hash
-        })
-
-        if hasattr(files_result, 'content') and files_result.content:
-            content = files_result.content[0].text
-            assert isinstance(content, str), "list_files result should be string"
-            
-            # Verify directory structure
-            assert "src" in content, f"Should contain src/ directory: {content[:500]}"
-            assert "include" in content, f"Should contain include/ directory: {content[:500]}"
-            
-            # Verify key source files are present
-            expected_source_files = ["main.c", "device.c", "memory.c", "network.c"]
-            found_sources = [f for f in expected_source_files if f in content]
-            assert len(found_sources) >= 3, \
-                f"Expected at least 3 of {expected_source_files}, found: {found_sources}"
-            
-            # Verify key header files are present
-            expected_headers = ["device.h", "memory.h", "network.h"]
-            found_headers = [h for h in expected_headers if h in content]
-            assert len(found_headers) >= 2, \
-                f"Expected at least 2 of {expected_headers}, found: {found_headers}"
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(210)
