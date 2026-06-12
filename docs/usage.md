@@ -30,7 +30,7 @@ codebadger speaks MCP over HTTP at `http://localhost:4242/mcp`.
 flowchart LR
     A[generate_cpg<br/>GitHub URL, local path, or pasted snippet] --> B{get_cpg_status}
     B -- generating --> B
-    B -- ready --> C[Explore<br/>list_methods, get_method_source,<br/>get_call_graph, get_codebase_summary]
+    B -- ready --> C[Explore<br/>list_methods, list_calls,<br/>get_call_graph, list_parameters]
     C --> D[Hunt<br/>find_taint_flows, find_use_after_free,<br/>find_integer_overflow, get_program_slice]
     D --> E{Promising flow?}
     E -- no --> C
@@ -58,15 +58,16 @@ generate_cpg(source_type="snippet", language="c",
 get_cpg_status(codebase_hash="ddf44eb0a10a85e6")  -> { "status": "ready" }
 
 # 3. Orient
-get_codebase_summary(codebase_hash="ddf44eb0a10a85e6")
 list_methods(codebase_hash="ddf44eb0a10a85e6", name_filter=".*parse.*")
+get_call_graph(codebase_hash="ddf44eb0a10a85e6", method_name="soup_header_parse")
 
 # 4. Hunt
 find_taint_flows(codebase_hash="ddf44eb0a10a85e6")
 find_integer_overflow(codebase_hash="ddf44eb0a10a85e6")
 
-# 5. Drill into a candidate
-get_method_source(codebase_hash="ddf44eb0a10a85e6", method_name="soup_header_parse")
+# 5. Drill into a candidate (read source from your own checkout, or pull node .code)
+run_cpgql_query(codebase_hash="ddf44eb0a10a85e6",
+                query="cpg.method.name(\"soup_header_parse\").code.l")
 get_program_slice(codebase_hash="ddf44eb0a10a85e6", ...)
 
 # 6. Escape hatch - raw CPGQL for anything the tools don't cover
