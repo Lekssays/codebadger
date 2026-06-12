@@ -204,6 +204,9 @@ class CPGConfig:
     # the waiting room. Too small and a high-concurrency client gets ~30% of
     # generations rejected under load. <=0 falls back to build_workers * 4.
     queue_maxsize: int = 64
+    # Delete the source snapshot once the CPG is built (the CPG is the only
+    # persisted artifact; nothing reads source from disk). Regenerate re-fetches.
+    ephemeral_source: bool = True
     # Large-project guard (generate_cpg declines local sources above either
     # threshold unless force=True). Turn off for unattended/batch drivers.
     large_project_guard: bool = True

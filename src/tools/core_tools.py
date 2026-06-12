@@ -349,6 +349,31 @@ def _copy_local_source_tree(host_path: str, codebase_dir: str) -> None:
         raise
 
 
+def _reclaim_source_snapshot(codebase_dir: str, cpg_path: str, config) -> bool:
+    """Delete the source snapshot once the CPG exists (ephemeral source).
+
+    The CPG (cpg.bin) is the sole persisted artifact and no tool reads source from
+    disk, so the snapshot (and any github clone under the same dir) is reclaimed
+    after a successful build. A later regenerate re-fetches source. Gated by
+    config.cpg.ephemeral_source (default on). Best-effort — only deletes once the
+    CPG is actually on disk, and never raises. Returns True if it deleted.
+    """
+    ephemeral = getattr(config.cpg, "ephemeral_source", True) if config else True
+    if not ephemeral:
+        return False
+    if not (cpg_path and os.path.exists(cpg_path)):
+        return False  # no CPG yet — keep source for retry/inspection
+    if not os.path.isdir(codebase_dir):
+        return False
+    try:
+        shutil.rmtree(codebase_dir, ignore_errors=True)
+        logger.info(f"Reclaimed source snapshot {codebase_dir} (ephemeral source)")
+        return True
+    except Exception as e:  # noqa: BLE001 — cleanup must never fail a built CPG
+        logger.warning(f"Could not delete source snapshot {codebase_dir}: {e}")
+        return False
+
+
 def _calculate_repo_size_mb(source_path: str) -> int:
     """Calculate total repository size in MB."""
     size_mb, _ = _scan_repo(source_path)
@@ -699,6 +724,12 @@ async def _generate_cpg_async(
         )
         
         logger.info(f"CPG generation complete for {codebase_hash}, port: {joern_port}")
+
+        # Ephemeral source: the build is done and cpg.bin is the sole persisted
+        # artifact (no tool reads source from disk), so drop the source snapshot —
+        # and any github clone, which lives under the same dir — to reclaim disk.
+        # A later regenerate re-fetches the source.
+        _reclaim_source_snapshot(codebase_dir, cpg_path, services.get("config"))
 
         # Fire-and-forget: the CPG is already marked READY above, so the build
         # worker can claim its next job without waiting on warm-up queries.

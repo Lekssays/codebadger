@@ -384,3 +384,38 @@ def test_copy_local_source_tree_concurrent_calls_are_safe(tmp_path):
     # all temp dirs cleaned up; only the final snapshot remains
     leftover = [p.name for p in (tmp_path / "codebases").iterdir() if ".tmp." in p.name]
     assert leftover == []
+
+
+# ── ephemeral source reclaim (B3) ─────────────────────────────────────────────
+
+from types import SimpleNamespace as _NS
+
+
+def _cfg(ephemeral):
+    return _NS(cpg=_NS(ephemeral_source=ephemeral))
+
+
+def test_reclaim_source_snapshot_deletes_after_build(tmp_path):
+    from src.tools.core_tools import _reclaim_source_snapshot
+    cdir = tmp_path / "codebases" / "h"; cdir.mkdir(parents=True)
+    (cdir / "a.c").write_text("x")
+    cpg = tmp_path / "cpgs" / "h" / "cpg.bin"; cpg.parent.mkdir(parents=True); cpg.write_bytes(b"CPG")
+    assert _reclaim_source_snapshot(str(cdir), str(cpg), _cfg(True)) is True
+    assert not cdir.exists()       # snapshot reclaimed
+    assert cpg.exists()            # CPG untouched
+
+
+def test_reclaim_source_snapshot_kept_when_disabled(tmp_path):
+    from src.tools.core_tools import _reclaim_source_snapshot
+    cdir = tmp_path / "codebases" / "h"; cdir.mkdir(parents=True)
+    cpg = tmp_path / "cpg.bin"; cpg.write_bytes(b"CPG")
+    assert _reclaim_source_snapshot(str(cdir), str(cpg), _cfg(False)) is False
+    assert cdir.exists()
+
+
+def test_reclaim_source_snapshot_kept_when_no_cpg(tmp_path):
+    from src.tools.core_tools import _reclaim_source_snapshot
+    cdir = tmp_path / "codebases" / "h"; cdir.mkdir(parents=True)
+    missing_cpg = tmp_path / "cpgs" / "h" / "cpg.bin"   # build didn't finish
+    assert _reclaim_source_snapshot(str(cdir), str(missing_cpg), _cfg(True)) is False
+    assert cdir.exists()           # source kept for retry when no CPG exists

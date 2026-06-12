@@ -256,6 +256,13 @@ CPG_QUEUE_BACKEND = "durable"
 # client and rejects ~30% of generations; keep generous headroom here instead.
 CPG_QUEUE_MAXSIZE = 64
 
+# Ephemeral source: once a build produces a cpg.bin, the source snapshot under
+# playground/codebases/<hash> (and any github clone there) is deleted — the CPG is
+# the sole persisted artifact, and no tool reads source from disk anymore. A later
+# regenerate re-fetches source (re-copy local / re-clone github). Set
+# CPG_EPHEMERAL_SOURCE=false to keep snapshots (e.g. for debugging a build).
+CPG_EPHEMERAL_SOURCE = True
+
 # Large-project guard: generate_cpg returns a "large_project_warning" (instead of
 # building) for a local source above either threshold, unless force=True. Meant to
 # stop an interactive user from accidentally committing to a giant full-project
