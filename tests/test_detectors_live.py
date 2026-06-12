@@ -184,6 +184,42 @@ void npd_reassigned(char *o){
 """
 
 
+TOCTOU_FIXTURE = r"""
+#include <sys/stat.h>
+#include <fcntl.h>
+void tc_samevar(const char *path){
+    struct stat st;
+    stat(path, &st);
+    open(path, 0);
+}
+void tc_literal(void){
+    struct stat st;
+    stat("/tmp/x", &st);
+    open("/tmp/x", 0);
+}
+void fp_diffvar(const char *file, const char *file2){
+    struct stat st;
+    stat(file, &st);
+    open(file2, 0);
+}
+void fp_diffliteral(void){
+    struct stat st;
+    stat("file", &st);
+    open("file2", 0);
+}
+"""
+
+
+def test_toctou_matrix(server):
+    out = _run_detector(server, TOCTOU_FIXTURE, "toctou")
+    fire = lambda fn: f"{fn}()" in out
+    assert fire("tc_samevar"), "check+use on the same variable is a TOCTOU"
+    assert fire("tc_literal"), "check+use on the same path literal is a TOCTOU"
+    # The substring `startsWith` match flagged these distinct paths before.
+    assert not fire("fp_diffvar"), "stat(file)/open(file2) are different variables"
+    assert not fire("fp_diffliteral"), "stat(\"file\")/open(\"file2\") are different paths"
+
+
 def test_null_pointer_deref_matrix(server):
     out = _run_detector(server, NPD_FIXTURE, "null_pointer_deref")
     fire = lambda fn: f"in {fn}()" in out

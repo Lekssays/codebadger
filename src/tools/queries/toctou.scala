@@ -49,33 +49,47 @@
       val methName = method.name
       val methFile = method.file.name.headOption.getOrElse("unknown")
 
-      // All check calls in this method, keyed by the path argument
+      // The first argument of a check/use is the path. Carry the argument NODE
+      // (not just its code) so we can compare targets by identity, not text.
       val checkCalls = method.call.name(checkPattern).l.flatMap { chk =>
-        // First argument is the path
-        val pathArg = chk.argument.order(1).l.headOption.map(_.code.trim).getOrElse("")
-        if (pathArg.nonEmpty) Some((chk, pathArg)) else None
+        chk.argument.argumentIndex(1).l.headOption.flatMap { a =>
+          val code = a.code.trim
+          if (code.nonEmpty) Some((chk, code, a)) else None
+        }
       }
 
-      // All use calls in this method
       val useCalls = method.call.name(usePattern).l.flatMap { use =>
-        val pathArg = use.argument.order(1).l.headOption.map(_.code.trim).getOrElse("")
-        if (pathArg.nonEmpty) Some((use, pathArg)) else None
+        use.argument.argumentIndex(1).l.headOption.flatMap { a =>
+          val code = a.code.trim
+          if (code.nonEmpty) Some((use, code, a)) else None
+        }
       }
 
-      checkCalls.foreach { case (chkCall, chkPath) =>
+      // Do two path arguments refer to the SAME target? For two identifiers,
+      // require the SAME variable via the REF edge (refsTo) — a textual
+      // `usePath.startsWith(chkPath)` flagged `stat(file); open(file2)` (a false
+      // positive) and would also conflate same-named variables in different
+      // scopes. For string literals / expressions, fall back to exact code match.
+      def sameTarget(chkArg: Expression, chkCode: String,
+                     useArg: Expression, useCode: String): Boolean = {
+        if (chkArg.isInstanceOf[Identifier] && useArg.isInstanceOf[Identifier]) {
+          val cr = chkArg.start.collectAll[Identifier].refsTo.id.l.headOption
+          val ur = useArg.start.collectAll[Identifier].refsTo.id.l.headOption
+          cr.isDefined && cr == ur
+        } else {
+          chkCode == useCode
+        }
+      }
+
+      checkCalls.foreach { case (chkCall, chkPath, chkArg) =>
         val chkLine = chkCall.lineNumber.getOrElse(-1)
 
-        useCalls.foreach { case (useCall, usePath) =>
+        useCalls.foreach { case (useCall, usePath, useArg) =>
           val useLine = useCall.lineNumber.getOrElse(-1)
 
           // Must be: check appears before use on a feasible path (line order heuristic)
           if (chkLine > 0 && useLine > 0 && chkLine < useLine) {
-            // Path arguments must refer to the same value:
-            // exact match OR the use path argument is derived from the check path
-            // (e.g. check uses `path`, open uses `path` or a variable holding `path`)
-            val sameTarget = chkPath == usePath || usePath.startsWith(chkPath)
-
-            if (sameTarget) {
+            if (sameTarget(chkArg, chkPath, useArg, usePath)) {
               issues += ((methFile, methName, chkLine, chkCall.code, chkPath,
                           useLine, useCall.code, usePath))
             }
