@@ -50,6 +50,22 @@ class QueryExecutor:
             raise ValueError("QueryExecutor requires a coordinator")
         self.coordinator = coordinator
 
+    def _is_loading(self, codebase_hash: str) -> bool:
+        """True if the codebase is mid-load/build, so its JVM is legitimately
+        busy (not runaway) and must not be terminated on a query timeout."""
+        if not self.codebase_tracker:
+            return False
+        try:
+            info = self.codebase_tracker.get_codebase(codebase_hash)
+        except Exception:
+            return False
+        if not info:
+            return False
+        return info.metadata.get("status") in (
+            SessionStatus.LOADING,
+            SessionStatus.GENERATING,
+        )
+
     def execute_query(
         self,
         codebase_hash: str,
@@ -134,9 +150,20 @@ class QueryExecutor:
                     span.set_attribute("query.execution_time_s", result.execution_time)
                     span.set_attribute("query.success", result.success)
 
-                    # On timeout: kill the server so the runaway JVM doesn't peg CPU.
+                    # On timeout: kill the server so a runaway JVM doesn't peg CPU.
                     # Mark it sleeping so the next query auto-reactivates transparently.
+                    # BUT never kill a server that is mid-load/build: a query that
+                    # times out while a CPG is still importing means the JVM is busy,
+                    # not runaway — terminating it aborts the load and permanently
+                    # fails the codebase. Leave it to finish; the caller retries.
                     if result.error_code == "TIMEOUT":
+                        if self._is_loading(codebase_hash):
+                            logger.info(
+                                f"Query timed out for {codebase_hash} while it is "
+                                f"loading/generating — leaving the server to finish, "
+                                f"not terminating"
+                            )
+                            return result
                         logger.warning(
                             f"Query timed out for {codebase_hash} — terminating server "
                             f"to stop runaway JVM (same pattern as load_cpg timeout)"

@@ -145,6 +145,11 @@ class JoernConfig:
     # scanned every reaper_interval_seconds. The next query reactivates it.
     idle_ttl_seconds: int = 600
     reaper_interval_seconds: int = 60
+    # Per-poll read timeout (seconds) for the post-import readiness probe. Total
+    # verify time is still bounded by the load_cpg timeout; this only caps a single
+    # probe so a CPG that is slow to answer its first query under load isn't
+    # mistaken for a failed/empty build.
+    verify_timeout_seconds: int = 60
     # HTTP Connection Pooling
     http_pool_connections: int = 10
     http_pool_maxsize: int = 10

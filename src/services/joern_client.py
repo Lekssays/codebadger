@@ -240,16 +240,30 @@ class JoernServerClient:
             f'open("{proj_lit}")'
         )
 
-    def _verify_loaded(self) -> tuple:
+    def _verify_loaded(self, deadline: Optional[float] = None) -> tuple:
         """Poll until a project is open and report (outcome, method_count).
 
-        Re-polls a few times so a project that is still being registered after
-        importCpg returns isn't mistaken for a permanent failure.
+        Re-polls so a project that is still being registered after importCpg
+        returns isn't mistaken for a permanent failure. Each probe uses the
+        configured ``verify_timeout`` (default 60s, formerly a hard-coded 15s
+        that condemned valid CPGs under load); the whole poll is bounded by
+        ``deadline`` (the load_cpg budget) so it can never outlive the load.
         """
+        verify_timeout = max(1, int(self.config.get("verify_timeout", 60)))
         last_stdout = ""
+        # Two independent bounds: a small attempt cap (a registration race or a
+        # genuinely-absent project resolves in a few fast polls — don't burn the
+        # whole load budget on a hopeless one) AND, when load_cpg passes one, a
+        # deadline so the poll can never outlive the load.
         for attempt in range(_VERIFY_POLL_ATTEMPTS):
+            if deadline is not None and time.monotonic() >= deadline:
+                break
+            # A single probe waits up to verify_timeout, but never past the deadline.
+            probe_timeout = verify_timeout
+            if deadline is not None:
+                probe_timeout = max(1, min(verify_timeout, int(deadline - time.monotonic())))
             verify_result = self.execute_query(
-                "cpg.method.isExternal(false).l.size", timeout=15
+                "cpg.method.isExternal(false).l.size", timeout=probe_timeout
             )
             if not verify_result.get("success"):
                 # Treat a connection/server error as retryable within the poll.
@@ -307,6 +321,9 @@ class JoernServerClient:
         """
         proj = _safe_project_name(project_name or cpg_path)
         query = self._import_query(cpg_path, proj)
+        # The readiness poll shares the load budget: it must verify within the
+        # same window the import was given, never outlive it.
+        verify_deadline = time.monotonic() + max(1, int(timeout))
 
         for attempt in range(2):  # initial import + one re-import on no_project
             label = "Loading" if attempt == 0 else "Re-importing"
@@ -317,7 +334,7 @@ class JoernServerClient:
                 logger.error(f"Error importing CPG from {cpg_path}: {e}")
                 # The import statement itself blew up; a verify poll can still
                 # confirm a prior successful load in rare connection-reset cases.
-                outcome, count = self._verify_loaded()
+                outcome, count = self._verify_loaded(verify_deadline)
                 if outcome == self._VERIFY_OK:
                     logger.info(f"CPG verified despite import exception: {count} methods")
                     return True
@@ -332,7 +349,7 @@ class JoernServerClient:
                     f"— verifying load state anyway"
                 )
 
-            outcome, count = self._verify_loaded()
+            outcome, count = self._verify_loaded(verify_deadline)
             if outcome == self._VERIFY_OK:
                 logger.info(f"CPG verified: {count} methods found")
                 return True

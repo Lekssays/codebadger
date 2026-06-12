@@ -795,6 +795,7 @@ class JoernServerManager:
                 "http_pool_maxsize": joern_cfg.http_pool_maxsize,
                 "http_max_retries": joern_cfg.http_max_retries,
                 "http_backoff_factor": joern_cfg.http_backoff_factor,
+                "verify_timeout": joern_cfg.verify_timeout_seconds,
             }
 
         client = JoernServerClient(

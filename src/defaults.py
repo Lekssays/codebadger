@@ -220,6 +220,12 @@ JOERN_RSS_EVICTION_THRESHOLD_MB = 0
 JOERN_IDLE_TTL_SECONDS = 600
 # How often the background reaper scans for idle workers (seconds).
 JOERN_REAPER_INTERVAL_SECONDS = 60
+# Read timeout for the post-import readiness probe (cpg.method...size). The probe
+# must comfortably exceed the time a freshly-loaded CPG takes to answer its first
+# query under host pressure; a too-short value (the old hard-coded 15s) condemned
+# valid CPGs as failed/empty during load. The probe is still polled and the total
+# verify time is bounded by the load_cpg timeout, so this only sets the per-poll cap.
+JOERN_VERIFY_TIMEOUT_SECONDS = 60
 
 # MCP connection concurrency limit
 MAX_MCP_CONNECTIONS = 16
