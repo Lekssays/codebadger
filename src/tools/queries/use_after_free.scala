@@ -318,7 +318,12 @@
               .distinct
               .toSet
 
-            val sameNameUsages = cpg.identifier.name(freedPtr).l
+            // freedPtr is the freed *expression* code ("p", "*ptr", "obj->ptr"),
+            // but we want usages of the underlying variable. Derive its identifier
+            // name and match it EXACTLY: Joern's .name(...) is regex-interpreted, so
+            // a dereference like "*ptr" would throw "Dangling meta character '*'".
+            val freedBaseName = freedPtrNode.ast.isIdentifier.name.headOption.getOrElse(freedPtr)
+            val sameNameUsages = cpg.identifier.nameExact(freedBaseName).l
               .filter { id =>
                 val idLine    = id.lineNumber.getOrElse(-1)
                 val idFile    = id.file.name.headOption.getOrElse("")
