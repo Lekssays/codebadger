@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codebadger"
-version = "0.4.3b0"
+version = "0.5.0b0"
 description = "Containerized MCP server exposing Joern Code Property Graphs for program and vulnerability analysis."
 readme = "README.md"
 requires-python = ">=3.10"  # PEP 604 union syntax (str | None) is used throughout
