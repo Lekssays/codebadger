@@ -60,3 +60,53 @@ def test_execute_via_client_sanitizes_host_paths_in_error():
     assert res.success is False
     assert "/mnt/nvme0/workspace" not in res.error
     assert "cpg.bin" in res.error
+
+from types import SimpleNamespace
+from src.models import SessionStatus
+
+
+def _executor_with(manager, tracker):
+    coord = MagicMock()
+    coord.codebase_query_lock.return_value.__enter__ = lambda *_: None
+    coord.codebase_query_lock.return_value.__exit__ = lambda *a: False
+    return QueryExecutor(joern_server_manager=manager, config={}, codebase_tracker=tracker, coordinator=coord)
+
+
+def test_execute_query_does_not_dispatch_while_loading():
+    """A query for a LOADING codebase returns a retry response, never hitting the JVM."""
+    mgr = MagicMock()
+    mgr.get_server_port.return_value = None
+    tracker = MagicMock()
+    tracker.get_codebase.return_value = SimpleNamespace(
+        metadata={"status": SessionStatus.LOADING}, cpg_path="/p/cpg.bin"
+    )
+    qe = _executor_with(mgr, tracker)
+
+    res = qe.execute_query("abc123", "/p/cpg.bin", "cpg.method.l", timeout=30)
+
+    assert res.success is False
+    assert res.error_code == "SERVER_UNAVAILABLE"
+    assert "loading" in res.error.lower()
+    mgr.reactivate.assert_not_called()          # must not reactivate mid-build
+    mgr.get_or_create_client.assert_not_called()  # must not dispatch
+
+
+def test_execute_query_reactivates_ready_zombie():
+    """A READY codebase whose worker is gone is reactivated, not failed."""
+    mgr = MagicMock()
+    mgr.get_server_port.return_value = None
+    mgr.reactivate.return_value = 14000
+    client = MagicMock()
+    client.check_health.return_value = True
+    client.execute_query.return_value = {"success": True, "stdout": "[]"}
+    mgr.get_or_create_client.return_value = client
+    tracker = MagicMock()
+    tracker.get_codebase.return_value = SimpleNamespace(
+        metadata={"status": SessionStatus.READY}, cpg_path="/p/cpg.bin"
+    )
+    qe = _executor_with(mgr, tracker)
+
+    res = qe.execute_query("abc123", "/p/cpg.bin", "cpg.method.l", timeout=30)
+
+    mgr.reactivate.assert_called_once_with("abc123", "/p/cpg.bin")
+    assert res.success is True

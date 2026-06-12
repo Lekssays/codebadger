@@ -104,19 +104,41 @@ class QueryExecutor:
                 with self.coordinator.codebase_query_lock(codebase_hash):
                     port = self.joern_server_manager.get_server_port(codebase_hash)
                     if not port:
-                        if self.codebase_tracker:
-                            info = self.codebase_tracker.get_codebase(codebase_hash)
-                            if info and info.metadata.get("status") == SessionStatus.SLEEPING and info.cpg_path:
-                                logger.info(f"Auto-waking sleeping codebase {codebase_hash}")
-                                try:
-                                    port = self.joern_server_manager.reactivate(codebase_hash, info.cpg_path)
-                                except Exception as e:
-                                    return QueryResult(
-                                        success=False,
-                                        error=f"Failed to reactivate sleeping codebase: {e}",
-                                        error_code="SERVER_UNAVAILABLE",
-                                        execution_time=time.time() - start_time,
-                                    )
+                        info = (
+                            self.codebase_tracker.get_codebase(codebase_hash)
+                            if self.codebase_tracker else None
+                        )
+                        status = info.metadata.get("status") if info else None
+                        # Don't dispatch a query into a build/load in progress: the
+                        # server isn't ready, so the call would hit a dead/not-ready
+                        # port and surface as "connection refused". Tell the caller
+                        # to poll instead.
+                        if status in (SessionStatus.LOADING, SessionStatus.GENERATING):
+                            return QueryResult(
+                                success=False,
+                                error="CPG is still loading; try again shortly.",
+                                error_code="SERVER_UNAVAILABLE",
+                                execution_time=time.time() - start_time,
+                            )
+                        # SLEEPING (idle-reaped) or READY-but-server-gone (a zombie
+                        # whose worker was reaped/evicted): reactivate from the CPG
+                        # on disk rather than failing. reload_with_retry absorbs a
+                        # transient reactivation stall.
+                        if info and info.cpg_path and status in (
+                            SessionStatus.SLEEPING, SessionStatus.READY,
+                        ):
+                            logger.info(
+                                f"Reactivating {status} codebase {codebase_hash} (no live server)"
+                            )
+                            try:
+                                port = self.joern_server_manager.reactivate(codebase_hash, info.cpg_path)
+                            except Exception as e:
+                                return QueryResult(
+                                    success=False,
+                                    error=f"Failed to reactivate codebase: {e}",
+                                    error_code="SERVER_UNAVAILABLE",
+                                    execution_time=time.time() - start_time,
+                                )
                     if not port:
                         return QueryResult(
                             success=False,

@@ -816,13 +816,28 @@ class JoernServerManager:
         return port
 
     def get_or_create_client(self, codebase_hash: str) -> "JoernServerClient":
-        if codebase_hash in self._clients:
-            self._touch(codebase_hash)
-            return self._clients[codebase_hash]
-
         port = self.get_server_port(codebase_hash)
         if port is None:
             raise RuntimeError(f"No Joern server running for codebase {codebase_hash}")
+
+        cached = self._clients.get(codebase_hash)
+        if cached is not None:
+            if cached.port == port:
+                self._touch(codebase_hash)
+                return cached
+            # The worker was re-spawned on a different port (e.g. evicted and
+            # reactivated by another process), so the cached client points at a
+            # dead port — every request would get "connection refused". Drop it
+            # and rebuild against the current registry port.
+            logger.info(
+                f"Rebuilding stale client for {codebase_hash}: cached port "
+                f"{cached.port} != current port {port}"
+            )
+            try:
+                cached.close()
+            except Exception:
+                pass
+            self._clients.pop(codebase_hash, None)
 
         from .joern_client import JoernServerClient
 

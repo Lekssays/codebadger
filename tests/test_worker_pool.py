@@ -291,3 +291,31 @@ def test_reload_with_retry_gives_up_after_max_attempts(pool, monkeypatch):
     port = m.reload_with_retry("abc", "/playground/cpgs/abc/cpg.bin")
     assert port is None
     assert len(spawns) == m.config.joern.load_max_attempts
+
+
+# ── get_or_create_client rebuilds a stale (wrong-port) cached client (A4) ──────
+
+def test_get_or_create_client_rebuilds_on_stale_port(pool, monkeypatch):
+    m, _ = pool
+    # Seed a cached client on the old port; registry now reports a new port.
+    stale = MagicMock()
+    stale.port = 14001
+    m._clients["abc"] = stale
+    monkeypatch.setattr(m, "get_server_port", lambda h: 14002)
+
+    client = m.get_or_create_client("abc")
+
+    assert client is not stale
+    assert client.port == 14002
+    stale.close.assert_called_once()  # stale client closed
+
+
+def test_get_or_create_client_reuses_client_on_matching_port(pool, monkeypatch):
+    m, _ = pool
+    good = MagicMock()
+    good.port = 14002
+    m._clients["abc"] = good
+    monkeypatch.setattr(m, "get_server_port", lambda h: 14002)
+
+    assert m.get_or_create_client("abc") is good
+    good.close.assert_not_called()
