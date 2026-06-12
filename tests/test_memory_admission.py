@@ -190,6 +190,32 @@ def test_reap_evicted_removes_containers_and_marks_sleeping(manager, monkeypatch
     assert all(kw["metadata"]["status"] == SessionStatus.SLEEPING for _, kw in updates)
 
 
+def test_get_running_servers_does_not_probe_in_shared_mode(manager, monkeypatch):
+    """Shared mode returns the believed-live registry without a TCP probe per
+    server (the probe loop blocked /health for tens of seconds at scale)."""
+    manager._redis_pool = None
+    manager._ports = {"a": 13371, "b": 13372}
+
+    probed = []
+    monkeypatch.setattr(manager, "is_server_running", lambda h: probed.append(h) or True)
+    monkeypatch.setattr(
+        manager, "_port_healthy", lambda p: probed.append(p) or True
+    )
+
+    servers = manager.get_running_servers()
+
+    assert servers == {"a": 13371, "b": 13372}
+    assert probed == []  # no per-server liveness probe was issued
+
+
+def test_get_running_servers_uses_redis_registry_when_pooled(manager):
+    rp = _FakeRedisPool()
+    rp.reg = {"x": 14001, "y": 14002}
+    rp.running_servers = lambda: dict(rp.reg)
+    manager._redis_pool = rp
+    assert manager.get_running_servers() == {"x": 14001, "y": 14002}
+
+
 def test_reap_evicted_continues_when_one_removal_fails(manager, monkeypatch):
     def _remove(name):
         if name == "codebadger-joern-a":

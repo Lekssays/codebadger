@@ -910,12 +910,22 @@ class JoernServerManager:
         logger.info("All Joern servers terminated")
 
     def get_running_servers(self) -> Dict[str, int]:
+        """Believed-live server map (hash -> host port). A status/health summary.
+
+        Returns the registry WITHOUT a blocking per-port TCP probe. This is called
+        from /health and the 60s status log; probing every server serially (up to
+        1s each on a hung port) made those calls block for tens of seconds once a
+        few dozen servers were active. The watchdog reaps genuinely-dead servers
+        within 30s, so a just-died entry self-heals shortly — and the Redis pool
+        branch already returns its registry unverified, so this matches it. Use
+        is_server_running(hash) when an authoritative per-server liveness check is
+        actually needed (e.g. the spawn fast path).
+        """
         if self._redis_pool:
             # Global view across all processes (registry is authority).
             return dict(self._redis_pool.running_servers())
         with self._state_lock:
-            ports = list(self._ports.items())
-        return {h: p for h, p in ports if self.is_server_running(h)}
+            return dict(self._ports)
 
     def get_memory_stats(self, include_container_rss: bool = True) -> dict:
         """Snapshot the memory-admission ledger for /health and status logs."""
