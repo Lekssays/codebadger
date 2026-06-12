@@ -6,7 +6,12 @@ services:
     image: codebadger-joern-server:latest
     container_name: codebadger-joern-server
     ports:
-      - "13371-13870:13371-13870"
+      # Bind to loopback only. Each Joern server runs the full Ammonite Scala
+      # REPL with no auth by default, so publishing this range on all interfaces
+      # would expose unauthenticated code execution that bypasses the MCP's CPGQL
+      # validation. The MCP reaches these via localhost (host networking). Pool
+      # worker containers already publish on 127.0.0.1 (see joern_server_manager).
+      - "127.0.0.1:13371-13870:13371-13870"
     volumes:
       # Same host dir the MCP mounts; keep PLAYGROUND_HOST_PATH consistent across services.
       - ${PLAYGROUND_HOST_PATH:-./playground}:/playground
