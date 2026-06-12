@@ -35,6 +35,18 @@ from src.services import (
 )
 from src.utils import setup_logging
 from src.utils import compute_recommendation, current_from_config, render_recommendation
+from src.startup_tuning import apply_startup_tuning, container_mem_limit_mb, parse_mem_to_mb
+from src.health import (
+    aggregate_status as _aggregate_status,
+    const as _const,
+    describe_joern_container_issue as _describe_joern_container_issue,
+    format_codebase_source as _format_codebase_source,
+    format_uptime as _format_uptime,
+    get_disk_usage as _get_disk_usage,
+    get_process_memory_mb as _get_process_memory_mb,
+    get_system_memory_available_gb as _get_system_memory_available_gb,
+    run_probe as _run_probe,
+)
 from src.utils.postgres_db_manager import PostgresDBManager
 
 # Postgres and Redis are the backing services. Connection URLs resolve from env
@@ -90,112 +102,6 @@ def _setup_telemetry(config) -> None:
         logger.warning(f"Failed to initialize OpenTelemetry: {e}")
 
 
-def _apply_startup_tuning(config) -> None:
-    """Log the memory-aware recommendation and auto-derive unset memory limits.
-
-    Logging is gated by RECOMMEND_ON_STARTUP (default on); the auto-tuning that
-    fills in an unset Joern memory budget / RSS threshold from host RAM is gated
-    by AUTO_TUNE_MEMORY (default on). Auto-tuning runs before the Joern manager
-    is constructed so it picks up the derived values. Explicit config always
-    wins — only values left at 0 are filled in."""
-    try:
-        rec = compute_recommendation(worker_mode=getattr(config.joern, "worker_mode", "shared"))
-    except Exception as e:
-        logger.warning(f"Could not compute startup config recommendation: {e}")
-        return
-
-    if os.getenv("RECOMMEND_ON_STARTUP", "true").lower() != "false":
-        try:
-            for line in render_recommendation(rec, current=current_from_config(config)).splitlines():
-                logger.info(line)
-        except Exception as e:
-            logger.warning(f"Could not render startup recommendation: {e}")
-
-    if os.getenv("AUTO_TUNE_MEMORY", "true").lower() == "false":
-        return
-    try:
-        if getattr(config.joern, "memory_budget_mb", 0) <= 0:
-            config.joern.memory_budget_mb = rec.query_budget_gb * 1024
-            logger.info(
-                f"Auto-tuned Joern memory_budget_mb={config.joern.memory_budget_mb} "
-                f"({rec.query_budget_gb}GB query pool from {rec.host.total_mem_gb:g}GB host). "
-                f"Set JOERN_MEMORY_BUDGET_MB or AUTO_TUNE_MEMORY=false to override."
-            )
-        if getattr(config.joern, "rss_eviction_threshold_mb", 0) <= 0:
-            config.joern.rss_eviction_threshold_mb = rec.rss_eviction_threshold_mb
-            logger.info(
-                f"Auto-tuned Joern rss_eviction_threshold_mb={config.joern.rss_eviction_threshold_mb}"
-            )
-        # Pool mode: the build (joern-server) container cap and the worker
-        # reservation ledger are SEPARATE memory pools. Keep their sum within the
-        # Joern budget so they can't jointly over-commit host RAM.
-        if getattr(config.joern, "worker_mode", "shared") == "pool":
-            _guard_pool_memory(config, rec)
-    except Exception as e:
-        logger.warning(f"Could not apply startup memory auto-tuning: {e}")
-
-
-def _parse_mem_to_mb(value):
-    """Parse a Docker-style memory string ('100g', '512m', '2048') to MB, or None."""
-    if value is None:
-        return None
-    s = str(value).strip().lower().rstrip("b")
-    m = re.match(r"^(\d+(?:\.\d+)?)\s*([gmk]?)$", s)
-    if not m:
-        return None
-    factor = {"g": 1024, "m": 1, "k": 1 / 1024, "": 1}[m.group(2)]  # bare value treated as MB
-    return int(float(m.group(1)) * factor)
-
-
-def _guard_pool_memory(config, rec) -> None:
-    """Prevent pool-mode host over-commit by clamping the worker memory budget.
-
-    The joern-server container (builds) is capped by JOERN_MEM_LIMIT and the
-    query workers by memory_budget_mb; those are independent pools, so we hold
-    build_cap + memory_budget <= joern_budget."""
-    joern_budget_mb = rec.joern_budget_gb * 1024
-    build_cap_mb = _parse_mem_to_mb(os.getenv("JOERN_MEM_LIMIT"))
-    if build_cap_mb is None:
-        build_cap_mb = 100 * 1024  # docker-compose default when unset
-    safe_worker_mb = joern_budget_mb - build_cap_mb
-    min_worker_mb = min((t.container_cap_gb for t in rec.tiers), default=3) * 1024
-
-    if safe_worker_mb < min_worker_mb:
-        logger.warning(
-            f"Pool mode: the build container cap (JOERN_MEM_LIMIT≈{build_cap_mb}MB) leaves only "
-            f"{safe_worker_mb}MB for query workers within the {joern_budget_mb}MB Joern budget. "
-            f"Lower JOERN_MEM_LIMIT to ~{rec.build_container_cap_gb}g (the build reserve) so workers "
-            f"get ~{rec.query_budget_gb}GB. Forcing worker budget to {min_worker_mb}MB for now."
-        )
-        config.joern.memory_budget_mb = min_worker_mb
-    elif config.joern.memory_budget_mb > safe_worker_mb:
-        logger.warning(
-            f"Pool-mode over-commit guard: build cap {build_cap_mb}MB + worker budget "
-            f"{config.joern.memory_budget_mb}MB > Joern budget {joern_budget_mb}MB. Clamping worker "
-            f"budget to {safe_worker_mb}MB. To regain capacity set JOERN_MEM_LIMIT="
-            f"{rec.build_container_cap_gb}g (build-only) in docker-compose."
-        )
-        config.joern.memory_budget_mb = safe_worker_mb
-
-
-def _container_mem_limit_mb(joern_manager, container_name: str):
-    """Actual mem_limit (MB) of the running build container, or None.
-
-    A container's memory cap is fixed at `docker compose up` time, so this is the
-    REAL limit in force — not whatever JOERN_MEM_LIMIT is set to for this process."""
-    try:
-        import docker
-
-        client = getattr(joern_manager, "docker_client", None) or docker.from_env()
-        container = client.containers.get(container_name)
-        mem_bytes = (container.attrs.get("HostConfig", {}) or {}).get("Memory", 0)
-        if mem_bytes and mem_bytes > 0:
-            return int(mem_bytes / (1024 * 1024))
-    except Exception:
-        return None
-    return None
-
-
 def _log_effective_config(config) -> None:
     """Log the RESOLVED runtime config and flag env-vs-effective mismatches.
 
@@ -232,10 +138,10 @@ def _log_effective_config(config) -> None:
         logger.info(f"  Build        : {build_workers} workers × {build_heap}G heap")
 
         intended = os.getenv("JOERN_MEM_LIMIT")
-        actual_mb = _container_mem_limit_mb(joern_mgr, container_name) if joern_mgr else None
+        actual_mb = container_mem_limit_mb(joern_mgr, container_name) if joern_mgr else None
         if actual_mb is not None:
             logger.info(f"  Build cap    : {actual_mb}MB (live container '{container_name}')")
-            intended_mb = _parse_mem_to_mb(intended)
+            intended_mb = parse_mem_to_mb(intended)
             if intended_mb is not None and abs(intended_mb - actual_mb) > 1:
                 logger.warning(
                     f"  ⚠ JOERN_MEM_LIMIT={intended} (≈{intended_mb}MB) != live container cap "
@@ -372,22 +278,6 @@ def _check_joern_container_status(container_name: str | None = None, joern_manag
         }
 
 
-def _describe_joern_container_issue(container_info: dict) -> str | None:
-    """Return a user-facing issue string for the current Joern container state."""
-    status = container_info.get("status")
-    container_name = container_info.get("container_name", "codebadger-joern-server")
-
-    if status == "running":
-        return None
-    if status == "not_found":
-        return f"Joern Docker container '{container_name}' not found"
-    if status == "docker_unavailable":
-        return f"Cannot connect to Docker daemon: {container_info.get('error', 'Docker unavailable')}"
-    if status == "error":
-        return f"Failed to inspect Joern Docker container '{container_name}': {container_info.get('error', 'unknown error')}"
-    return f"Joern Docker container '{container_name}' is not running"
-
-
 def _get_active_servers() -> dict:
     """Return the active Joern server map and count."""
     joern_manager = services.get("joern_server_manager")
@@ -447,7 +337,7 @@ async def app_lifespan(server: FastMCP):
     # Print the memory-aware configuration envelope before the heavy service
     # init, flag drift that risks an OOM cascade, and auto-derive an unset Joern
     # memory budget from host RAM (before the Joern manager is constructed).
-    _apply_startup_tuning(config)
+    apply_startup_tuning(config)
 
     # Setup OpenTelemetry (must happen before tool invocations)
     _setup_telemetry(config)
@@ -684,69 +574,6 @@ def _uptime_seconds() -> float:
     return round(time.monotonic() - _server_start_time, 1) if _server_start_time else 0.0
 
 
-def _format_uptime(seconds: float) -> str:
-    s = int(seconds)
-    days, s = divmod(s, 86400)
-    hours, s = divmod(s, 3600)
-    minutes, s = divmod(s, 60)
-    parts = []
-    if days:
-        parts.append(f"{days}d")
-    if hours:
-        parts.append(f"{hours}h")
-    if minutes:
-        parts.append(f"{minutes}m")
-    parts.append(f"{s}s")
-    return " ".join(parts)
-
-
-def _get_process_memory_mb() -> float:
-    try:
-        import psutil
-        return round(psutil.Process().memory_info().rss / (1024 ** 2), 1)
-    except ImportError:
-        pass
-    try:
-        with open("/proc/self/status") as f:
-            for line in f:
-                if line.startswith("VmRSS:"):
-                    kb = int(line.split()[1])
-                    return round(kb / 1024, 1)
-    except Exception:
-        pass
-    return -1.0
-
-
-def _get_system_memory_available_gb() -> float:
-    try:
-        import psutil
-        return round(psutil.virtual_memory().available / (1024 ** 3), 2)
-    except ImportError:
-        pass
-    try:
-        with open("/proc/meminfo") as f:
-            for line in f:
-                if line.startswith("MemAvailable:"):
-                    kb = int(line.split()[1])
-                    return round(kb / (1024 ** 2), 2)
-    except Exception:
-        pass
-    return -1.0
-
-
-def _get_disk_usage(path: str) -> dict:
-    try:
-        stat = shutil.disk_usage(path)
-        return {
-            "total_gb": round(stat.total / (1024 ** 3), 2),
-            "used_gb": round(stat.used / (1024 ** 3), 2),
-            "free_gb": round(stat.free / (1024 ** 3), 2),
-            "percent_used": round((stat.used / stat.total) * 100, 1) if stat.total > 0 else 0,
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-
 def _get_cpg_cache_mb() -> float:
     try:
         project_root = os.path.dirname(os.path.abspath(__file__))
@@ -761,17 +588,6 @@ def _get_cpg_cache_mb() -> float:
         return round(total / (1024 ** 2), 2)
     except Exception:
         return -1.0
-
-
-def _format_codebase_source(source_type: str, source_path: str, include_sensitive: bool = False) -> str:
-    """Format a codebase source for operator output.
-
-    Health responses default to redacted values so repository locations are not
-    exposed. Internal status logs can opt into the original source path.
-    """
-    if include_sensitive:
-        return source_path
-    return f"<redacted:{source_type or 'unknown'}>"
 
 
 def _get_codebase_list(include_sensitive: bool = False) -> list:
@@ -808,44 +624,6 @@ def _get_codebase_list(include_sensitive: bool = False) -> list:
         return result
     except Exception:
         return []
-
-
-# Overall status / dependency vocabulary: up | partial | down.
-def _aggregate_status(dependencies: dict) -> str:
-    """Roll per-dependency statuses into one overall up/partial/down value.
-
-    `up` ONLY when every dependency is up. ANY dependency that is down makes the
-    whole server `down` — every dependency here (Postgres, Redis, Docker, Joern,
-    the CPG queue) is required for the server to do its job, so losing any one is
-    a full outage, not a degradation. A dependency that is merely degraded
-    (`partial`, e.g. Joern memory pressure or a full queue) reports as `partial`.
-    """
-    statuses = list(dependencies.values())
-    if any(status == "down" for status in statuses):
-        return "down"
-    if any(status == "partial" for status in statuses):
-        return "partial"
-    return "up"
-
-
-async def _run_probe(fn, timeout: float = 2.0) -> dict:
-    """Run a blocking liveness probe in a thread with a hard timeout.
-
-    Never raises: a hung backend (dead socket, no connect timeout) resolves to
-    {"ok": False, "error": ...} so /health always answers promptly instead of
-    blocking the event loop. Returns whatever `fn` returns on success.
-    """
-    loop = asyncio.get_running_loop()
-    try:
-        return await asyncio.wait_for(loop.run_in_executor(None, fn), timeout=timeout)
-    except asyncio.TimeoutError:
-        return {"ok": False, "error": f"probe timed out after {timeout}s"}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-
-async def _const(value):
-    return value
 
 
 async def _build_health(include_sensitive: bool = False) -> dict:

@@ -8,20 +8,20 @@ import types
 
 import pytest
 
-import main
+from src.startup_tuning import parse_mem_to_mb, guard_pool_memory
 from src.utils.recommend import HostSpec, compute
 
 HOST = HostSpec(total_mem_gb=125, cores=64, source="manual")
 
 
 def test_parse_mem_to_mb():
-    assert main._parse_mem_to_mb("100g") == 102400
-    assert main._parse_mem_to_mb("512m") == 512
-    assert main._parse_mem_to_mb("28g") == 28672
-    assert main._parse_mem_to_mb("2048") == 2048   # bare = MB
-    assert main._parse_mem_to_mb("4G") == 4096      # case-insensitive
-    assert main._parse_mem_to_mb(None) is None
-    assert main._parse_mem_to_mb("garbage") is None
+    assert parse_mem_to_mb("100g") == 102400
+    assert parse_mem_to_mb("512m") == 512
+    assert parse_mem_to_mb("28g") == 28672
+    assert parse_mem_to_mb("2048") == 2048   # bare = MB
+    assert parse_mem_to_mb("4G") == 4096      # case-insensitive
+    assert parse_mem_to_mb(None) is None
+    assert parse_mem_to_mb("garbage") is None
 
 
 def test_recommender_pool_split_invariant():
@@ -45,7 +45,7 @@ def test_guard_clamps_when_build_cap_too_large(monkeypatch):
     rec = compute(HOST, worker_mode="pool")
     monkeypatch.setenv("JOERN_MEM_LIMIT", "100g")  # oversized build cap (shared-mode default)
     cfg = _pool_cfg(rec.query_budget_gb * 1024)
-    main._guard_pool_memory(cfg, rec)
+    guard_pool_memory(cfg, rec)
     expected = rec.joern_budget_gb * 1024 - 100 * 1024
     assert cfg.joern.memory_budget_mb == expected
     # No over-commit: build_cap + worker_budget <= joern_budget.
@@ -56,7 +56,7 @@ def test_guard_no_clamp_when_build_cap_sized_correctly(monkeypatch):
     rec = compute(HOST, worker_mode="pool")
     monkeypatch.setenv("JOERN_MEM_LIMIT", f"{rec.build_container_cap_gb}g")
     cfg = _pool_cfg(rec.query_budget_gb * 1024)
-    main._guard_pool_memory(cfg, rec)
+    guard_pool_memory(cfg, rec)
     assert cfg.joern.memory_budget_mb == rec.query_budget_gb * 1024  # untouched
 
 
@@ -64,6 +64,6 @@ def test_guard_floors_when_build_cap_exceeds_budget(monkeypatch):
     rec = compute(HOST, worker_mode="pool")
     monkeypatch.setenv("JOERN_MEM_LIMIT", "200g")  # bigger than the whole budget
     cfg = _pool_cfg(rec.query_budget_gb * 1024)
-    main._guard_pool_memory(cfg, rec)
+    guard_pool_memory(cfg, rec)
     min_worker = min(t.container_cap_gb for t in rec.tiers) * 1024
     assert cfg.joern.memory_budget_mb == min_worker
