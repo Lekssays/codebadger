@@ -269,8 +269,8 @@ def _cached_taint_query(
             if cached is not None:
                 logger.debug(f"Cache hit for {tool_name}")
                 return cached
-        except Exception:
-            pass  # cache lookup failure is non-fatal
+        except Exception as e:
+            logger.debug(f"Cache lookup failed for {tool_name} (non-fatal): {e}")
 
     # Cache miss — execute the query
     result = query_func()
@@ -286,8 +286,8 @@ def _cached_taint_query(
 
             if should_cache:
                 db_manager.cache_tool_output(tool_name, codebase_hash, cache_params, result)
-        except Exception:
-            pass  # cache write failure is non-fatal
+        except Exception as e:
+            logger.debug(f"Cache write failed for {tool_name} (non-fatal): {e}")
 
     return result
 

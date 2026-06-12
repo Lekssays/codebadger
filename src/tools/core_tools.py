@@ -458,8 +458,10 @@ async def _restart_server_async(
                 codebase_hash=codebase_hash,
                 metadata={"status": SessionStatus.FAILED, "error": f"Server restart failed: {e}"}
             )
-        except Exception:
-            pass
+        except Exception as tracker_error:
+            logger.warning(
+                f"Could not mark {codebase_hash} FAILED after restart error: {tracker_error}"
+            )
 
 
 async def _generate_cpg_async(

@@ -80,7 +80,8 @@ def run_query(
     if tool_name and cache_params is not None and db:
         try:
             cached = db.get_cached_tool_output(tool_name, codebase_hash, cache_params)
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Cache lookup failed for {tool_name} (non-fatal): {e}")
             cached = None
         if cached is not None:
             logger.debug(f"Cache hit for {tool_name}")
@@ -106,7 +107,7 @@ def run_query(
     if tool_name and cache_params is not None and db:
         try:
             db.cache_tool_output(tool_name, codebase_hash, cache_params, output)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Cache write failed for {tool_name} (non-fatal): {e}")
 
     return output

@@ -1,6 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codebadger"
+version = "0.4.3b0"
+description = "Containerized MCP server exposing Joern Code Property Graphs for program and vulnerability analysis."
+readme = "README.md"
+requires-python = ">=3.10"  # PEP 604 union syntax (str | None) is used throughout
+license = { file = "LICENSE" }
+# Runtime dependencies are pinned in requirements.txt (the install source for the
+# Docker images); declared here dynamically as the canonical list for tooling.
+dynamic = ["dependencies"]
+
+[tool.setuptools]
+py-modules = ["main"]
+
+[tool.setuptools.packages.find]
+include = ["src*"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
 [tool.black]
 line-length = 88
-target-version = ['py38']
+target-version = ['py310']  # matches requires-python floor; was py38
 include = '\.pyi?$'
 extend-exclude = '''
 /(
