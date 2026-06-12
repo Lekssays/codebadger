@@ -42,10 +42,10 @@
       // Pre-compute once per method — O(n) instead of O(locals × identifiers)
       val plainAssignments = method.call.nameExact("<operator>.assignment").l
       // IDs of identifiers that are the direct LHS of a plain assignment
-      val lhsIds = plainAssignments.flatMap(_.argument.order(1).l.headOption).map(_.id).toSet
+      val lhsIds = plainAssignments.flatMap(_.argument.argumentIndex(1).l.headOption).map(_.id).toSet
       // Map varName → sorted list of plain-assignment line numbers
       val assignLinesByVar: Map[String, List[Int]] = plainAssignments
-        .groupBy(c => c.argument.order(1).l.headOption.map(_.code.trim).getOrElse(""))
+        .groupBy(c => c.argument.argumentIndex(1).l.headOption.map(_.code.trim).getOrElse(""))
         .view.mapValues(cs => cs.flatMap(_.lineNumber).sorted).toMap
       // Map varName → all identifier nodes (reads and compound-assign LHS)
       val identsByName: Map[String, List[Identifier]] =

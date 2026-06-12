@@ -170,7 +170,7 @@
       val sizeArgIdx = if (sizeInSecondArg.contains(allocCall.name)) 2 else 1
 
       // === PHASE 1: Direct arithmetic in size argument ===
-      allocCall.argument.order(sizeArgIdx).l.foreach { sizeArg =>
+      allocCall.argument.argumentIndex(sizeArgIdx).l.foreach { sizeArg =>
 
         // Check high-risk operators (multiplication, left-shift)
         // Take only the first (outermost in AST) match per allocation site
@@ -220,7 +220,7 @@
       // Pattern: size = a * b; ... malloc(size);
       // Skip if Phase 1 already reported this allocation site
       if (!seenAllocSites.contains(s"$allocFile:$allocLine")) {
-        allocCall.argument.order(sizeArgIdx).l.foreach { sizeArg =>
+        allocCall.argument.argumentIndex(sizeArgIdx).l.foreach { sizeArg =>
           val sizeVarNames = sizeArg.ast.isIdentifier.name.l.distinct
           val siteKey = s"$allocFile:$allocLine"
 
@@ -278,7 +278,7 @@
 
       // One issue per index site; skip if already reported
       if (!seenIndexSites.contains(indexSiteKey)) {
-        indexCall.argument.order(2).l.foreach { indexArg =>
+        indexCall.argument.argumentIndex(2).l.foreach { indexArg =>
           indexArg.ast.isCall.filter(c => highRiskOps.contains(c.name)).l
             .find { arithOp =>
               val operandCodes = arithOp.argument.l.map(_.code.trim)
@@ -347,7 +347,7 @@
       // Sinks: size arguments of allocation calls
       val allocSinkNodes = allocCalls.flatMap { allocCall =>
         val sizeArgIdx = if (sizeInSecondArg.contains(allocCall.name)) 2 else 1
-        allocCall.argument.order(sizeArgIdx).l
+        allocCall.argument.argumentIndex(sizeArgIdx).l
       }.take(200).collect { case cfgNode: CfgNode => cfgNode }
 
       if (arithSourceNodes.nonEmpty && allocSinkNodes.nonEmpty) {

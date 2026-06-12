@@ -19,7 +19,7 @@
 
   val sinks = cpg.call
     .name(sinkPattern)
-    .where(_.argument.order(1).whereNot(_.isLiteral))
+    .where(_.argument.argumentIndex(1).whereNot(_.isLiteral))
 
   val filtered = if (fileFilter.nonEmpty) {
     val pattern = pathBoundaryRegex(fileFilter)

@@ -56,7 +56,7 @@
 
     filteredCalls.foreach { call =>
       val fmtArgOrder = formatFunctions.getOrElse(call.name, 1)
-      call.argument.order(fmtArgOrder).l.headOption.foreach { fmtArg =>
+      call.argument.argumentIndex(fmtArgOrder).l.headOption.foreach { fmtArg =>
         // A string literal is safe.  Anything else is suspicious.
         val isLiteral = fmtArg.isInstanceOf[Literal] || {
           val c = fmtArg.code.trim

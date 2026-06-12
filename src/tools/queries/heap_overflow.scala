@@ -108,7 +108,7 @@
         if (!bufVar.contains("(") && !bufVar.contains("[") && bufVar.length < 50 && bufVar.nonEmpty) {
 
           val sizeArgOrder = if (sizeInSecondArg.contains(allocCall.name)) 2 else 1
-          val allocSizeExpr = allocCall.argument.order(sizeArgOrder).l.headOption.map(_.code).getOrElse("?")
+          val allocSizeExpr = allocCall.argument.argumentIndex(sizeArgOrder).l.headOption.map(_.code).getOrElse("?")
 
           // Track reassignments of the buffer after allocation
           val reassignLines = mutable.Set[Int]()
@@ -124,7 +124,7 @@
             val writeLine = writeCall.lineNumber.getOrElse(-1)
             if (writeLine > allocLine) {
               val (dstOrder, sizeOrder) = writeOps.getOrElse(writeCall.name, (1, 0))
-              val dstCode = writeCall.argument.order(dstOrder).l.headOption.map(_.code.trim).getOrElse("")
+              val dstCode = writeCall.argument.argumentIndex(dstOrder).l.headOption.map(_.code.trim).getOrElse("")
 
               val bufIsArg = dstCode == bufVar ||
                 dstCode.startsWith(bufVar + "[") ||
@@ -138,7 +138,7 @@
 
                 if (!reassigned && !inDiffBranch) {
                   val writeSizeExpr = if (sizeOrder > 0)
-                    writeCall.argument.order(sizeOrder).l.headOption.map(_.code.trim).getOrElse("?")
+                    writeCall.argument.argumentIndex(sizeOrder).l.headOption.map(_.code.trim).getOrElse("?")
                   else
                     "(unbounded)"
 

@@ -94,7 +94,7 @@
           m.call.name(writePattern).l.foreach { writeCall =>
             val writeLine = writeCall.lineNumber.getOrElse(-1)
             val (dstOrder, sizeOrder) = writeOps.getOrElse(writeCall.name, (1, 0))
-            val dstCode = writeCall.argument.order(dstOrder).l.headOption.map(_.code.trim).getOrElse("")
+            val dstCode = writeCall.argument.argumentIndex(dstOrder).l.headOption.map(_.code.trim).getOrElse("")
 
             val bufIsArg = dstCode == localName ||
               dstCode.startsWith(localName + "[") ||
@@ -106,7 +106,7 @@
 
               if (!inDiffBranch) {
                 val writeSizeExpr = if (sizeOrder > 0)
-                  writeCall.argument.order(sizeOrder).l.headOption.map(_.code.trim).getOrElse("?")
+                  writeCall.argument.argumentIndex(sizeOrder).l.headOption.map(_.code.trim).getOrElse("?")
                 else
                   "(unbounded)"
 
