@@ -472,7 +472,13 @@ async def app_lifespan(server: FastMCP):
         database_url = resolve_database_url()
         redis_url = resolve_redis_url()
         try:
-            db_manager = PostgresDBManager(database_url)
+            # Size the connection pool to cover the build workers plus headroom
+            # for concurrent catalog/cache reads from MCP tool threads and the
+            # health/status probes. Override with DB_POOL_MAX_SIZE.
+            db_pool_max = int(os.getenv("DB_POOL_MAX_SIZE", "0")) or max(
+                10, config.cpg.build_workers + 8
+            )
+            db_manager = PostgresDBManager(database_url, max_pool_size=db_pool_max)
             db_manager.init_schema()
         except Exception as e:
             logger.error(

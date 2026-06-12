@@ -11,9 +11,11 @@ gitpython==3.1.50
 PyYAML==6.0.3
 psutil==7.2.2
 
-# Optional: Postgres durable-queue backend (only used when DATABASE_URL=postgres://...)
-psycopg[binary]>=3.3.4
-# Optional: Redis cross-process coordination (only used when REDIS_URL is set)
+# Postgres backend (REQUIRED — catalog, cache, findings, durable job queue).
+# The [pool] extra adds psycopg_pool for connection reuse; without it the store
+# falls back to per-operation connects.
+psycopg[binary,pool]>=3.3.4
+# Redis cross-process coordination (REQUIRED for pool-mode multi-process state).
 redis>=8.0.0
 
 # Telemetry (optional - OpenTelemetry)

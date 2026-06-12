@@ -7,8 +7,13 @@ requeue_running_jobs). claim_next_job uses `FOR UPDATE SKIP LOCKED`, so many
 generation workers across multiple processes / hosts can pull from one shared
 queue concurrently without blocking each other or double-claiming.
 
-Connections are opened per operation (queue ops are low-frequency); swap in
-psycopg_pool later if that ever shows up in a profile.
+Connections are served from a psycopg_pool ConnectionPool when the optional
+`psycopg[pool]` extra is installed, so the many low-latency queue/catalog ops
+reuse warm connections instead of paying a fresh TCP+auth(+TLS) handshake each
+call — under a large batch the per-op connect was steady churn (idle workers
+poll on an interval) and pressured Postgres `max_connections`. When the extra is
+absent we fall back to per-operation connects, so the store still works with a
+plain `psycopg` install.
 """
 
 import json
@@ -18,6 +23,13 @@ from typing import Any, Dict, Optional
 
 import psycopg
 from psycopg.rows import dict_row
+
+try:  # connection pooling is the optional psycopg[pool] extra
+    from psycopg_pool import ConnectionPool
+    _HAVE_POOL = True
+except ImportError:
+    ConnectionPool = None
+    _HAVE_POOL = False
 
 logger = logging.getLogger(__name__)
 
@@ -29,15 +41,53 @@ def _now() -> str:
 class PostgresJobStore:
     """Durable job queue on Postgres with SKIP LOCKED claims."""
 
-    def __init__(self, dsn: str):
-        # No connection here — construction must not require a live DB (so it can
-        # be imported/instantiated cheaply). Call init_schema() at startup.
+    def __init__(self, dsn: str, max_pool_size: int = 16, use_pool: bool = True):
+        # No live connection here — construction must not require a live DB (so it
+        # can be imported/instantiated cheaply). The pool is created openable
+        # (open=False) and actually opened in init_schema(), once the DB is known
+        # reachable. Call init_schema() at startup.
         self.dsn = dsn
+        self._pool = None
+        if use_pool and _HAVE_POOL:
+            self._pool = ConnectionPool(
+                dsn,
+                min_size=1,
+                max_size=max(2, max_pool_size),
+                open=False,
+                name="codebadger-pg",
+                kwargs={"row_factory": dict_row, "autocommit": False},
+            )
+        elif use_pool and not _HAVE_POOL:
+            logger.warning(
+                "psycopg_pool not installed; using per-operation Postgres connections. "
+                "Install the psycopg[pool] extra for connection reuse under load."
+            )
+
+    def _open_pool(self) -> None:
+        """Open the pool if pooling is enabled (idempotent; fail-fast on a bad DB)."""
+        if self._pool is not None:
+            # wait=True so an unreachable DB raises here at startup rather than on
+            # first query, preserving the fail-fast boot contract. open() no-ops
+            # if the pool is already open.
+            self._pool.open(wait=True, timeout=30)
 
     def _connect(self):
+        """Yield a connection: from the pool (returned on exit) or a fresh one."""
+        if self._pool is not None:
+            return self._pool.connection()
         return psycopg.connect(self.dsn, row_factory=dict_row, autocommit=False)
 
+    def close(self) -> None:
+        """Close the connection pool, if any. Safe to call repeatedly."""
+        if self._pool is not None:
+            try:
+                self._pool.close()
+            except Exception as e:
+                logger.warning(f"Error closing Postgres pool: {e}")
+            self._pool = None
+
     def init_schema(self) -> None:
+        self._open_pool()
         with self._connect() as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS jobs (

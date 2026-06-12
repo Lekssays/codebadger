@@ -67,6 +67,8 @@ class TestLifespan:
             mock_config.server.log_level = "INFO"
             mock_config.storage.workspace_root = "/tmp/workspace"
             mock_config.cpg = MagicMock()
+            # Read during startup for DB-pool sizing — must be a real int.
+            mock_config.cpg.build_workers = 2
             mock_config.query = MagicMock()
             mock_config.joern = MagicMock()
             mock_config.joern.port_min = 13371

@@ -36,8 +36,8 @@ class PostgresDBManager(PostgresJobStore):
     """Catalog/cache/findings + durable job queue, backed by Postgres."""
 
     def close(self):
-        """No-op: connections are opened per operation."""
-        pass
+        """Close the inherited connection pool (no-op when pooling is disabled)."""
+        super().close()
 
     def ping(self) -> dict:
         """Liveness probe for /health: SELECT 1 round-trip with latency (ms)."""

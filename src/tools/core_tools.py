@@ -754,7 +754,7 @@ class DurableCPGQueue:
     JOB_TYPE = "generate_cpg"
 
     def __init__(self, job_store, services: dict, workers: int = 2, maxsize: int = 0,
-                 poll_interval: float = 1.0):
+                 poll_interval: float = 1.0, max_poll_interval: float = 5.0):
         # job_store implements the queue method surface (enqueue_job /
         # claim_next_job / complete_job / fail_job / count_jobs /
         # requeue_running_jobs): a PostgresJobStore / PostgresDBManager.
@@ -762,7 +762,13 @@ class DurableCPGQueue:
         self.services = services
         self._workers = workers
         self._maxsize = maxsize
+        # Empty-queue polling backs off from poll_interval up to max_poll_interval
+        # so idle workers don't hammer Postgres with a claim query every second
+        # (and, with pooling, don't keep a connection hot for nothing). It snaps
+        # back to poll_interval the moment a job is claimed, so a busy batch stays
+        # responsive. max_poll_interval <= poll_interval disables backoff.
         self._poll_interval = poll_interval
+        self._max_poll_interval = max(poll_interval, max_poll_interval)
         self._tasks: list = []
         self._stopping = False
 
@@ -798,6 +804,7 @@ class DurableCPGQueue:
 
     async def _worker(self) -> None:
         loop = asyncio.get_running_loop()
+        idle_delay = self._poll_interval
         while not self._stopping:
             try:
                 job = await loop.run_in_executor(None, self.store.claim_next_job, self.JOB_TYPE)
@@ -805,8 +812,12 @@ class DurableCPGQueue:
                 logger.error(f"Error claiming CPG job: {e}")
                 job = None
             if not job:
-                await asyncio.sleep(self._poll_interval)
+                await asyncio.sleep(idle_delay)
+                # Exponential backoff while the queue stays empty (capped).
+                idle_delay = min(idle_delay * 2, self._max_poll_interval)
                 continue
+            # Queue is active again — reset to the responsive base interval.
+            idle_delay = self._poll_interval
             job_id = job["id"]
             payload = dict(job["payload"])
             payload["services"] = self.services
