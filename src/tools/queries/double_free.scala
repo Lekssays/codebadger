@@ -133,9 +133,10 @@
           val firstCode = firstFree.code
           val firstFile = firstFree.file.name.headOption.getOrElse("unknown")
           
-          // Get the freed pointer
-          val firstArgs = firstFree.astChildren.isIdentifier.l
-          firstArgs.headOption.foreach { firstPtrNode =>
+          // Get the freed expression (the first ARGUMENT, so free(obj->ptr) /
+          // free(*pp) aren't dropped — astChildren.isIdentifier returned the base
+          // "obj" or nothing for those).
+          firstFree.argument.argumentIndex(1).l.headOption.foreach { firstPtrNode =>
             val firstPtr = firstPtrNode.code.trim
             
             if (!firstPtr.contains("(") && !firstPtr.contains("[") && firstPtr.length < 50) {
@@ -163,8 +164,7 @@
                 val secondLine = secondFree.lineNumber.getOrElse(-1)
                 val secondCode = secondFree.code
                 
-                val secondArgs = secondFree.astChildren.isIdentifier.l
-                secondArgs.headOption.foreach { secondPtrNode =>
+                secondFree.argument.argumentIndex(1).l.headOption.foreach { secondPtrNode =>
                   val secondPtr = secondPtrNode.code.trim
                   
                   // Check if second free is on the same pointer or an alias

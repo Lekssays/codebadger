@@ -184,6 +184,74 @@ void npd_reassigned(char *o){
 """
 
 
+UNINIT_FIXTURE = r"""
+#include <stdio.h>
+#include <string.h>
+void ur_true(void){
+    int x;
+    printf("%d", x);
+}
+void ur_memset(void){
+    int x;
+    memset(&x, 0, sizeof(x));
+    printf("%d", x);
+}
+void ur_addrof(void){
+    int x;
+    scanf("%d", &x);
+    printf("%d", x);
+}
+void ur_assigned(void){
+    int x;
+    x = 5;
+    printf("%d", x);
+}
+"""
+
+
+def test_uninitialized_read_matrix(server):
+    out = _run_detector(server, UNINIT_FIXTURE, "uninitialized_read")
+    fire = lambda fn: f"in {fn}()" in out
+    assert fire("ur_true"), "a genuine uninitialized read must fire"
+    # &x passed to memset/scanf initializes x — these were false positives before.
+    assert not fire("ur_memset"), "memset(&x, ...) initializes x"
+    assert not fire("ur_addrof"), "scanf(\"%d\", &x) initializes x"
+    assert not fire("ur_assigned"), "x = 5 initializes x"
+
+
+UAF_MEMBER_FIXTURE = r"""
+#include <stdlib.h>
+struct S { char *ptr; };
+void sink(char *p);
+void uaf_member(struct S *obj){
+    free(obj->ptr);
+    sink(obj->ptr);
+}
+"""
+
+
+def test_use_after_free_member_access(server):
+    # free(obj->ptr) was silently dropped (the freed expression isn't a bare
+    # identifier) — argument(1) extraction now analyzes it.
+    out = _run_detector(server, UAF_MEMBER_FIXTURE, "use_after_free")
+    assert "in uaf_member()" in out
+
+
+DF_MEMBER_FIXTURE = r"""
+#include <stdlib.h>
+struct S { char *ptr; };
+void df_member(struct S *obj){
+    free(obj->ptr);
+    free(obj->ptr);
+}
+"""
+
+
+def test_double_free_member_access(server):
+    out = _run_detector(server, DF_MEMBER_FIXTURE, "double_free")
+    assert "in df_member()" in out
+
+
 TOCTOU_FIXTURE = r"""
 #include <sys/stat.h>
 #include <fcntl.h>

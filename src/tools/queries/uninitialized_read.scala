@@ -47,6 +47,19 @@
       val assignLinesByVar: Map[String, List[Int]] = plainAssignments
         .groupBy(c => c.argument.argumentIndex(1).l.headOption.map(_.code.trim).getOrElse(""))
         .view.mapValues(cs => cs.flatMap(_.lineNumber).sorted).toMap
+      // Map varName → sorted lines where the variable's ADDRESS is taken (&x).
+      // Passing &x to a function (memset(&x,…), scanf("%d",&x), read(fd,&x,…),
+      // or any out-parameter) can initialize it, so the first such line is an
+      // initialization boundary just like an assignment — without this, a read
+      // after memset(&x,…)/scanf(…,&x) was a false "uninitialized" report.
+      val addrOfLinesByVar: Map[String, List[Int]] =
+        method.call.nameExact("<operator>.addressOf").l
+          .flatMap { ao =>
+            ao.argument.argumentIndex(1).l.headOption.collect {
+              case id: Identifier => (id.name, ao.lineNumber.getOrElse(-1))
+            }
+          }
+          .groupBy(_._1).view.mapValues(_.map(_._2).filter(_ > 0).sorted).toMap
       // Map varName → all identifier nodes (reads and compound-assign LHS)
       val identsByName: Map[String, List[Identifier]] =
         method.ast.isIdentifier.l.groupBy(_.name)
@@ -59,6 +72,11 @@
         // Skip fixed-size arrays (covered by stack_overflow analysis)
         if (!varType.matches(".*\\[\\d*\\].*")) {
           val firstAssignLine: Option[Int] = assignLinesByVar.get(varName).flatMap(_.headOption)
+          val firstAddrLine: Option[Int]   = addrOfLinesByVar.get(varName).flatMap(_.headOption)
+          // Earliest point the variable may become initialized — by a plain
+          // assignment OR by having its address escape to a function.
+          val firstInitLine: Option[Int] =
+            (firstAssignLine.toList ++ firstAddrLine.toList).reduceOption(_ min _)
 
           identsByName.getOrElse(varName, Nil).foreach { ident =>
             val readLine = ident.lineNumber.getOrElse(-1)
@@ -72,18 +90,18 @@
               }
 
               if (!isPlainLhs && !isAddressOf) {
-                val isBeforeAssignment = firstAssignLine match {
+                val isBeforeAssignment = firstInitLine match {
                   case None       => true
-                  case Some(asLn) => readLine < asLn
+                  case Some(initLn) => readLine < initLn
                 }
                 if (isBeforeAssignment) {
                   val stmtCode = {
                     val parentCode = ident.astParent.code.trim
                     if (parentCode.length > 80) parentCode.take(77) + "..." else parentCode
                   }
-                  val (confidence, reason) = firstAssignLine match {
-                    case None      => ("HIGH", "Variable declared but never assigned before use")
-                    case Some(asLn)=> ("HIGH", s"Read at line $readLine precedes first assignment at line $asLn")
+                  val (confidence, reason) = firstInitLine match {
+                    case None       => ("HIGH", "Variable declared but never assigned before use")
+                    case Some(initLn)=> ("HIGH", s"Read at line $readLine precedes first initialization at line $initLn")
                   }
                   issues += ((methFile, methName, varName, varType, declLine, readLine, stmtCode, confidence, reason))
                 }

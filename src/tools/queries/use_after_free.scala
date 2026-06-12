@@ -123,9 +123,13 @@
       val freeCode = freeCall.code
       val methodName = freeCall.method.name
       
-      val args = freeCall.astChildren.isIdentifier.l
-      val freedPtrOpt = args.headOption
-      
+      // The freed expression is the first ARGUMENT, not the first descendant
+      // identifier: for free(obj->ptr) / free(*pp) the direct child is a
+      // field-access / indirection call, so astChildren.isIdentifier returned the
+      // base ("obj") or nothing — silently dropping those frees. Use argument(1)
+      // so freedPtr is the actual freed expression ("obj->ptr", "*pp", "p").
+      val freedPtrOpt = freeCall.argument.argumentIndex(1).l.headOption
+
       freedPtrOpt.foreach { freedPtrNode =>
         val freedPtr = freedPtrNode.code.trim
         
