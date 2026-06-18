@@ -56,7 +56,7 @@ from src.utils.postgres_db_manager import PostgresDBManager
 from src.defaults import resolve_database_url, resolve_redis_url
 from src.tools import register_tools
 
-VERSION = "0.5.1-beta"
+VERSION = "0.5.2-beta"
 
 services = {}
 
