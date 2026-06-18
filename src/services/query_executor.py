@@ -221,21 +221,27 @@ class QueryExecutor:
                 )
 
     def _normalize_query(self, query: str, limit: Optional[int] = None) -> str:
-        """Normalize query to ensure proper output format"""
+        """Normalize a query to a JSON-producing form.
+
+        The result is serialized with `.toJsonPretty` (parsed back by _parse_output) — the
+        JSON path is kept as the default. The one fix over the naive version is that the
+        base query is PARENTHESISED before `.take`/`.toJsonPretty`/`.toString` are appended:
+        without it, a trailing serializer binds only to the last operand of a `++` chain
+        (e.g. `a.l ++ b.l ++ c.name.toJsonPretty`), so the String from toJsonPretty
+        concatenates into the list as `List[String | Char]` and prints as raw characters
+        instead of JSON — the run_cpgql_query char-explosion bug.
+
+        Block queries ({ ... }) that already manage their own output are left untouched: a
+        self-emitting <codebadger_result> envelope (the analysis templates — where the marker
+        earns its keep), or an explicit .toJson/.toString tail."""
         query = query.strip()
 
-        # Block queries (start with { and end with }) may already produce their
-        # own output; don't wrap those in another conversion.
+        # Block queries that produce their own output — leave as-is.
         if query.startswith('{') and query.endswith('}'):
-            # Self-delimiting output: the block emits a <codebadger_result>...</codebadger_result>
-            # envelope that _parse_output extracts. Wrapping/trimming its tail would corrupt the
-            # final expression (Joern then echoes source instead of the value), so leave it as-is
-            # regardless of whether the tail happens to be a .toString()/.toJson call.
-            if '<codebadger_result>' in query:
-                return query
-            if '.toJsonPretty' in query or '.toJson' in query:
-                return query
-            if '.toString()' in query[-50:]:
+            if ('<codebadger_result>' in query
+                    or '.toJsonPretty' in query
+                    or '.toJson' in query
+                    or '.toString()' in query[-50:]):
                 return query
 
         # Remove existing output modifiers from the end
@@ -259,6 +265,10 @@ class QueryExecutor:
         # stream the whole graph back. Clamp explicit limits to the same ceiling.
         if limit is None and not is_size_query:
             limit = MAX_RESULT_ROWS
+
+        # Parenthesise so the appended .take/.toJsonPretty/.toString bind to the WHOLE
+        # expression (a `++` chain otherwise binds them to its last operand only).
+        base_query = f"({base_query})"
         if limit is not None and limit > 0 and not is_size_query:
             limit = min(limit, MAX_RESULT_ROWS)
             base_query = f"{base_query}.take({limit})"
