@@ -99,13 +99,13 @@ typedef struct {
     int subsampling_ver;
 } OJPEGFull;
 
-void vulnerable_init(OJPEGFull *sp, int w)
+void ojpeg_setup_decode(OJPEGFull *sp, int w)
 {
     sp->bytes_per_line = w;                          /* line 104 — patch site (forward anchor) */
     if (w % sp->bytes_per_line != 0) return;         /* line 105 — crash site (backward anchor) */
 }
 
-void patched_init(OJPEGFull *sp, int w, int hor, int ver)
+void ojpeg_setup_decode_subsampled(OJPEGFull *sp, int w, int hor, int ver)
 {
     sp->bytes_per_line = w;
     sp->bytes_per_line *= hor * ver;                 /* line 111 — fix: subsampling correction */

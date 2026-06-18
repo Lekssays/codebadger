@@ -1,5 +1,5 @@
-# QEMU-like Security Test Codebase
-# Makefile for building the multi-file test codebase
+# microvm - lightweight virtual machine monitor
+# Build the VMM binary and standalone objects.
 
 CC = gcc
 CFLAGS = -Wall -Wextra -g -O0 -I./include
@@ -26,7 +26,7 @@ BUILD_DIR = build
 OBJS = $(SRCS:src/%.c=$(BUILD_DIR)/%.o)
 
 # Output binary
-TARGET = $(BUILD_DIR)/qemu_test
+TARGET = $(BUILD_DIR)/microvm
 
 # Default target — builds C binary + standalone C++ object for CPG analysis
 all: $(BUILD_DIR) $(TARGET) $(BUILD_DIR)/slice_cpp.o

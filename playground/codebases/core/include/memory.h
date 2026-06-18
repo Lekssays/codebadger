@@ -1,11 +1,3 @@
-/*
- * memory.h - Memory management for QEMU-like emulator
- * 
- * Provides memory region management, allocation tracking,
- * and memory controller API for device emulation.
- * Contains patterns that test UAF and double-free detection.
- */
-
 #ifndef MEMORY_H
 #define MEMORY_H
 
@@ -14,12 +6,10 @@
 #include <stdbool.h>
 #include "utils.h"
 
-/* Memory region permissions */
 #define MEM_PERM_READ   0x01
 #define MEM_PERM_WRITE  0x02
 #define MEM_PERM_EXEC   0x04
 
-/* Memory region types */
 typedef enum {
     MEM_TYPE_RAM,
     MEM_TYPE_ROM,
@@ -27,7 +17,6 @@ typedef enum {
     MEM_TYPE_DMA
 } MemoryType;
 
-/* Memory region structure */
 typedef struct MemoryRegion {
     char *name;
     void *base;
@@ -38,16 +27,23 @@ typedef struct MemoryRegion {
     bool is_allocated;
 } MemoryRegion;
 
-/* Memory controller state */
+typedef struct DmaDescriptor {
+    uint64_t addr;
+    uint32_t len;
+    uint16_t flags;
+    uint16_t next;
+} DmaDescriptor;
+
 typedef struct MemoryController {
     MemoryRegion *regions;
     size_t region_count;
     size_t total_allocated;
     void *dma_buffer;
-    void *dma_buffer_alias;  /* For testing pointer aliasing */
+    void *dma_shadow;
+    DmaDescriptor *ring;
+    size_t ring_count;
 } MemoryController;
 
-/* Allocation tracking entry */
 typedef struct AllocationEntry {
     void *ptr;
     size_t size;
@@ -57,36 +53,36 @@ typedef struct AllocationEntry {
     struct AllocationEntry *next;
 } AllocationEntry;
 
-/* Memory controller API */
 MemoryController *memory_controller_create(void);
 void memory_controller_destroy(MemoryController *mc);
 int memory_controller_init(MemoryController *mc);
 
-/* Memory region management */
-MemoryRegion *memory_region_create(const char *name, size_t size, 
+MemoryRegion *memory_region_create(const char *name, size_t size,
                                    uint8_t permissions, MemoryType type);
 void memory_region_free(MemoryRegion *region);
 int memory_region_add(MemoryController *mc, MemoryRegion *region);
 MemoryRegion *memory_region_find(MemoryController *mc, const char *name);
 
-/* Memory operations - some deliberately vulnerable */
 int memory_read(MemoryController *mc, uint64_t addr, void *buf, size_t size);
 int memory_write(MemoryController *mc, uint64_t addr, const void *buf, size_t size);
-int memory_copy_region(MemoryController *mc, const char *src_name, 
+int memory_copy_region(MemoryController *mc, const char *src_name,
                        const char *dst_name, size_t size);
 
-/* DMA operations - contain UAF patterns */
 int dma_alloc_buffer(MemoryController *mc, size_t size);
 int dma_free_buffer(MemoryController *mc);
 int dma_transfer(MemoryController *mc, void *data, size_t size);
-int dma_transfer_with_alias(MemoryController *mc, void *data, size_t size);
+int dma_transfer_shadow(MemoryController *mc, void *data, size_t size);
 
-/* Functions containing deliberate vulnerabilities */
-int memory_process_untrusted(MemoryController *mc, void *data, size_t size);
-int memory_cleanup_with_error(MemoryController *mc, int error_code);
-void memory_use_after_cleanup(MemoryController *mc);
+int dma_ring_resize(MemoryController *mc, uint32_t count);
+int dma_ring_resize_guarded(MemoryController *mc, uint32_t count);
+int dma_remap_buffer(MemoryController *mc, size_t size, const void *seed);
 
-/* Helper that frees memory but caller uses it after */
-void *memory_get_and_free(MemoryController *mc);
+int dma_stage_inbound(MemoryController *mc, void *data, size_t size);
+int dma_controller_teardown(MemoryController *mc, int error_code);
+void dma_shadow_refresh(MemoryController *mc);
+int dma_release_either(MemoryController *mc, bool fast_path);
 
-#endif /* MEMORY_H */
+void *dma_detach_buffer(MemoryController *mc);
+int scratch_pool_reclaim(MemoryController *mc);
+
+#endif

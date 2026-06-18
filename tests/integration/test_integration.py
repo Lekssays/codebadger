@@ -524,10 +524,15 @@ class TestCodeBadgerIntegration:
     @pytest.mark.timeout(240)
     async def test_find_use_after_free(self, client, codebase_path):
         """Test UAF detection in multi-file codebase
-        
+
         Expected UAF patterns in memory.c:
-        - dma_transfer_with_alias (~line 240-280): alias creates UAF via ptr2
-        - memory_get_and_free (~line 410-425): returns freed pointer
+        - dma_shadow_refresh: dereferences mc->dma_shadow, which aliases a
+          dma_buffer that dma_controller_teardown/dma_free_buffer may free.
+        - dma_detach_buffer: frees mc->dma_buffer through the buffer_release()
+          helper (interprocedural) and returns the now-dangling pointer.
+
+        dma_remap_buffer (free then reassign via malloc, then memcpy into the
+        fresh allocation) must NOT be reported — the pointer is reassigned.
         """
         result = await client.call_tool("generate_cpg", {
             "source_type": "local",
@@ -558,10 +563,16 @@ class TestCodeBadgerIntegration:
     @pytest.mark.timeout(240)
     async def test_find_double_free(self, client, codebase_path):
         """Test double-free detection in multi-file codebase
-        
+
         Expected double-free patterns in memory.c:
-        - memory_cleanup_with_error (~line 350-369): frees buffer then mc->dma_buffer again
-        - memory_aliased_double_free (~line 428-443): ptr1 and ptr2 both free same memory
+        - dma_controller_teardown: on the error path frees the local alias
+          `buffer`, then the unconditional teardown frees mc->dma_buffer again
+          (same allocation, not in mutually-exclusive branches).
+        - scratch_pool_reclaim: `primary` and `mirror` alias the same malloc and
+          are both freed.
+
+        dma_release_either (free in the if-branch, free in the else-branch) must
+        NOT be reported — the two frees are mutually exclusive.
         """
         result = await client.call_tool("generate_cpg", {
             "source_type": "local",
@@ -593,14 +604,15 @@ class TestCodeBadgerIntegration:
     async def test_find_format_string_vulns(self, client, codebase_path):
         """Test format string vulnerability detection in the core codebase.
 
-        Expected findings in vuln_samples.c:
-        - vuln_fmt_from_getenv: printf(user_fmt) where user_fmt = getenv(...) — HIGH
-        - vuln_fmt_from_fgets: printf(buf) where buf filled by fgets — HIGH
-        - vuln_fmt_param: printf(fmt) where fmt is a parameter — MEDIUM
-        - vuln_fmt_fprintf: fprintf(stderr, log_fmt) where log_fmt = getenv(...) — HIGH
+        Expected findings:
+        - main.c log_startup_message: printf(format) where format = getenv("LOG_FORMAT") — HIGH
+        - config.c config_emit_banner: printf(value) where value is a config entry — MEDIUM/HIGH
+        - config.c config_write_log: printf(format) where format is a parameter — MEDIUM
+        - device.c virtio_net_handle_ctrl: printf(command_buffer + 6) from a recv'd buffer
+        - cmdline.c format_status_line: sprintf(buf, format, data) with a caller-supplied format
 
-        Also existing patterns in main.c, device.c may surface.
-        safe_fmt_literal (printf("%s\\n", msg)) should NOT be reported.
+        printf("%s\\n", buffer) in monitor_format_status uses a literal format and
+        must NOT be reported.
         """
         result = await client.call_tool("generate_cpg", {
             "source_type": "local",
@@ -625,7 +637,7 @@ class TestCodeBadgerIntegration:
             assert "Format String Vulnerability Analysis" in content, \
                 f"Missing analysis header: {content[:200]}"
 
-            # At minimum, the known HIGH-confidence samples from vuln_samples.c must surface
+            # The getenv->printf flow in main.c log_startup_message must surface as HIGH
             assert "HIGH" in content, \
                 f"Expected at least one HIGH confidence finding: {content[:500]}"
 
@@ -674,13 +686,14 @@ class TestCodeBadgerIntegration:
     async def test_find_heap_overflow(self, client, codebase_path):
         """Test heap overflow detection in the core codebase.
 
-        Expected findings in vuln_samples.c:
-        - vuln_heap_overflow_memcpy: malloc(64) + memcpy(buf, data, data_len) — size mismatch
-        - vuln_heap_overflow_strcpy: malloc(128) + strcpy(dst, src) — unbounded write
-        - vuln_heap_overflow_recv: malloc(512) + recv(sockfd, packet, recv_size) — size mismatch
-        - vuln_heap_overflow_gets: malloc(256) + gets(line) — unbounded write
+        Expected findings:
+        - memory.c dma_stage_inbound: malloc(MEDIUM_BUFFER_SIZE) + memcpy(temp, data, size)
+          where `size` is caller-controlled — write size not bounded by allocation.
+        - config.c config_parse_buffer: malloc(size + 1) + memcpy(buf_copy, buffer, size)
+          (matched allocation; should be lower risk / not flagged).
 
-        safe_heap_bounded_memcpy (has bounds check IF before memcpy) should NOT be reported.
+        utils.c buffer_copy_checked guards the copy with `src_size > dest_size` and
+        must NOT be reported.
         """
         result = await client.call_tool("generate_cpg", {
             "source_type": "local",
@@ -714,7 +727,7 @@ class TestCodeBadgerIntegration:
     async def test_find_heap_overflow_file_filter(self, client, codebase_path):
         """Test heap overflow detection filtered to memory.c.
 
-        memory.c contains memory_process_untrusted() where malloc(MEDIUM_BUFFER_SIZE)
+        memory.c contains dma_stage_inbound() where malloc(MEDIUM_BUFFER_SIZE)
         is followed by memcpy(temp, data, size) with no bounds check — size mismatch.
         """
         result = await client.call_tool("generate_cpg", {
@@ -1032,3 +1045,232 @@ class TestCodeBadgerIntegration:
             )
             assert has_finding, \
                 f"Expected stack overflow findings in main.c: {content[:600]}"
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(300)
+    async def test_find_integer_overflow(self, client, codebase_path):
+        """Test integer-overflow detection on guest-controlled allocation sizes.
+
+        memory.c dma_ring_resize:
+            mc->ring = malloc(count * sizeof(DmaDescriptor));
+        `count` is a guest-supplied uint32 and the multiplication has no overflow
+        guard -> HIGH confidence allocation-size overflow.
+
+        dma_ring_resize_guarded performs the same resize but guards the product
+        with __builtin_mul_overflow() and a `count > 65536` bound, so it should
+        not surface as HIGH (precision check).
+        """
+        result = await client.call_tool("generate_cpg", {
+            "source_type": "local",
+            "source_path": codebase_path,
+            "language": "c"
+        })
+        cpg_dict = self.extract_tool_result(result)
+        codebase_hash = cpg_dict["codebase_hash"]
+
+        ready = await self.wait_for_cpg_ready(client, codebase_hash)
+        assert ready, "CPG not ready in time"
+
+        io_result = await client.call_tool("find_integer_overflow", {
+            "codebase_hash": codebase_hash,
+            "filename": "memory.c",
+            "timeout": 240
+        })
+
+        if hasattr(io_result, "content") and io_result.content:
+            content = io_result.content[0].text
+            assert isinstance(content, str), "Result should be string"
+
+            assert "Integer Overflow/Underflow Analysis" in content, \
+                f"Missing analysis header: {content[:200]}"
+
+            # malloc(count * sizeof(DmaDescriptor)) with no guard is a HIGH finding
+            has_finding = (
+                "HIGH" in content
+                or "dma_ring_resize" in content
+                or "alloc_arithmetic" in content
+            )
+            assert has_finding, \
+                f"Expected an integer overflow finding in memory.c: {content[:600]}"
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(300)
+    async def test_find_toctou(self, client, codebase_path):
+        """Test TOCTOU (CWE-367) detection in the config module.
+
+        config.c config_open_checked:
+            if (access(path, R_OK) != 0) return ERR_NOT_FOUND;
+            int fd = open(path, O_RDONLY);
+        The access() check and the open() use race on the same `path`.
+        """
+        result = await client.call_tool("generate_cpg", {
+            "source_type": "local",
+            "source_path": codebase_path,
+            "language": "c"
+        })
+        cpg_dict = self.extract_tool_result(result)
+        codebase_hash = cpg_dict["codebase_hash"]
+
+        ready = await self.wait_for_cpg_ready(client, codebase_hash)
+        assert ready, "CPG not ready in time"
+
+        toctou_result = await client.call_tool("find_toctou", {
+            "codebase_hash": codebase_hash,
+            "timeout": 240
+        })
+
+        if hasattr(toctou_result, "content") and toctou_result.content:
+            content = toctou_result.content[0].text
+            assert isinstance(content, str), "Result should be string"
+
+            assert "TOCTOU" in content, \
+                f"Missing TOCTOU analysis header: {content[:200]}"
+
+            has_finding = (
+                "config_open_checked" in content
+                or "access" in content
+                or "HIGH" in content
+            )
+            assert has_finding, \
+                f"Expected a TOCTOU finding (access+open in config.c): {content[:600]}"
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(300)
+    async def test_find_null_pointer_deref(self, client, codebase_path):
+        """Test null-pointer-dereference detection runs across the codebase.
+
+        Many allocations are NULL-checked (memory_controller_create, device_create,
+        config_process_entry, ...), which exercises the detector's guard-aware
+        filtering so it does not drown in false positives.
+        """
+        result = await client.call_tool("generate_cpg", {
+            "source_type": "local",
+            "source_path": codebase_path,
+            "language": "c"
+        })
+        cpg_dict = self.extract_tool_result(result)
+        codebase_hash = cpg_dict["codebase_hash"]
+
+        ready = await self.wait_for_cpg_ready(client, codebase_hash)
+        assert ready, "CPG not ready in time"
+
+        npd_result = await client.call_tool("find_null_pointer_deref", {
+            "codebase_hash": codebase_hash,
+            "timeout": 240
+        })
+
+        if hasattr(npd_result, "content") and npd_result.content:
+            content = npd_result.content[0].text
+            assert isinstance(content, str), "Result should be string"
+
+            assert "Null Pointer Dereference Analysis" in content, \
+                f"Missing analysis header: {content[:200]}"
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(300)
+    async def test_find_uninitialized_reads(self, client, codebase_path):
+        """Test uninitialized-read detection runs across the codebase."""
+        result = await client.call_tool("generate_cpg", {
+            "source_type": "local",
+            "source_path": codebase_path,
+            "language": "c"
+        })
+        cpg_dict = self.extract_tool_result(result)
+        codebase_hash = cpg_dict["codebase_hash"]
+
+        ready = await self.wait_for_cpg_ready(client, codebase_hash)
+        assert ready, "CPG not ready in time"
+
+        ur_result = await client.call_tool("find_uninitialized_reads", {
+            "codebase_hash": codebase_hash,
+            "timeout": 240
+        })
+
+        if hasattr(ur_result, "content") and ur_result.content:
+            content = ur_result.content[0].text
+            assert isinstance(content, str), "Result should be string"
+
+            assert "Uninitialized Read Analysis" in content, \
+                f"Missing analysis header: {content[:200]}"
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(300)
+    async def test_interprocedural_taint_recv_to_system(self, client, codebase_path):
+        """Test that auto taint analysis connects a network source to a shell sink
+        across a function boundary.
+
+        network.c network_read_command does recv() into its `cmd` out-parameter;
+        qmp_dispatch_remote / virtio_net_handle_ctrl then pass that buffer to
+        system(). The flow recv -> system therefore crosses functions, exercising
+        reachableByFlows() interprocedural propagation.
+        """
+        result = await client.call_tool("generate_cpg", {
+            "source_type": "local",
+            "source_path": codebase_path,
+            "language": "c"
+        })
+        cpg_dict = self.extract_tool_result(result)
+        codebase_hash = cpg_dict["codebase_hash"]
+
+        ready = await self.wait_for_cpg_ready(client, codebase_hash)
+        assert ready, "CPG not ready in time"
+
+        flows_result = await client.call_tool("find_taint_flows", {
+            "codebase_hash": codebase_hash,
+            "mode": "auto",
+            "language": "c",
+            "max_results": 50,
+            "timeout": 120
+        })
+
+        if hasattr(flows_result, "content") and flows_result.content:
+            content = flows_result.content[0].text
+            assert isinstance(content, str), "Result should be string"
+
+            assert "Auto Taint Flow Analysis" in content, "Missing analysis header"
+
+            # The analysis must at least attempt source->sink reachability and
+            # report a flow count (confirmed or raw), not error out.
+            assert "flow" in content.lower(), \
+                f"Expected the auto analysis to report on taint flows: {content[:400]}"
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(240)
+    async def test_call_graph_callback_chain(self, client, codebase_path):
+        """Test call-graph traversal through the static callback dispatch chain.
+
+        callbacks.c defines a 5-deep chain reached from callback_dispatch_chain:
+        callback_dispatch_chain -> chain_step1 -> chain_step2 -> chain_step3 ->
+        chain_step4 -> chain_step5
+        These are direct (non function-pointer) calls and should resolve.
+        """
+        result = await client.call_tool("generate_cpg", {
+            "source_type": "local",
+            "source_path": codebase_path,
+            "language": "c"
+        })
+        cpg_dict = self.extract_tool_result(result)
+        codebase_hash = cpg_dict["codebase_hash"]
+
+        ready = await self.wait_for_cpg_ready(client, codebase_hash)
+        assert ready, "CPG not ready in time"
+
+        cg_result = await client.call_tool("get_call_graph", {
+            "codebase_hash": codebase_hash,
+            "method_name": "callback_dispatch_chain",
+            "depth": 5,
+            "direction": "outgoing"
+        })
+
+        if hasattr(cg_result, "content") and cg_result.content:
+            content = cg_result.content[0].text
+            assert isinstance(content, str), "Call graph result should be string"
+
+            assert "Call Graph" in content or "callback_dispatch_chain" in content, \
+                f"Missing call graph header: {content[:200]}"
+
+            expected = ["chain_step1", "chain_step2", "chain_step3",
+                        "chain_step4", "chain_step5"]
+            found = [fn for fn in expected if fn in content]
+            assert len(found) >= 2, \
+                f"Expected at least 2 of {expected} in call graph, found: {found}"

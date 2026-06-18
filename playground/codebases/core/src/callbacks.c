@@ -1,19 +1,10 @@
-/*
- * callbacks.c - Callback dispatch implementation
- * 
- * Contains callback registration and dispatch patterns for testing
- * function pointer-based control flow in call graphs.
- */
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "../include/device.h"
 
-/* Maximum registered callbacks */
 #define MAX_CALLBACKS 64
 
-/* Callback registry entry */
 typedef struct CallbackEntry {
     char name[64];
     void (*callback)(void *data);
@@ -21,13 +12,9 @@ typedef struct CallbackEntry {
     bool is_active;
 } CallbackEntry;
 
-/* Global callback registry */
 static CallbackEntry g_callbacks[MAX_CALLBACKS];
 static size_t g_callback_count = 0;
 
-/*
- * Initialize callback system
- */
 int callbacks_init(void)
 {
     memset(g_callbacks, 0, sizeof(g_callbacks));
@@ -35,54 +22,45 @@ int callbacks_init(void)
     return ERR_SUCCESS;
 }
 
-/*
- * Register a callback by name
- */
 int callback_register(const char *name, void (*callback)(void *), void *user_data)
 {
     if (!name || !callback) {
         return ERR_INVALID_PARAM;
     }
-    
+
     if (g_callback_count >= MAX_CALLBACKS) {
         return ERR_OUT_OF_MEMORY;
     }
-    
+
     CallbackEntry *entry = &g_callbacks[g_callback_count++];
-    safe_strcpy(entry->name, sizeof(entry->name), name);
+    str_copy(entry->name, sizeof(entry->name), name);
     entry->callback = callback;
     entry->user_data = user_data;
     entry->is_active = true;
-    
+
     return ERR_SUCCESS;
 }
 
-/*
- * Unregister a callback by name
- */
 int callback_unregister(const char *name)
 {
     if (!name) {
         return ERR_INVALID_PARAM;
     }
-    
+
     for (size_t i = 0; i < g_callback_count; i++) {
         if (strcmp(g_callbacks[i].name, name) == 0) {
             g_callbacks[i].is_active = false;
             return ERR_SUCCESS;
         }
     }
-    
+
     return ERR_NOT_FOUND;
 }
 
-/*
- * Find callback by name
- */
 static CallbackEntry *callback_find(const char *name)
 {
     for (size_t i = 0; i < g_callback_count; i++) {
-        if (g_callbacks[i].is_active && 
+        if (g_callbacks[i].is_active &&
             strcmp(g_callbacks[i].name, name) == 0) {
             return &g_callbacks[i];
         }
@@ -90,46 +68,36 @@ static CallbackEntry *callback_find(const char *name)
     return NULL;
 }
 
-/*
- * Invoke callback by name
- */
 int callback_invoke(const char *name, void *data)
 {
     if (!name) {
         return ERR_INVALID_PARAM;
     }
-    
+
     CallbackEntry *entry = callback_find(name);
     if (!entry) {
         return ERR_NOT_FOUND;
     }
-    
-    /* Dispatch through function pointer */
+
     entry->callback(data ? data : entry->user_data);
-    
+
     return ERR_SUCCESS;
 }
 
-/*
- * Invoke all registered callbacks
- */
 int callback_invoke_all(void *data)
 {
     int count = 0;
-    
+
     for (size_t i = 0; i < g_callback_count; i++) {
         if (g_callbacks[i].is_active && g_callbacks[i].callback) {
             g_callbacks[i].callback(data ? data : g_callbacks[i].user_data);
             count++;
         }
     }
-    
+
     return count;
 }
 
-/*
- * Example callback handlers for testing call graph
- */
 static void handler_level1(void *data)
 {
     log_debug("Handler level 1: %p", data);
@@ -163,9 +131,6 @@ static void handler_with_memory(void *data)
     }
 }
 
-/*
- * Register default callbacks for testing
- */
 int callbacks_register_defaults(void)
 {
     callback_register("level1", handler_level1, NULL);
@@ -173,14 +138,10 @@ int callbacks_register_defaults(void)
     callback_register("level3", handler_level3, NULL);
     callback_register("network", handler_with_network, NULL);
     callback_register("memory", handler_with_memory, NULL);
-    
+
     return ERR_SUCCESS;
 }
 
-/*
- * Callback chain for deep call graph testing
- * Chain: dispatch_chain -> chain_step1 -> chain_step2 -> chain_step3 -> chain_step4 -> chain_step5
- */
 static void chain_step5(void *data)
 {
     log_debug("Chain step 5 (final): %p", data);
@@ -210,9 +171,6 @@ static void chain_step1(void *data)
     chain_step2(data);
 }
 
-/*
- * Entry point for deep callback chain
- */
 int callback_dispatch_chain(void *data)
 {
     log_debug("Starting callback chain");
@@ -220,15 +178,12 @@ int callback_dispatch_chain(void *data)
     return ERR_SUCCESS;
 }
 
-/*
- * Direct callback dispatch for device operations
- */
 int callback_device_read(Device *dev, uint64_t addr, void *data, size_t size)
 {
     if (!dev || !dev->callbacks.read) {
         return ERR_INVALID_PARAM;
     }
-    
+
     return dev->callbacks.read(dev->opaque_data, addr, data, size);
 }
 
@@ -237,7 +192,7 @@ int callback_device_write(Device *dev, uint64_t addr, const void *data, size_t s
     if (!dev || !dev->callbacks.write) {
         return ERR_INVALID_PARAM;
     }
-    
+
     return dev->callbacks.write(dev->opaque_data, addr, data, size);
 }
 
@@ -246,7 +201,7 @@ int callback_device_reset(Device *dev)
     if (!dev || !dev->callbacks.reset) {
         return ERR_INVALID_PARAM;
     }
-    
+
     return dev->callbacks.reset(dev->opaque_data);
 }
 
@@ -255,6 +210,6 @@ int callback_device_irq(Device *dev, int irq_num)
     if (!dev || !dev->callbacks.irq_handler) {
         return ERR_INVALID_PARAM;
     }
-    
+
     return dev->callbacks.irq_handler(dev->opaque_data, irq_num);
 }
