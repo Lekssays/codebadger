@@ -227,6 +227,12 @@ class QueryExecutor:
         # Block queries (start with { and end with }) may already produce their
         # own output; don't wrap those in another conversion.
         if query.startswith('{') and query.endswith('}'):
+            # Self-delimiting output: the block emits a <codebadger_result>...</codebadger_result>
+            # envelope that _parse_output extracts. Wrapping/trimming its tail would corrupt the
+            # final expression (Joern then echoes source instead of the value), so leave it as-is
+            # regardless of whether the tail happens to be a .toString()/.toJson call.
+            if '<codebadger_result>' in query:
+                return query
             if '.toJsonPretty' in query or '.toJson' in query:
                 return query
             if '.toString()' in query[-50:]:
