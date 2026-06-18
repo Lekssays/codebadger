@@ -169,6 +169,26 @@ def _get_git_commit_hash(path: str) -> Optional[str]:
     except (subprocess.CalledProcessError, FileNotFoundError, OSError):
         return None
 
+def _sanitize_build_opt_list(items, kind: str) -> list:
+    """Validate + normalize a list of c2cpg build options (include paths / defines).
+
+    Drops blanks; rejects control characters; and rejects `..` segments in a relative
+    include path (which could escape the source root once joined to the container root).
+    Absolute paths are allowed through. Raises ValidationError on a bad entry.
+    """
+    out = []
+    for raw in (items or []):
+        s = str(raw).strip()
+        if not s:
+            continue
+        if any(ord(c) < 0x20 or ord(c) == 0x7F for c in s):
+            raise ValidationError(f"Invalid {kind}: control characters not allowed")
+        if kind == "include path" and not os.path.isabs(s) and ".." in s.split("/"):
+            raise ValidationError("Relative include paths must not contain '..'")
+        out.append(s)
+    return out
+
+
 def get_cpg_cache_key(source_type: str, source_path: str, language: str, commit_hash: Optional[str] = None, content: Optional[str] = None, extra: Optional[str] = None, branch: Optional[str] = None) -> str:
     """
     Generate a deterministic CPG cache key based on source type, path, language, and optional commit hash.
@@ -1392,21 +1412,8 @@ Examples:
             # Normalize + validate C/C++ build options (no control chars; relative
             # include paths must stay within the source root). Build options are part
             # of the cache key so a different -I/-D set yields a distinct CPG.
-            def _clean_list(items, kind):
-                out = []
-                for raw in (items or []):
-                    s = str(raw).strip()
-                    if not s:
-                        continue
-                    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in s):
-                        raise ValidationError(f"Invalid {kind}: control characters not allowed")
-                    if kind == "include path" and not os.path.isabs(s) and ".." in s.split("/"):
-                        raise ValidationError("Relative include paths must not contain '..'")
-                    out.append(s)
-                return out
-
-            include_paths = _clean_list(include_paths, "include path")
-            defines = _clean_list(defines, "define")
+            include_paths = _sanitize_build_opt_list(include_paths, "include path")
+            defines = _sanitize_build_opt_list(defines, "define")
             if (include_paths or defines) and language not in ("c", "cpp"):
                 logger.warning(f"include_paths/defines ignored for language '{language}' (C/C++ only)")
                 include_paths, defines = [], []
