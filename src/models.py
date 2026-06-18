@@ -161,6 +161,10 @@ class JoernConfig:
     http_read_timeout: float = 300.0
     http_max_retries: int = 3
     http_backoff_factor: float = 0.3
+    # Docker bridge network for pool workers. When set, workers are attached to
+    # this network and the MCP connects to them by container name on the internal
+    # port — no host port is published. Leave empty to fall back to server_host:port.
+    docker_network: str = ""
 
 
 @dataclass

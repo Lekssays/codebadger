@@ -67,6 +67,7 @@ def load_config(config_path: Optional[str] = None) -> Config:
                 worker_port_min=int(os.getenv("JOERN_WORKER_PORT_MIN", str(defaults.JOERN_WORKER_PORT_MIN))),
                 worker_port_max=int(os.getenv("JOERN_WORKER_PORT_MAX", str(defaults.JOERN_WORKER_PORT_MAX))),
                 playground_host_path=os.getenv("JOERN_PLAYGROUND_HOST_PATH", ""),
+                docker_network=os.getenv("JOERN_DOCKER_NETWORK", ""),
             ),
             cpg=CPGConfig(
                 generation_timeout=int(os.getenv("CPG_GENERATION_TIMEOUT", str(defaults.CPG_GENERATION_TIMEOUT))),
