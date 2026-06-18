@@ -13,6 +13,7 @@ import io
 import logging
 import os
 import re
+import shlex
 import shutil
 import tarfile
 from typing import Any, Dict, Optional, Annotated, Set
@@ -199,8 +200,15 @@ def get_cpg_cache_key(source_type: str, source_path: str, language: str, commit_
         else:
             identifier = f"github:{source_path}:{language}"
     else:
-        source_path = os.path.abspath(source_path)
-        identifier = f"local:{source_path}:{language}"
+        if content:
+            # Content fingerprint: identical trees dedupe regardless of path, and
+            # any content change yields a new key (no stale-CPG reuse). See
+            # _fingerprint_local_source.
+            identifier = f"local:{language}:{content}"
+        else:
+            # Fallback when fingerprinting is unavailable: path-based key.
+            source_path = os.path.abspath(source_path)
+            identifier = f"local:{source_path}:{language}"
 
     if commit_hash:
         identifier += f":{commit_hash}"
@@ -347,6 +355,171 @@ def _copy_local_source_tree(host_path: str, codebase_dir: str) -> None:
     except BaseException:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise
+
+
+def _copy_local_source_tree_via_daemon(host_path: str, codebase_hash: str) -> None:
+    """Copy a host source tree into the playground via a short-lived helper container.
+
+    Used when the MCP is containerized and `host_path` lives on the host
+    filesystem, so this process cannot read it directly (the in-process
+    `_copy_local_source_tree` would fail). The host Docker daemon — reachable
+    through the mounted socket — bind-mounts the real source's PARENT dir
+    read-only and the shared playground read-write into an ephemeral helper
+    container, which copies the tree to /playground/codebases/<hash>.
+
+    Mirrors `_copy_local_source_tree`'s guarantees: existence is validated on the
+    host (the source must exist and be non-empty — note `docker run` auto-creates
+    a missing bind source, so we mount the parent and `test -d` the child rather
+    than mounting the source itself), and the snapshot is built in a sibling
+    `.tmp` dir then renamed so a partial/concurrent copy can't yield a corrupt
+    tree. The helper reuses the joern-server image so no extra pull is needed.
+    """
+    playground_host = os.getenv("JOERN_PLAYGROUND_HOST_PATH", "").strip()
+    if not playground_host:
+        raise ValidationError(
+            "JOERN_PLAYGROUND_HOST_PATH is not set; the containerized MCP cannot "
+            "copy a host source path without knowing the playground's host path."
+        )
+
+    clean = host_path.rstrip("/")
+    parent, base = os.path.dirname(clean), os.path.basename(clean)
+    if not parent or not base:
+        raise ValidationError("Invalid host source path")
+
+    client = docker.from_env()
+    joern_container = os.getenv("JOERN_CONTAINER_NAME", "codebadger-joern-server")
+    try:
+        image = client.containers.get(joern_container).image.id
+    except docker.errors.NotFound:
+        raise ValidationError(
+            f"Helper image source container '{joern_container}' not found; "
+            f"start it with: docker compose up -d"
+        )
+
+    src = "/src/" + shlex.quote(base)                       # source dir inside helper
+    dst = "/pg/codebases/" + shlex.quote(codebase_hash)
+    tmp = dst + ".tmp"
+    script = (
+        "set -e; "
+        f"test -d {src}; "
+        f'[ -n "$(ls -A {src})" ] || {{ echo "source is empty" >&2; exit 3; }}; '
+        f"rm -rf {tmp} {dst}; "
+        f"mkdir -p {tmp}; "
+        f"cp -a {src}/. {tmp}/; "
+        f"mv {tmp} {dst}"
+    )
+    try:
+        client.containers.run(
+            image=image,
+            entrypoint=["/bin/sh", "-c", script],
+            volumes={
+                parent: {"bind": "/src", "mode": "ro"},
+                playground_host: {"bind": "/pg", "mode": "rw"},
+            },
+            remove=True,
+            network_disabled=True,
+        )
+    except docker.errors.ContainerError as e:
+        raise ValidationError(
+            f"Failed to copy host source via helper container (exit {e.exit_status}); "
+            f"check that the path exists on the host and is non-empty"
+        )
+
+
+def _joern_helper_image() -> str:
+    """Resolve an image id to use for short-lived playground helper containers.
+
+    Reuses the running joern-server's image so nothing extra is pulled.
+    """
+    client = docker.from_env()
+    name = os.getenv("JOERN_CONTAINER_NAME", "codebadger-joern-server")
+    try:
+        return client.containers.get(name).image.id
+    except docker.errors.NotFound:
+        raise ValidationError(
+            f"Helper image source container '{name}' not found; "
+            f"start it with: docker compose up -d"
+        )
+
+
+def _hash_tree_in_process(root: str) -> str:
+    """Deterministic content fingerprint of a directory tree (this process reads it).
+
+    Hashes (relative-path, file-content) for every regular file, excluding .git,
+    in sorted order. Independent of mtime/path-prefix so identical trees collide
+    (dedupe) and any content change yields a new digest (no stale-CPG reuse).
+    """
+    entries = []
+    for dirpath, dirs, files in os.walk(root):
+        if ".git" in dirs:
+            dirs.remove(".git")
+        for f in sorted(files):
+            fp = os.path.join(dirpath, f)
+            rel = os.path.relpath(fp, root)
+            if os.path.islink(fp):
+                h = hashlib.sha256(b"L" + os.readlink(fp).encode()).hexdigest()
+            else:
+                hsh = hashlib.sha256()
+                with open(fp, "rb") as fh:
+                    for chunk in iter(lambda: fh.read(1 << 16), b""):
+                        hsh.update(chunk)
+                h = hsh.hexdigest()
+            entries.append(rel + "\0" + h)
+    entries.sort()
+    return hashlib.sha256("\n".join(entries).encode()).hexdigest()
+
+
+def _fingerprint_local_source_via_daemon(host_path: str) -> str:
+    """Content fingerprint of a host tree the MCP can't read, via a helper container.
+
+    Deterministic within a deployment (always taken from the host daemon): hashes
+    every file's content+name (excluding .git) in a stable order. Mirrors the
+    intent of _hash_tree_in_process; the two need not match byte-for-byte since a
+    given deployment uses exactly one of them.
+    """
+    clean = host_path.rstrip("/")
+    parent, base = os.path.dirname(clean), os.path.basename(clean)
+    if not parent or not base:
+        raise ValidationError("Invalid host source path")
+
+    src = "/src/" + shlex.quote(base)
+    # find (excluding .git) -> stable sort -> per-file sha256 -> sha256 of the lot.
+    script = (
+        "set -e; "
+        f"cd {src}; "
+        "find . -path ./.git -prune -o -type f -print0 "
+        "| LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64"
+    )
+    client = docker.from_env()
+    try:
+        out = client.containers.run(
+            image=_joern_helper_image(),
+            entrypoint=["/bin/sh", "-c", script],
+            volumes={parent: {"bind": "/src", "mode": "ro"}},
+            remove=True,
+            network_disabled=True,
+        )
+    except docker.errors.ContainerError as e:
+        raise ValidationError(
+            f"Failed to fingerprint host source via helper container (exit {e.exit_status})"
+        )
+    digest = (out.decode("utf-8", "replace") if isinstance(out, bytes) else str(out)).strip()
+    if not digest:
+        raise ValidationError("Empty fingerprint from helper container")
+    return digest
+
+
+def _fingerprint_local_source(source_path: str) -> Optional[str]:
+    """Content fingerprint for a local source, used as the CPG cache key.
+
+    Reads the tree in-process when it is visible (MCP on host / bind-mounted),
+    else computes it on the host via a helper container (containerized MCP).
+    Returns None on failure so the caller can fall back to path-based keying.
+    """
+    host_path = resolve_host_path(source_path, require_local_access=False)
+    if os.path.exists(host_path):
+        return _hash_tree_in_process(host_path)
+    return _fingerprint_local_source_via_daemon(host_path)
 
 
 def _reclaim_source_snapshot(codebase_dir: str, cpg_path: str, config) -> bool:
@@ -1111,16 +1284,21 @@ Examples:
             # Git commit hash, when available, becomes part of the cache key so a
             # checkout of a different revision produces a distinct CPG.
             commit_hash = None
+            content_fp = code  # snippet body, when source_type == "snippet"
             if source_type == "local":
-                 try:
-                     RESOLVED_PATH = await asyncio.to_thread(resolve_host_path, source_path)
-                     commit_hash = await asyncio.to_thread(_get_git_commit_hash, RESOLVED_PATH)
-                     if commit_hash:
-                         logger.info(f"Detected git commit hash: {commit_hash}")
-                 except Exception as e:
-                     logger.warning(f"Failed to get git commit hash: {e}")
+                try:
+                    # Content fingerprint of the tree (works for non-git sources and
+                    # for a containerized MCP that can't read the host path directly).
+                    content_fp = await asyncio.to_thread(_fingerprint_local_source, source_path)
+                    if content_fp:
+                        logger.info(f"Local source content fingerprint: {content_fp[:16]}")
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to fingerprint local source ({e}); falling back to path-based key"
+                    )
+                    content_fp = None
 
-            codebase_hash = get_cpg_cache_key(source_type, source_path, language, commit_hash, content=code)
+            codebase_hash = get_cpg_cache_key(source_type, source_path, language, commit_hash, content=content_fp)
             logger.info(f"Processing codebase with hash: {codebase_hash}")
 
             existing_codebase = codebase_tracker.get_codebase(codebase_hash)
@@ -1307,7 +1485,12 @@ Examples:
                     # resolve + copy are blocking FS work — keep them off the event loop
                     # (see _copy_local_source_tree) so concurrent requests don't serialize
                     # and race the caller's source-dir cleanup.
-                    host_path = await asyncio.to_thread(resolve_host_path, source_path)
+                    # require_local_access=False: a containerized MCP can't see a
+                    # host source path, so defer the existence check — we copy via a
+                    # host-daemon helper below (which validates existence on the host).
+                    host_path = await asyncio.to_thread(
+                        resolve_host_path, source_path, False
+                    )
 
                     # Refuse a source that contains (or is) the CodeBadger playground.
                     # Copying it would recursively pull in every cached codebase/CPG, and
@@ -1325,7 +1508,21 @@ Examples:
                     if not os.path.exists(codebase_dir):
                         logger.info(f"Copying source from {host_path} to {codebase_dir}")
                         try:
-                            await asyncio.to_thread(_copy_local_source_tree, host_path, codebase_dir)
+                            if os.path.exists(host_path):
+                                # Path is visible to this process (MCP on host, or the
+                                # source is bind-mounted in): copy in-process.
+                                await asyncio.to_thread(
+                                    _copy_local_source_tree, host_path, codebase_dir
+                                )
+                            else:
+                                # Containerized MCP + host-only path: copy via the host
+                                # Docker daemon using a short-lived helper container.
+                                logger.info(
+                                    f"{host_path} not visible to MCP; copying via host-daemon helper"
+                                )
+                                await asyncio.to_thread(
+                                    _copy_local_source_tree_via_daemon, host_path, codebase_hash
+                                )
                             logger.info(f"Source copied successfully to {codebase_dir}")
                         except OSError as e:
                             logger.error(f"Failed to copy local source directory for {codebase_hash}: {e}")

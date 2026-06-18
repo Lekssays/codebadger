@@ -709,15 +709,24 @@ def _is_within(canonical: str, root: str) -> bool:
     return canonical == root or canonical.startswith(root.rstrip("/") + "/")
 
 
-def resolve_host_path(host_path: str) -> str:
+def resolve_host_path(host_path: str, require_local_access: bool = True) -> str:
     """
     Validate and resolve a host path.
 
-    Since the MCP server runs on the host, we can properly validate
-    that the path exists and is a directory.
+    All string-level security checks (control chars, absoluteness, blocked
+    prefixes, ALLOWED_SOURCE_ROOTS containment) are always applied.
+
+    The existence / is-directory checks require the path to be readable by THIS
+    process. That holds when the MCP runs on the host (or the path is mounted
+    in), but not when the MCP is containerized and the path lives on the host
+    filesystem. In that case the caller copies the tree via a host-daemon helper
+    container instead, so pass require_local_access=False to skip the local
+    existence checks (the helper validates existence on the host).
 
     Args:
         host_path: Absolute path on the host
+        require_local_access: When True (default), verify the path exists and is
+            a directory using this process's filesystem view.
 
     Returns:
         The resolved absolute path
@@ -749,10 +758,11 @@ def resolve_host_path(host_path: str) -> str:
     if roots and not any(_is_within(canonical, r) for r in roots):
         raise ValidationError("Host path is outside the allowed source roots")
 
-    if not os.path.exists(canonical):
-        raise ValidationError("Path does not exist")
+    if require_local_access:
+        if not os.path.exists(canonical):
+            raise ValidationError("Path does not exist")
 
-    if not os.path.isdir(canonical):
-        raise ValidationError("Path is not a directory")
+        if not os.path.isdir(canonical):
+            raise ValidationError("Path is not a directory")
 
     return canonical
