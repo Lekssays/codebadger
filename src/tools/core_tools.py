@@ -169,7 +169,7 @@ def _get_git_commit_hash(path: str) -> Optional[str]:
     except (subprocess.CalledProcessError, FileNotFoundError, OSError):
         return None
 
-def get_cpg_cache_key(source_type: str, source_path: str, language: str, commit_hash: Optional[str] = None, content: Optional[str] = None) -> str:
+def get_cpg_cache_key(source_type: str, source_path: str, language: str, commit_hash: Optional[str] = None, content: Optional[str] = None, extra: Optional[str] = None) -> str:
     """
     Generate a deterministic CPG cache key based on source type, path, language, and optional commit hash.
 
@@ -212,6 +212,11 @@ def get_cpg_cache_key(source_type: str, source_path: str, language: str, commit_
 
     if commit_hash:
         identifier += f":{commit_hash}"
+
+    # Build options (caller-supplied include paths / defines) change the produced CPG,
+    # so they must be part of the cache key or a stale CPG would be reused.
+    if extra:
+        identifier += f":{extra}"
 
     hash_digest = hashlib.sha256(identifier.encode()).hexdigest()[:16]
     return hash_digest
@@ -683,13 +688,56 @@ async def _restart_server_async(
             )
 
 
+def _autodetect_c_includes(codebase_dir: str, max_dirs: int = 24) -> list:
+    """Lightweight C/C++ include-dir discovery for the c2cpg `--include` path.
+
+    Returns directories (RELATIVE to codebase_dir) worth adding to the header
+    search path: the source root, any `include/` dir, and any dir that directly
+    contains config.h or a generated *version*.h. This lets angle-includes like
+    <libxml/xmlversion.h> resolve so feature macros (e.g. LIBXML_CATALOG_ENABLED)
+    are defined and #ifdef-gated modules are parsed instead of silently dropped.
+
+    Bounded (depth + count) and never raises — it's a best-effort enrichment of
+    the otherwise fuzzy parse, not a correctness requirement. System-header
+    auto-discovery is intentionally NOT enabled here.
+    """
+    found = ["."]  # source root
+    try:
+        for dirpath, dirs, files in os.walk(codebase_dir):
+            dirs[:] = [d for d in dirs if d not in (".git", ".svn", ".hg", "node_modules")]
+            rel = os.path.relpath(dirpath, codebase_dir)
+            depth = 0 if rel == "." else rel.count(os.sep) + 1
+            if depth > 5:
+                dirs[:] = []
+                continue
+            if rel != ".":
+                is_include_dir = os.path.basename(dirpath) == "include"
+                has_generated_hdr = ("config.h" in files) or any(
+                    f.endswith(".h") and "version" in f.lower() for f in files
+                )
+                if is_include_dir or has_generated_hdr:
+                    found.append(rel)
+            if len(found) >= max_dirs:
+                break
+    except Exception:
+        pass
+    seen, out = set(), []
+    for p in found:
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
+
+
 async def _generate_cpg_async(
     codebase_hash: str,
     codebase_dir: str,
     cpg_path: str,
     language: str,
     container_cpg_path: str,
-    services: dict
+    services: dict,
+    include_paths: Optional[list] = None,
+    defines: Optional[list] = None,
 ):
     """Async task to generate CPG and start Joern server"""
     import logging
@@ -770,6 +818,40 @@ async def _generate_cpg_async(
             combined_regex = "|".join(f"({p})" for p in escaped_patterns)
             cmd.extend(["--exclude-regex", combined_regex])
             logger.info(f"Applied {len(config.cpg.exclusion_patterns)} exclusion patterns")
+
+        # Header include paths + preprocessor defines (C/C++ only — these are c2cpg
+        # flags). Without them, angle-includes of generated headers (e.g.
+        # <libxml/xmlversion.h>) don't resolve and feature macros stay undefined, so
+        # whole #ifdef-gated modules get preprocessed out of the CPG. We auto-detect
+        # likely include roots (source root, include/, dirs with config.h/*version*.h)
+        # and append any caller-supplied include_paths/defines. Relative paths are
+        # resolved against the in-container source root; absolute paths pass through.
+        if language in ("c", "cpp"):
+            container_root = f"/playground/codebases/{codebase_hash}"
+
+            def _to_container(p: str) -> str:
+                p = p.strip()
+                if not p:
+                    return ""
+                return p if os.path.isabs(p) else (container_root + "/" + p.lstrip("./")).rstrip("/")
+
+            auto_rel = await asyncio.to_thread(_autodetect_c_includes, codebase_dir)
+            inc_dirs, seen_inc = [], set()
+            for p in [_to_container(x) for x in auto_rel] + [_to_container(x) for x in (include_paths or [])]:
+                if p and p not in seen_inc:
+                    seen_inc.add(p)
+                    inc_dirs.append(p)
+            for d in inc_dirs:
+                cmd += ["--include", d]
+            for macro in (defines or []):
+                macro = str(macro).strip()
+                if macro:
+                    cmd += ["--define", macro]
+            if inc_dirs or defines:
+                logger.info(
+                    f"c2cpg include dirs={len(inc_dirs)} (auto={len(auto_rel)}, "
+                    f"explicit={len(include_paths or [])}), defines={len(defines or [])}"
+                )
 
         # CRITICAL: cap the frontend JVM heap. Without -Xmx the frontend defaults
         # to ~25% of the container limit (~25 GB on a 100 GB cap); N concurrent
@@ -1188,6 +1270,8 @@ Examples:
         github_token: Annotated[Optional[str], Field(description="GitHub Personal Access Token for private repositories (optional)")] = None,
         branch: Annotated[Optional[str], Field(description="Specific git branch to checkout (optional, defaults to default branch)")] = None,
         force: Annotated[bool, Field(description="Skip the large-project size warning. Set to True only after the user has explicitly confirmed they want to analyze the full project.")] = False,
+        include_paths: Annotated[Optional[list], Field(description="C/C++ only: extra header include directories for c2cpg (--include). Relative paths resolve against the source root (e.g. 'include', '_build/include'); absolute paths pass through. Use when a project's generated headers (e.g. a configure/cmake-produced xmlversion.h or config.h) gate code behind feature macros — the source root, any include/ dir, and dirs containing config.h/*version*.h are auto-detected, so this is only needed for non-standard layouts.")] = None,
+        defines: Annotated[Optional[list], Field(description="C/C++ only: preprocessor macros to define for c2cpg (--define), e.g. ['LIBXML_CATALOG_ENABLED', 'FOO=1']. Use to force-enable #ifdef-gated modules when the defining header can't be found.")] = None,
     ) -> Dict[str, Any]:
         """Create a Code Property Graph from source code for analysis.
 
@@ -1298,7 +1382,36 @@ Examples:
                     )
                     content_fp = None
 
-            codebase_hash = get_cpg_cache_key(source_type, source_path, language, commit_hash, content=content_fp)
+            # Normalize + validate C/C++ build options (no control chars; relative
+            # include paths must stay within the source root). Build options are part
+            # of the cache key so a different -I/-D set yields a distinct CPG.
+            def _clean_list(items, kind):
+                out = []
+                for raw in (items or []):
+                    s = str(raw).strip()
+                    if not s:
+                        continue
+                    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in s):
+                        raise ValidationError(f"Invalid {kind}: control characters not allowed")
+                    if kind == "include path" and not os.path.isabs(s) and ".." in s.split("/"):
+                        raise ValidationError("Relative include paths must not contain '..'")
+                    out.append(s)
+                return out
+
+            include_paths = _clean_list(include_paths, "include path")
+            defines = _clean_list(defines, "define")
+            if (include_paths or defines) and language not in ("c", "cpp"):
+                logger.warning(f"include_paths/defines ignored for language '{language}' (C/C++ only)")
+                include_paths, defines = [], []
+
+            _opts = []
+            if include_paths:
+                _opts.append("inc=" + ",".join(sorted(include_paths)))
+            if defines:
+                _opts.append("def=" + ",".join(sorted(defines)))
+            build_opts_key = ";".join(_opts) if _opts else None
+
+            codebase_hash = get_cpg_cache_key(source_type, source_path, language, commit_hash, content=content_fp, extra=build_opts_key)
             logger.info(f"Processing codebase with hash: {codebase_hash}")
 
             existing_codebase = codebase_tracker.get_codebase(codebase_hash)
@@ -1560,6 +1673,8 @@ Examples:
                     language=language,
                     container_cpg_path=container_cpg_path,
                     services=services,
+                    include_paths=include_paths or None,
+                    defines=defines or None,
                 )
                 cpg_queue = services.get("cpg_queue")
                 if cpg_queue:
