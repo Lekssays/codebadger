@@ -169,7 +169,7 @@ def _get_git_commit_hash(path: str) -> Optional[str]:
     except (subprocess.CalledProcessError, FileNotFoundError, OSError):
         return None
 
-def get_cpg_cache_key(source_type: str, source_path: str, language: str, commit_hash: Optional[str] = None, content: Optional[str] = None, extra: Optional[str] = None) -> str:
+def get_cpg_cache_key(source_type: str, source_path: str, language: str, commit_hash: Optional[str] = None, content: Optional[str] = None, extra: Optional[str] = None, branch: Optional[str] = None) -> str:
     """
     Generate a deterministic CPG cache key based on source type, path, language, and optional commit hash.
 
@@ -209,6 +209,13 @@ def get_cpg_cache_key(source_type: str, source_path: str, language: str, commit_
             # Fallback when fingerprinting is unavailable: path-based key.
             source_path = os.path.abspath(source_path)
             identifier = f"local:{source_path}:{language}"
+
+    # A requested branch selects a distinct revision of a remote repo, so it must be
+    # part of the key — otherwise two branches of the same repo collide on one CPG
+    # (and the second request silently reuses the first branch's graph). Only applies
+    # to remote sources; default branch (None) leaves the key unchanged for back-compat.
+    if branch and source_type == "github":
+        identifier += f"@{branch}"
 
     if commit_hash:
         identifier += f":{commit_hash}"
@@ -1411,7 +1418,7 @@ Examples:
                 _opts.append("def=" + ",".join(sorted(defines)))
             build_opts_key = ";".join(_opts) if _opts else None
 
-            codebase_hash = get_cpg_cache_key(source_type, source_path, language, commit_hash, content=content_fp, extra=build_opts_key)
+            codebase_hash = get_cpg_cache_key(source_type, source_path, language, commit_hash, content=content_fp, extra=build_opts_key, branch=branch)
             logger.info(f"Processing codebase with hash: {codebase_hash}")
 
             existing_codebase = codebase_tracker.get_codebase(codebase_hash)
