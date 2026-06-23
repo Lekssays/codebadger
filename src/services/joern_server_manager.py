@@ -87,6 +87,9 @@ class JoernServerManager:
         # or "error"), captured before the server is torn down so reload_with_retry
         # can skip retrying a genuinely empty build.
         self._last_load_cause: Optional[str] = None
+        # User-method count from the most recent verified load (None until set),
+        # surfaced as user_method_count in get_cpg_status.
+        self._last_user_method_count: Optional[int] = None
 
         # Memory-aware admission. When _memory_budget_mb > 0, servers
         # are admitted while the sum of per-CPG heap reservations stays under the
@@ -897,6 +900,9 @@ class JoernServerManager:
             # Capture the failure cause BEFORE terminate_server drops the client,
             # so reload_with_retry can tell a transient miss from an empty build.
             self._last_load_cause = getattr(client, "last_load_outcome", None)
+            # Capture the verified user-method count too, so the build path can
+            # surface coverage in get_cpg_status (a sanity check vs. silent-empty).
+            self._last_user_method_count = getattr(client, "last_user_method_count", None)
 
             if success:
                 logger.info(f"CPG loaded successfully for {codebase_hash}")

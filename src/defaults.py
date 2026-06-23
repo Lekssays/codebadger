@@ -276,6 +276,22 @@ CPG_LARGE_PROJECT_GUARD = True
 CPG_LARGE_PROJECT_MAX_MB = 2000
 CPG_LARGE_PROJECT_MAX_LOC = 2_000_000
 
+# Hard ceiling on the on-disk cpg.bin size we will try to load into a Joern
+# query server. A CPG above this almost never loads reliably into a
+# memory-capped worker (FFmpeg's full tree at ~1.6 GB was the motivating case);
+# above the ceiling we fail fast with guidance to scope the build instead of
+# emitting the opaque "failed to reload into a Joern server". 2 GB.
+CPG_MAX_LOAD_MB = 2048
+
+# Cold-CPG garbage collection. By default the sweep only releases allocations
+# (Joern server, port, memory) of CPGs gone cold and marks them SLEEPING; the
+# cpg.bin stays on disk and reloads on the next query. Disk deletion is opt-in.
+CPG_GC_ENABLED = True
+CPG_GC_INTERVAL_SECONDS = 600
+CPG_GC_MAX_AGE_SECONDS = 86400
+CPG_GC_MAX_COUNT = 50
+CPG_GC_DELETE_COLD = False
+
 # Language-specific Joern frontend binaries (full paths inside the container)
 LANGUAGE_COMMANDS = {
     "java":       "/opt/joern/joern-cli/javasrc2cpg",

@@ -226,6 +226,31 @@ class PostgresJobStore:
             logger.error(f"Postgres has_active_job failed for {codebase_hash}: {e}")
             return True
 
+    def queue_position(self, codebase_hash: str, job_type: str = "generate_cpg") -> Optional[int]:
+        """1-based position of this codebase's QUEUED job among all queued jobs.
+
+        Returns None if the job isn't queued (running, done, or absent). Position
+        is by created_at order, matching claim_next_job's ORDER BY.
+        """
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT created_at FROM jobs WHERE codebase_hash = %s AND job_type = %s "
+                    "AND status = 'queued' LIMIT 1",
+                    (codebase_hash, job_type),
+                ).fetchone()
+                if not row:
+                    return None
+                ahead = conn.execute(
+                    "SELECT COUNT(*) AS c FROM jobs WHERE job_type = %s AND status = 'queued' "
+                    "AND created_at < %s",
+                    (job_type, row["created_at"]),
+                ).fetchone()["c"]
+                return ahead + 1
+        except Exception as e:
+            logger.error(f"Postgres queue_position failed for {codebase_hash}: {e}")
+            return None
+
     def count_jobs(self, status: Optional[str] = None) -> int:
         try:
             with self._connect() as conn:

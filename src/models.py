@@ -196,6 +196,10 @@ class CPGConfig:
     taint_sources: Optional[Dict[str, List[str]]] = None
     taint_sinks: Optional[Dict[str, List[str]]] = None
     min_cpg_file_size: int = 1024  # 1KB minimum
+    # Hard ceiling (MB) on the built cpg.bin we'll try to load into a query
+    # server. Above this we fail fast with scoping guidance instead of an opaque
+    # load failure. Default 2 GB.
+    max_load_mb: int = 2048
     output_truncation_length: int = 2000  # Max characters for output logging
     build_workers: int = 2
     # Per-frontend build heap cap (GB) — bounds c2cpg/javasrc2cpg/... JVM memory
@@ -217,6 +221,16 @@ class CPGConfig:
     large_project_guard: bool = True
     large_project_max_mb: int = 2000
     large_project_max_loc: int = 2_000_000
+    # Cold-CPG garbage collection: a background sweep that releases the
+    # allocations (Joern server process, port, memory reservation) of CPGs that
+    # have gone cold, marking them SLEEPING. The cpg.bin is KEPT on disk and the
+    # CPG transparently reloads on the next query. Disk binaries are NOT deleted
+    # by default (gc_delete_cold=False) — set it True only if you want disk GC.
+    gc_enabled: bool = True
+    gc_interval_seconds: int = 600         # sweep cadence
+    gc_max_age_seconds: int = 86400        # evict servers cold for > 1 day
+    gc_max_count: int = 50                 # only used when gc_delete_cold=True (disk LRU)
+    gc_delete_cold: bool = False           # default: evict allocations only, keep cpg.bin
 
 
 @dataclass

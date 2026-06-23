@@ -66,6 +66,10 @@ class JoernServerClient:
         # transient load failure (retryable). Captured before the server is torn
         # down, since termination drops this client.
         self.last_load_outcome: Optional[str] = None
+        # User-defined method count from the most recent load verify, so the
+        # caller can surface coverage (a sanity check that the build wasn't
+        # silently empty / mostly-gated). None until a verify has run.
+        self.last_user_method_count: Optional[int] = None
 
         # Initialize session with connection pooling
         self.session = self._create_session()
@@ -341,6 +345,7 @@ class JoernServerClient:
                 # confirm a prior successful load in rare connection-reset cases.
                 outcome, count = self._verify_loaded(verify_deadline)
                 self.last_load_outcome = outcome
+                self.last_user_method_count = count
                 if outcome == self._VERIFY_OK:
                     logger.info(f"CPG verified despite import exception: {count} methods")
                     return True
@@ -357,6 +362,7 @@ class JoernServerClient:
 
             outcome, count = self._verify_loaded(verify_deadline)
             self.last_load_outcome = outcome
+            self.last_user_method_count = count
             if outcome == self._VERIFY_OK:
                 logger.info(f"CPG verified: {count} methods found")
                 return True

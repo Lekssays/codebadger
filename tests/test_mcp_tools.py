@@ -460,10 +460,54 @@ class TestMCPTools:
 
                 assert result_dict["codebase_hash"] == "553642871dd4251d"
                 assert result_dict["status"] == "ready"
+                # Non-sensitive label derived from basename, not the redacted path.
+                assert result_dict["codebase_label"] == "test-repo@55364287"
                 assert result_dict["cpg_path"] == "<redacted:host-path>"
                 assert result_dict["source_path"] == "<redacted:local-source>"
                 assert result_dict["container_codebase_path"] == "<redacted:container-path>"
                 assert result_dict["container_cpg_path"] == "<redacted:container-path>"
+
+    @pytest.mark.asyncio
+    async def test_get_cpg_status_reports_progress_fields(self, mock_services):
+        """get_cpg_status surfaces phase/elapsed/deadline and queue_position while building."""
+        from datetime import datetime, timedelta, timezone
+        from src.tools.core_tools import register_core_tools
+
+        started = (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat()
+        deadline = (datetime.now(timezone.utc) + timedelta(seconds=600)).isoformat()
+        mock_services["codebase_tracker"].get_codebase.return_value = CodebaseInfo(
+            codebase_hash="553642871dd4251d",
+            source_type="github",
+            source_path="https://github.com/test/repo",
+            language="c",
+            cpg_path=None,
+            joern_port=None,
+            metadata={
+                "status": "generating",
+                "phase": "frontend",
+                "generation_started_at": started,
+                "generation_deadline": deadline,
+            },
+        )
+        cpg_queue = MagicMock()
+        cpg_queue.is_in_flight.return_value = True
+        cpg_queue.queue_position.return_value = 3
+        mock_services["cpg_queue"] = cpg_queue
+
+        mcp = FastMCP("TestServer")
+        register_core_tools(mcp, mock_services)
+
+        async with Client(mcp) as client:
+            result = await client.call_tool("get_cpg_status", {"codebase_hash": "553642871dd4251d"})
+            import json
+            result_dict = json.loads(result.content[0].text)
+
+            assert result_dict["status"] == "generating"
+            # queue_position present => reported as queued
+            assert result_dict["queue_position"] == 3
+            assert result_dict["phase"] == "queued"
+            assert result_dict["elapsed_seconds"] >= 30
+            assert 0 < result_dict["deadline_seconds"] <= 600
 
     @pytest.mark.asyncio
     async def test_get_cpg_status_generating_past_deadline_no_worker_reconciles_failed(self, mock_services):
@@ -536,6 +580,171 @@ class TestMCPTools:
             result_dict = json.loads(result.content[0].text)
 
             assert result_dict["status"] == "generating"
+
+    @pytest.mark.asyncio
+    async def test_generate_cpg_async_fails_fast_when_cpg_exceeds_load_ceiling(self, mock_services, tmp_path):
+        """A built CPG larger than max_load_mb is failed fast with CPG_TOO_LARGE guidance,
+        instead of being handed to the loader to stall and emit an opaque error."""
+        from unittest.mock import patch
+        import src.tools.core_tools as core_tools
+
+        # Tiny ceiling so a small fake CPG trips the guard.
+        mock_services["config"].cpg.max_load_mb = 1  # 1 MB
+        mock_services["config"].cpg.languages_with_exclusions = []  # avoid None-membership check
+
+        codebase_dir = tmp_path / "src"
+        codebase_dir.mkdir()
+        (codebase_dir / "a.c").write_text("int main(void){return 0;}\n")
+        cpg_path = tmp_path / "cpg.bin"
+        cpg_path.write_text("x")  # real size is irrelevant; we patch getsize
+
+        # Container whose frontend "succeeds" (exit 0); load must never be reached.
+        container = MagicMock()
+        container.exec_run.return_value = MagicMock(exit_code=0, output=b"ok")
+        docker_client = MagicMock()
+        docker_client.containers.get.return_value = container
+
+        jsm = mock_services["joern_server_manager"]
+        jsm.container_name = "codebadger-joern-server"
+
+        real_getsize = os.path.getsize
+
+        def fake_getsize(p):
+            if str(p) == str(cpg_path):
+                return 50 * 1024 * 1024  # 50 MB > 1 MB ceiling
+            return real_getsize(p)
+
+        with patch.object(core_tools.docker, "from_env", return_value=docker_client), \
+             patch("os.path.getsize", side_effect=fake_getsize):
+            await core_tools._generate_cpg_async(
+                codebase_hash="553642871dd4251d",
+                codebase_dir=str(codebase_dir),
+                cpg_path=str(cpg_path),
+                language="c",
+                container_cpg_path="/playground/cpgs/553642871dd4251d/cpg.bin",
+                services=mock_services,
+            )
+
+        # The CPG should never have been handed to the loader.
+        jsm.reload_with_retry.assert_not_called()
+        # And the codebase must be marked FAILED with the actionable code.
+        calls = mock_services["codebase_tracker"].update_codebase.call_args_list
+        meta = next(
+            c.kwargs["metadata"] for c in reversed(calls)
+            if c.kwargs.get("metadata", {}).get("error_code") == "CPG_TOO_LARGE"
+        )
+        assert meta["status"] in ("failed", "FAILED")
+        assert "load ceiling" in meta["error"]
+
+    def test_gc_cold_cpgs_evicts_cold_servers_but_keeps_disk(self, mock_services):
+        """Default GC frees allocations of cold running servers (delete_files=False)
+        and never deletes the cpg.bin."""
+        from datetime import datetime, timedelta, timezone
+        from unittest.mock import patch
+        import src.tools.core_tools as core_tools
+
+        cold = (datetime.now(timezone.utc) - timedelta(seconds=100000)).isoformat()
+        warm = datetime.now(timezone.utc).isoformat()
+
+        def cb(h, last, status="ready"):
+            return CodebaseInfo(
+                codebase_hash=h, source_type="github",
+                source_path="https://github.com/test/repo", language="c",
+                cpg_path="/tmp/x", last_accessed=datetime.fromisoformat(last),
+                metadata={"status": status},
+            )
+
+        mock_services["codebase_tracker"].list_codebases_full.return_value = [
+            cb("a" * 16, cold), cb("b" * 16, warm),
+        ]
+        mgr = mock_services["joern_server_manager"]
+        mgr.get_server_port.return_value = 2001       # all "have a port"
+        mgr.is_server_running.return_value = True     # all "running"
+        mock_services["cpg_queue"] = MagicMock(is_in_flight=MagicMock(return_value=False))
+
+        teardown_calls = []
+        with patch.object(core_tools, "_teardown_codebase",
+                          side_effect=lambda s, h, delete_files=True: teardown_calls.append((h, delete_files)) or 0):
+            summary = core_tools.gc_cold_cpgs(mock_services, max_age_seconds=3600, max_count=50, delete_cold=False)
+
+        # Only the cold codebase is evicted; eviction keeps the binary (delete_files=False).
+        assert teardown_calls == [("a" * 16, False)]
+        assert summary["evicted"] == ["repo@aaaaaaaa"]
+        assert summary["deleted"] == []
+
+    def test_gc_cold_cpgs_opt_in_deletes_cold_binaries(self, mock_services):
+        """With delete_cold=True, cold sleeping (not-running) CPG binaries are deleted."""
+        from datetime import datetime, timedelta, timezone
+        from unittest.mock import patch
+        import src.tools.core_tools as core_tools
+
+        cold = (datetime.now(timezone.utc) - timedelta(seconds=100000)).isoformat()
+        info = CodebaseInfo(
+            codebase_hash="c" * 16, source_type="github",
+            source_path="https://github.com/test/repo", language="c", cpg_path="/tmp/x",
+            last_accessed=datetime.fromisoformat(cold), metadata={"status": "sleeping"},
+        )
+        mock_services["codebase_tracker"].list_codebases_full.return_value = [info]
+        mgr = mock_services["joern_server_manager"]
+        mgr.get_server_port.return_value = None       # not running
+        mgr.is_server_running.return_value = False
+        mock_services["cpg_queue"] = MagicMock(is_in_flight=MagicMock(return_value=False))
+
+        teardown_calls = []
+        with patch.object(core_tools, "_teardown_codebase",
+                          side_effect=lambda s, h, delete_files=True: teardown_calls.append((h, delete_files)) or 1024), \
+             patch.object(core_tools, "_cpgs_disk_usage", return_value=(1, 1.0)):
+            summary = core_tools.gc_cold_cpgs(mock_services, max_age_seconds=3600, max_count=50, delete_cold=True)
+
+        assert teardown_calls == [("c" * 16, True)]
+        assert summary["deleted"] == ["repo@cccccccc"]
+
+    @pytest.mark.asyncio
+    async def test_get_backend_status_reports_capacity_and_load(self, mock_services):
+        """get_backend_status surfaces queue depth, server load, memory and CPG list."""
+        from datetime import datetime, timezone
+        from src.tools.core_tools import register_core_tools
+
+        cpg_queue = MagicMock()
+        cpg_queue.depth = 2
+        cpg_queue.maxsize = 0
+        cpg_queue.in_flight = 3
+        mock_services["cpg_queue"] = cpg_queue
+
+        mgr = mock_services["joern_server_manager"]
+        mgr.get_running_servers.return_value = {"a" * 16: 2001, "b" * 16: 2002}
+        mgr._max_active = 3
+        mgr.get_memory_stats.return_value = {"budget_mb": 24000, "reserved_mb": 8000, "free_mb": 16000}
+
+        mock_services["codebase_tracker"].list_codebases_full.return_value = [
+            CodebaseInfo(
+                codebase_hash="553642871dd4251d",
+                source_type="github",
+                source_path="https://github.com/test/repo.git",
+                language="c",
+                cpg_path="/tmp/test.cpg",
+                last_accessed=datetime.now(timezone.utc),
+                metadata={"status": "ready", "phase": "ready", "repository": "https://github.com/test/repo.git"},
+            )
+        ]
+
+        mcp = FastMCP("TestServer")
+        register_core_tools(mcp, mock_services)
+
+        async with Client(mcp) as client:
+            result = await client.call_tool("get_backend_status", {})
+            import json
+            r = json.loads(result.content[0].text)
+
+            assert r["recommended_max_concurrent_builds"] == r["build_workers"]
+            assert r["queue_depth"] == 2
+            assert r["in_flight"] == 3
+            assert r["active_servers"] == 2
+            assert r["max_active_servers"] == 3
+            assert r["memory"]["budget_mb"] == 24000
+            assert r["cpg_count"] == 1
+            assert r["cpgs"][0]["codebase_label"] == "repo@55364287"
+            assert r["cpgs"][0]["status"] == "ready"
 
     @pytest.mark.asyncio
     async def test_get_cpg_status_not_found(self, mock_services):

@@ -24,7 +24,7 @@ from starlette.responses import JSONResponse, PlainTextResponse
 
 from src.config import load_config
 from src import defaults
-from src.tools.core_tools import CPGGenerationQueue, DurableCPGQueue, _schedule_restart_server_task
+from src.tools.core_tools import CPGGenerationQueue, DurableCPGQueue, _cpg_gc_loop, _schedule_restart_server_task
 from src.services import (
     CodebaseTracker,
     GitManager,
@@ -182,6 +182,12 @@ async def _graceful_shutdown():
             status_log_task.cancel()
             with suppress(asyncio.CancelledError):
                 await status_log_task
+
+        cpg_gc_task = services.get('cpg_gc_task')
+        if cpg_gc_task:
+            cpg_gc_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await cpg_gc_task
 
         joern_server_manager = services.get('joern_server_manager')
         if joern_server_manager:
@@ -543,6 +549,11 @@ async def app_lifespan(server: FastMCP):
 
         interval = int(os.getenv("STATUS_LOG_INTERVAL_SECS", "60"))
         services['status_log_task'] = asyncio.create_task(_periodic_status_log(interval))
+
+        # Cold-CPG GC: release allocations of CPGs gone cold (cpg.bin kept on disk;
+        # reloads on next query). Disk deletion is opt-in (CPG_GC_DELETE_COLD).
+        if config.cpg.gc_enabled:
+            services['cpg_gc_task'] = asyncio.create_task(_cpg_gc_loop(services, config))
 
         logger.info("All services initialized")
         _log_effective_config(config)

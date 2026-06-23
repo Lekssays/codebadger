@@ -78,6 +78,7 @@ def load_config(config_path: Optional[str] = None) -> Config:
                 taint_sources={},
                 taint_sinks={},
                 min_cpg_file_size=int(os.getenv("MIN_CPG_FILE_SIZE", str(defaults.MIN_CPG_FILE_SIZE))),
+                max_load_mb=int(os.getenv("CPG_MAX_LOAD_MB", str(defaults.CPG_MAX_LOAD_MB))),
                 output_truncation_length=int(os.getenv("OUTPUT_TRUNCATION_LENGTH", str(defaults.OUTPUT_TRUNCATION_LENGTH))),
                 build_workers=int(os.getenv("CPG_BUILD_WORKERS", str(defaults.CPG_BUILD_WORKERS))),
                 build_heap_gb=int(os.getenv("CPG_BUILD_HEAP_GB", str(defaults.CPG_BUILD_HEAP_GB))),
@@ -91,6 +92,13 @@ def load_config(config_path: Optional[str] = None) -> Config:
                 ).lower() not in ("false", "0", "no", "off"),
                 large_project_max_mb=int(os.getenv("CPG_LARGE_PROJECT_MAX_MB", str(defaults.CPG_LARGE_PROJECT_MAX_MB))),
                 large_project_max_loc=int(os.getenv("CPG_LARGE_PROJECT_MAX_LOC", str(defaults.CPG_LARGE_PROJECT_MAX_LOC))),
+                gc_enabled=os.getenv("CPG_GC_ENABLED", str(defaults.CPG_GC_ENABLED)).lower()
+                not in ("false", "0", "no", "off"),
+                gc_interval_seconds=int(os.getenv("CPG_GC_INTERVAL_SECONDS", str(defaults.CPG_GC_INTERVAL_SECONDS))),
+                gc_max_age_seconds=int(os.getenv("CPG_GC_MAX_AGE_SECONDS", str(defaults.CPG_GC_MAX_AGE_SECONDS))),
+                gc_max_count=int(os.getenv("CPG_GC_MAX_COUNT", str(defaults.CPG_GC_MAX_COUNT))),
+                gc_delete_cold=os.getenv("CPG_GC_DELETE_COLD", str(defaults.CPG_GC_DELETE_COLD)).lower()
+                in ("true", "1", "yes", "on"),
             ),
             query=QueryConfig(
                 timeout=int(os.getenv("QUERY_TIMEOUT", str(defaults.QUERY_TIMEOUT))),

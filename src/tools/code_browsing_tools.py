@@ -570,6 +570,10 @@ Examples:
                         "String literals in filter need quotes: filter(_.name == \"value\")",
                         "Regex patterns must be in quotes and escaped: \".*pattern.*\"",
                         "For better performance, filter before calling .l",
+                        "Prefer .dedup.l (or aggregate with .mkString(\",\")) over a bare .name.l: "
+                        "a huge unfiltered list of strings is heavy to serialize. The server caps "
+                        "oversized results in-memory and sets truncated=True with a truncation_note "
+                        "(results are NOT written to a file) — narrow the traversal to see the rest.",
                     ]
                 },
                 "quick_reference": {

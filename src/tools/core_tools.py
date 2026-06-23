@@ -141,6 +141,256 @@ def _build_job_alive(services: dict, codebase_hash: str) -> bool:
         return True
 
 
+def _playground_path() -> str:
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "playground"))
+
+
+def _teardown_codebase(services: dict, codebase_hash: str, delete_files: bool = True) -> int:
+    """Evict a codebase's Joern server and (optionally) delete its on-disk
+    artifacts + DB row. Returns freed bytes. Shared by remove_cpg and the
+    cold-CPG GC sweeper so both tear down identically and safely (never rmtree
+    outside the playground). Synchronous — safe to call from a worker thread."""
+    joern_server_manager = services.get("joern_server_manager")
+    if joern_server_manager and joern_server_manager.get_server_port(codebase_hash):
+        joern_server_manager.terminate_server(codebase_hash)
+
+    if not delete_files:
+        tracker = services.get("codebase_tracker")
+        if tracker is not None:
+            tracker.update_codebase(
+                codebase_hash=codebase_hash,
+                joern_port=None,
+                metadata={"status": SessionStatus.SLEEPING},
+            )
+        return 0
+
+    playground_path = _playground_path()
+    root = os.path.realpath(playground_path)
+    freed_bytes = 0
+
+    def _under_playground(p: str) -> bool:
+        real = os.path.realpath(p)
+        return real == root or real.startswith(root + os.sep)
+
+    for sub in ("cpgs", "codebases"):
+        target = os.path.join(playground_path, sub, codebase_hash)
+        if not _under_playground(target):
+            raise ValidationError("refusing to delete outside the playground")
+        if os.path.exists(target):
+            for dirpath, _, filenames in os.walk(target):
+                for fname in filenames:
+                    try:
+                        freed_bytes += os.path.getsize(os.path.join(dirpath, fname))
+                    except OSError:
+                        pass
+            shutil.rmtree(target, ignore_errors=True)
+
+    db_manager = services.get("db_manager")
+    if db_manager is not None:
+        db_manager.delete_codebase(codebase_hash)
+    return freed_bytes
+
+
+def _cpgs_disk_usage() -> tuple:
+    """(count, total_mb) of on-disk CPG directories under playground/cpgs."""
+    cpgs_dir = os.path.join(_playground_path(), "cpgs")
+    count, total = 0, 0
+    try:
+        for entry in os.scandir(cpgs_dir):
+            if not entry.is_dir():
+                continue
+            count += 1
+            for dirpath, _, filenames in os.walk(entry.path):
+                for fname in filenames:
+                    try:
+                        total += os.path.getsize(os.path.join(dirpath, fname))
+                    except OSError:
+                        pass
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        logger.debug(f"_cpgs_disk_usage failed: {e}")
+    return count, round(total / (1024 * 1024), 1)
+
+
+def gc_cold_cpgs(
+    services: dict,
+    max_age_seconds: int,
+    max_count: int,
+    delete_cold: bool = False,
+) -> dict:
+    """Reclaim allocations from cold CPGs. Keeps cpg.bin on disk by default.
+
+    Default (delete_cold=False) — the requested behavior: a CPG with a live
+    Joern server that hasn't been accessed for > max_age_seconds has its
+    allocations released (server killed, port freed, memory reservation
+    dropped) and is marked SLEEPING. The cpg.bin stays on disk and the CPG
+    transparently reloads on its next query. Never touches an in-flight,
+    generating/loading, or recently-used CPG.
+
+    Opt-in (delete_cold=True) — also delete the on-disk binaries of cold
+    sleeping CPGs, and enforce a max_count disk budget (LRU). Off by default.
+
+    Returns a summary dict. Best-effort: a per-CPG failure is logged and skipped.
+    """
+    tracker = services.get("codebase_tracker")
+    mgr = services.get("joern_server_manager")
+    if tracker is None:
+        return {"evaluated": 0, "deleted": [], "evicted": [], "freed_mb": 0.0}
+
+    try:
+        codebases = tracker.list_codebases_full()
+    except Exception as e:
+        logger.warning(f"cold-CPG GC: could not list codebases: {e}")
+        return {"evaluated": 0, "deleted": [], "evicted": [], "freed_mb": 0.0}
+
+    now = _now_utc()
+
+    def _is_running(h: str) -> bool:
+        if mgr is None:
+            return False
+        try:
+            return bool(mgr.get_server_port(h) and mgr.is_server_running(h))
+        except Exception:
+            return False
+
+    def _age(cb) -> float:
+        la = cb.last_accessed
+        if la is None:
+            return float("inf")
+        if la.tzinfo is None:
+            la = la.replace(tzinfo=timezone.utc)
+        return (now - la).total_seconds()
+
+    def _busy(cb) -> bool:
+        status = (cb.metadata or {}).get("status", "")
+        if status in ("generating", "loading", SessionStatus.GENERATING, SessionStatus.LOADING):
+            return True
+        return _build_job_alive(services, cb.codebase_hash)
+
+    deleted, evicted, freed = [], [], 0
+
+    # Default path: free allocations of cold RUNNING servers (keep cpg.bin).
+    for cb in codebases:
+        if _busy(cb):
+            continue
+        if _is_running(cb.codebase_hash) and _age(cb) > max_age_seconds:
+            try:
+                _teardown_codebase(services, cb.codebase_hash, delete_files=False)
+                evicted.append(_codebase_label(cb))
+            except Exception as e:
+                logger.warning(f"cold-CPG GC: failed to evict {cb.codebase_hash}: {e}")
+
+    # Opt-in path: delete cold on-disk binaries by age and count budget.
+    if delete_cold:
+        not_running = [cb for cb in codebases if not _busy(cb) and not _is_running(cb.codebase_hash)]
+        to_delete = {cb.codebase_hash: cb for cb in not_running if _age(cb) > max_age_seconds}
+        if max_count and max_count > 0:
+            on_disk_count, _ = _cpgs_disk_usage()
+            survivors = [cb for cb in not_running if cb.codebase_hash not in to_delete]
+            survivors.sort(key=_age, reverse=True)  # oldest first
+            overflow = on_disk_count - len(to_delete) - max_count
+            for cb in survivors:
+                if overflow <= 0:
+                    break
+                to_delete[cb.codebase_hash] = cb
+                overflow -= 1
+        for h, cb in to_delete.items():
+            try:
+                freed += _teardown_codebase(services, h, delete_files=True)
+                deleted.append(_codebase_label(cb))
+            except Exception as e:
+                logger.warning(f"cold-CPG GC: failed to delete {h}: {e}")
+
+    if deleted or evicted:
+        logger.info(
+            f"cold-CPG GC: evicted {len(evicted)} cold server(s) (cpg.bin kept), "
+            f"deleted {len(deleted)} binary(ies) ({round(freed / (1024 * 1024), 1)} MB)"
+        )
+    return {
+        "evaluated": len(codebases),
+        "deleted": deleted,
+        "evicted": evicted,
+        "freed_mb": round(freed / (1024 * 1024), 1),
+    }
+
+
+async def _cpg_gc_loop(services: dict, config) -> None:
+    """Background loop: periodically GC cold sleeping CPGs (P2-8)."""
+    cfg = config.cpg
+    interval = max(60, int(getattr(cfg, "gc_interval_seconds", 600)))
+    max_age = int(getattr(cfg, "gc_max_age_seconds", 86400))
+    max_count = int(getattr(cfg, "gc_max_count", 50))
+    delete_cold = bool(getattr(cfg, "gc_delete_cold", False))
+    logger.info(
+        f"Cold-CPG GC started (every {interval}s; evict servers cold > {max_age}s, "
+        f"cpg.bin kept on disk; delete_binaries={delete_cold})"
+    )
+    loop = asyncio.get_running_loop()
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            # The sweep does blocking FS + DB work — keep it off the event loop.
+            await loop.run_in_executor(
+                None, lambda: gc_cold_cpgs(services, max_age, max_count, delete_cold)
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"Cold-CPG GC sweep failed: {e}", exc_info=True)
+
+
+def _codebase_label(codebase_info) -> str:
+    """Stable, non-sensitive label tying a hash back to what it built.
+
+    Form: '<project>@<short-hash>'. The project component is derived from the
+    repository URL / source basename / snippet label — never an absolute host
+    path — so it's safe to surface to the agent while still being recognizable.
+    """
+    short = (codebase_info.codebase_hash or "")[:8] or "unknown"
+    project = None
+    meta = codebase_info.metadata or {}
+    repo = meta.get("repository")
+    src = codebase_info.source_path
+    try:
+        if repo:
+            project = repo.rstrip("/").rsplit("/", 1)[-1]
+            if project.endswith(".git"):
+                project = project[:-4]
+        elif src:
+            # Use only the final path component to avoid leaking directory structure.
+            project = os.path.basename(src.rstrip("/")) or src
+    except Exception:
+        project = None
+    project = (project or codebase_info.source_type or "cpg").strip() or "cpg"
+    return f"{project}@{short}"
+
+
+def _set_build_phase(services: dict, codebase_hash: str, phase: str) -> None:
+    """Record the current build phase so get_cpg_status can report progress.
+
+    Best-effort: a failure here must never derail the build, so swallow errors.
+    Metadata is merged under a row lock by the tracker, so this only touches the
+    `phase` key.
+    """
+    try:
+        tracker = services.get("codebase_tracker")
+        if tracker is not None:
+            tracker.update_codebase(codebase_hash=codebase_hash, metadata={"phase": phase})
+    except Exception as e:
+        logger.debug(f"Could not set build phase '{phase}' for {codebase_hash}: {e}")
+
+
+# Maps a coarse status to a default phase when no finer phase was recorded.
+_STATUS_TO_PHASE = {
+    "generating": "building",
+    "loading": "loading",
+    "ready": "ready",
+    "sleeping": "sleeping",
+    "failed": "failed",
+}
+
+
 def _schedule_restart_server_task(codebase_hash: str, container_cpg_path: str, services: dict) -> bool:
     """Schedule a background Joern-server restart.
 
@@ -935,6 +1185,8 @@ async def _generate_cpg_async(
         # enforce the configured generation_timeout and keep the event loop responsive.
         generation_timeout = config.cpg.generation_timeout if config else 600
         loop = asyncio.get_running_loop()
+        # Worker has claimed the job and is now parsing the source (c2cpg frontend).
+        _set_build_phase(services, codebase_hash, "frontend")
         try:
             exec_result = await asyncio.wait_for(
                 loop.run_in_executor(
@@ -981,6 +1233,38 @@ async def _generate_cpg_async(
 
         logger.info(f"CPG generated successfully: {cpg_path}")
 
+        # Load-size admission: a cpg.bin above the ceiling almost never loads
+        # reliably into a memory-capped query worker (FFmpeg's full tree ~1.6 GB
+        # was the motivating case). Fail fast HERE with actionable guidance —
+        # scope the build — instead of letting reload_with_retry emit the opaque
+        # "failed to reload into a Joern server" after a long stall.
+        max_load_mb = config.cpg.max_load_mb if config else 2048
+        if max_load_mb and max_load_mb > 0:
+            try:
+                cpg_size_mb = os.path.getsize(cpg_path) / (1024 * 1024)
+            except OSError:
+                cpg_size_mb = 0
+            if cpg_size_mb > max_load_mb:
+                error_msg = (
+                    f"CPG is {cpg_size_mb:.0f} MB, above the {max_load_mb} MB load ceiling — "
+                    f"it likely won't load into a query server. Scope the build to a "
+                    f"sub-component (point source_path at a subdirectory, or pass include_paths/"
+                    f"defines to narrow what is parsed), or raise CPG_MAX_LOAD_MB / the Joern "
+                    f"load heap if you have the RAM."
+                )
+                logger.error(f"CPG too large to load for {codebase_hash}: {error_msg}")
+                codebase_tracker.update_codebase(
+                    codebase_hash=codebase_hash,
+                    cpg_path=cpg_path,
+                    metadata={
+                        "status": SessionStatus.FAILED,
+                        "error_code": "CPG_TOO_LARGE",
+                        "error": error_msg,
+                        "cpg_size_mb": round(cpg_size_mb, 1),
+                    },
+                )
+                return
+
         # Persist cpg_path before attempting server spawn so that the watchdog's
         # _respawn_server can find it even if spawn_server fails mid-flight.
         codebase_tracker.update_codebase(
@@ -988,6 +1272,7 @@ async def _generate_cpg_async(
             cpg_path=cpg_path,
             metadata={
                 "status": SessionStatus.GENERATING,
+                "phase": "loading",
                 "container_codebase_path": f"/playground/codebases/{codebase_hash}",
                 "container_cpg_path": container_cpg_path,
             }
@@ -1029,17 +1314,24 @@ async def _generate_cpg_async(
                 logger.error(f"Failed to start Joern server: {e}", exc_info=True)
 
         # Final metadata update preserves the container paths recorded above.
+        # Record the verified user-method count (coverage sanity check) when the
+        # load reported one, so get_cpg_status can surface user_method_count.
+        ready_meta = {
+            "status": "ready",
+            "phase": "ready",
+            "container_codebase_path": f"/playground/codebases/{codebase_hash}",
+            "container_cpg_path": container_cpg_path,
+        }
+        user_method_count = getattr(joern_server_manager, "_last_user_method_count", None) if joern_server_manager else None
+        if user_method_count is not None:
+            ready_meta["user_method_count"] = user_method_count
         codebase_tracker.update_codebase(
             codebase_hash=codebase_hash,
             cpg_path=cpg_path,
             joern_port=joern_port,
-            metadata={
-                "status": "ready",
-                "container_codebase_path": f"/playground/codebases/{codebase_hash}",
-                "container_cpg_path": container_cpg_path
-            }
+            metadata=ready_meta,
         )
-        
+
         logger.info(f"CPG generation complete for {codebase_hash}, port: {joern_port}")
 
         # Ephemeral source: the build is done and cpg.bin is the sole persisted
@@ -1116,6 +1408,11 @@ class CPGGenerationQueue:
     def is_in_flight(self, codebase_hash: str) -> bool:
         """True if a build for this codebase is queued or running."""
         return codebase_hash in self._in_flight
+
+    def queue_position(self, codebase_hash: str) -> Optional[int]:
+        """Best-effort queue position. The in-memory asyncio.Queue doesn't expose
+        per-item ordering, so we can't compute a precise position — return None."""
+        return None
 
     @property
     def maxsize(self) -> int:
@@ -1239,6 +1536,13 @@ class DurableCPGQueue:
     def is_in_flight(self, codebase_hash: str) -> bool:
         """True if a build for this codebase is queued or running in the DB."""
         return self.store.has_active_job(codebase_hash, self.JOB_TYPE)
+
+    def queue_position(self, codebase_hash: str) -> Optional[int]:
+        """1-based position among queued jobs, or None if not queued."""
+        position = getattr(self.store, "queue_position", None)
+        if position is None:
+            return None
+        return position(codebase_hash, self.JOB_TYPE)
 
     @property
     def maxsize(self) -> int:
@@ -1728,6 +2032,7 @@ Examples:
                         "container_cpg_path": container_cpg_path,
                         "repository": repository_url,
                         "status": SessionStatus.GENERATING,
+                        "phase": "queued",
                         "generation_started_at": _started_at.isoformat(),
                         "generation_deadline": _deadline.isoformat(),
                     }
@@ -1807,14 +2112,22 @@ Args:
 Returns:
     {
         "codebase_hash": "hash",
+        "codebase_label": "<project>@<short-hash>",  # non-sensitive, ties hash to what it built
         "status": "generating" | "loading" | "ready" | "sleeping" | "failed" | "not_found",
         "cpg_path": "path to CPG if exists",
         "joern_port": port number or null,
-        "language": "programming language"
+        "language": "programming language",
+        "phase": "queued" | "frontend" | "loading" | "ready" | ...,  # finer-grained than status
+        "elapsed_seconds": seconds since the build started,
+        "deadline_seconds": seconds of budget left before timeout reconciliation (0 = overdue),
+        "queue_position": 1-based position behind other queued builds (only while queued),
+        "user_method_count": verified user-defined methods in the loaded CPG (coverage check)
     }
 
 Notes:
     - 'generating'/'loading' → build or server startup in progress; wait briefly and poll again.
+      Use `phase`/`elapsed_seconds`/`queue_position` to tell "queued behind others" from
+      "actively parsing" from "wedged" (deadline_seconds at 0 and still generating = likely stuck).
     - 'ready' → the CPG is loaded and available for queries (use joern_port).
     - 'sleeping' → CPG exists on disk but the server was evicted; it auto-wakes on the next query
       (polling also triggers a restart).
@@ -1953,6 +2266,45 @@ Examples:
                 "last_accessed": codebase_info.last_accessed.isoformat(),
             }
 
+            # Progress telemetry so a poller can tell "queued behind others" from
+            # "actively building" from "wedged", instead of staring at a bare status.
+            meta = codebase_info.metadata
+            phase = meta.get("phase") or _STATUS_TO_PHASE.get(status, status)
+            response["phase"] = phase
+
+            # Stable, non-sensitive label so an agent can tie this hash back to
+            # what it built (paths are redacted). Form: '<project>@<short-hash>'.
+            response["codebase_label"] = _codebase_label(codebase_info)
+
+            # Coverage sanity check: a tiny (or zero) user-method count on a build
+            # that claims ready usually means most code was gated/preprocessed out.
+            if meta.get("user_method_count") is not None:
+                response["user_method_count"] = meta["user_method_count"]
+
+            started = _parse_iso(meta.get("generation_started_at")) or codebase_info.created_at
+            if started is not None:
+                if started.tzinfo is None:
+                    started = started.replace(tzinfo=timezone.utc)
+                response["elapsed_seconds"] = round((_now_utc() - started).total_seconds(), 1)
+
+            deadline = _parse_iso(meta.get("generation_deadline"))
+            if deadline is not None:
+                response["deadline_seconds"] = max(0.0, round((deadline - _now_utc()).total_seconds(), 1))
+
+            # Queue position only makes sense while still queued; surface it so a
+            # caller knows it's behind N others rather than actively parsing.
+            if status in ("generating", SessionStatus.GENERATING):
+                cpg_queue = services.get("cpg_queue")
+                if cpg_queue is not None and hasattr(cpg_queue, "queue_position"):
+                    try:
+                        pos = cpg_queue.queue_position(codebase_hash)
+                    except Exception as e:
+                        logger.debug(f"queue_position probe failed for {codebase_hash}: {e}")
+                        pos = None
+                    if pos is not None:
+                        response["queue_position"] = pos
+                        response["phase"] = "queued"
+
             # Surface the failure cause so a failed build is debuggable via the API
             # (e.g. error_code "OOM" / "TIMEOUT" / "BUILD_ERROR") rather than a bare
             # "failed" status that forces digging through container logs.
@@ -1970,6 +2322,99 @@ Examples:
                 "success": False,
                 "error": str(e),
             }
+
+    @mcp.tool(
+        description="""Inspect backend capacity and load so you can self-pace CPG generation.
+
+Read-only. Use this BEFORE fanning out many generate_cpg calls (or when builds
+seem to be queuing) to decide how many to run concurrently instead of melting the
+backend. The safe concurrency is `recommended_max_concurrent_builds`.
+
+Returns:
+    {
+        "build_workers": N,                       # parallel build slots
+        "recommended_max_concurrent_builds": N,   # don't exceed this many in-flight builds
+        "queue_depth": queued builds waiting,
+        "queue_maxsize": 0 (unlimited) or the cap,
+        "in_flight": queued + running builds,
+        "active_servers": live Joern query servers,
+        "max_active_servers": server admission cap,
+        "memory": {budget_mb, reserved_mb, free_mb, utilization_pct, ...},
+        "cpgs": [{codebase_label, status, phase, language, last_accessed}, ...],
+        "cpg_count": total tracked CPGs
+    }
+
+Notes:
+    - If `in_flight` >= `recommended_max_concurrent_builds`, wait (poll get_cpg_status)
+      before submitting more — extra builds will just queue.
+    - High memory `utilization_pct` (or active_servers at max_active_servers) means
+      query servers are being evicted/serialized; expect sleeping CPGs to wake slowly.
+    - Filesystem paths are not exposed; CPGs are identified by `codebase_label`.
+""",
+    )
+    def get_backend_status() -> Dict[str, Any]:
+        """Report build-queue, Joern-server and memory load for agent self-pacing."""
+        try:
+            config = services.get("config")
+            cpg_queue = services.get("cpg_queue")
+            mgr = services.get("joern_server_manager")
+            tracker = services.get("codebase_tracker")
+
+            build_workers = config.cpg.build_workers if config else None
+            response: Dict[str, Any] = {
+                "build_workers": build_workers,
+                "recommended_max_concurrent_builds": build_workers,
+            }
+
+            if cpg_queue is not None:
+                try:
+                    response["queue_depth"] = cpg_queue.depth
+                    response["queue_maxsize"] = cpg_queue.maxsize
+                    response["in_flight"] = cpg_queue.in_flight
+                except Exception as e:
+                    logger.debug(f"get_backend_status: queue introspection failed: {e}")
+
+            if mgr is not None:
+                try:
+                    running = mgr.get_running_servers()
+                    response["active_servers"] = len(running)
+                except Exception as e:
+                    logger.debug(f"get_backend_status: running-server count failed: {e}")
+                response["max_active_servers"] = getattr(mgr, "_max_active", None)
+                try:
+                    response["memory"] = mgr.get_memory_stats()
+                except Exception as e:
+                    logger.debug(f"get_backend_status: memory stats failed: {e}")
+
+            if tracker is not None:
+                try:
+                    codebases = tracker.list_codebases_full()
+                    cpgs = []
+                    for cb in codebases:
+                        meta = cb.metadata or {}
+                        cpgs.append({
+                            "codebase_label": _codebase_label(cb),
+                            "status": meta.get("status", "unknown"),
+                            "phase": meta.get("phase"),
+                            "language": cb.language,
+                            "last_accessed": cb.last_accessed.isoformat() if cb.last_accessed else None,
+                        })
+                    response["cpgs"] = cpgs
+                    response["cpg_count"] = len(cpgs)
+                except Exception as e:
+                    logger.debug(f"get_backend_status: codebase listing failed: {e}")
+
+            try:
+                on_disk, disk_mb = _cpgs_disk_usage()
+                response["cpgs_on_disk"] = on_disk
+                response["disk_mb"] = disk_mb
+            except Exception as e:
+                logger.debug(f"get_backend_status: disk usage failed: {e}")
+
+            return response
+        except Exception as e:
+            logger.error(f"Failed to get backend status: {e}", exc_info=True)
+            return {"success": False, "error": str(e)}
 
     @mcp.tool(
         description="""Free resources held by a codebase.
@@ -2000,15 +2445,8 @@ delete_files=True:
             if not codebase_info:
                 return {"success": False, "error": f"Codebase {codebase_hash} not found"}
 
-            if joern_server_manager and joern_server_manager.get_server_port(codebase_hash):
-                joern_server_manager.terminate_server(codebase_hash)
-
             if not delete_files:
-                codebase_tracker.update_codebase(
-                    codebase_hash=codebase_hash,
-                    joern_port=None,
-                    metadata={"status": SessionStatus.SLEEPING},
-                )
+                _teardown_codebase(services, codebase_hash, delete_files=False)
                 return {
                     "success": True,
                     "codebase_hash": codebase_hash,
@@ -2016,46 +2454,8 @@ delete_files=True:
                     "message": "Joern process terminated. CPG kept on disk for fast re-activation.",
                 }
 
-            # delete_files=True: remove everything
-            playground_path = os.path.abspath(
-                os.path.join(os.path.dirname(__file__), "..", "..", "playground")
-            )
-            freed_bytes = 0
-
-            def _under_playground(p: str) -> bool:
-                # Defense-in-depth: never rmtree outside the playground, even if a
-                # bad hash somehow reached here (it can't — it's hex-validated above).
-                real = os.path.realpath(p)
-                root = os.path.realpath(playground_path)
-                return real == root or real.startswith(root + os.sep)
-
-            cpg_dir = os.path.join(playground_path, "cpgs", codebase_hash)
-            if not _under_playground(cpg_dir):
-                raise ValidationError("refusing to delete outside the playground")
-            if os.path.exists(cpg_dir):
-                for dirpath, _, filenames in os.walk(cpg_dir):
-                    for fname in filenames:
-                        try:
-                            freed_bytes += os.path.getsize(os.path.join(dirpath, fname))
-                        except OSError:
-                            pass
-                shutil.rmtree(cpg_dir, ignore_errors=True)
-
-            codebase_dir = os.path.join(playground_path, "codebases", codebase_hash)
-            if not _under_playground(codebase_dir):
-                raise ValidationError("refusing to delete outside the playground")
-            if os.path.exists(codebase_dir):
-                for dirpath, _, filenames in os.walk(codebase_dir):
-                    for fname in filenames:
-                        try:
-                            freed_bytes += os.path.getsize(os.path.join(dirpath, fname))
-                        except OSError:
-                            pass
-                shutil.rmtree(codebase_dir, ignore_errors=True)
-
-            db_manager = services["db_manager"]
-            db_manager.delete_codebase(codebase_hash)
-
+            # delete_files=True: remove the server, on-disk artifacts and DB row.
+            freed_bytes = _teardown_codebase(services, codebase_hash, delete_files=True)
             return {
                 "success": True,
                 "codebase_hash": codebase_hash,

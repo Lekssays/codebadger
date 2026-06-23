@@ -52,6 +52,13 @@
       output.append(s"Method: ${method.name}\n")
       output.append(s"Direction: $direction\n")
 
+      // Gated-body probe: zero calls + ≤1-line span ⇒ the body was likely
+      // preprocessed out (#ifdef / feature macro); the flow would be empty.
+      if (method.call.size == 0 && (method.lineNumberEnd.getOrElse(0) - method.lineNumber.getOrElse(0)) <= 1)
+        output.append(
+          s"WARNING: method '${method.name}' is present but has no body in this CPG — likely #ifdef/feature-gated. " +
+          "Rebuild with generate_cpg(defines=[...], include_paths=[...]) before trusting this flow.\n")
+
       // Alias discovery: pointers that take the address of the target (p = &x).
       val addrAliases = method.assignment
         .filter(_.source.code.contains("&" + targetVar))

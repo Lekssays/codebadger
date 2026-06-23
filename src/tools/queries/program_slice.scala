@@ -19,6 +19,16 @@
 
   val output = new StringBuilder()
 
+  // Per-node code clip: one macro-expanded statement (jq assert macros, simdjson
+  // SIMD/template headers) can be enormous and blow the response budget. Cap the
+  // .code of any single node and mark how much was dropped.
+  def clip(s: String, n: Int = 200): String =
+    if (s != null && s.length > n) s.take(n) + s"…(+${s.length - n} chars)" else s
+
+  // Cap on how many slice nodes (data deps / propagations) we emit per direction,
+  // so a huge slice can't overflow the response. Surfaced via a truncation note.
+  val maxNodes = 60
+
   val isHeaderFile = filename.endsWith(".h") || filename.endsWith(".hpp") || filename.endsWith(".hxx")
 
   // All assignment-like operator names (simple + compound)
@@ -103,13 +113,20 @@
 
   targetMethodOpt match {
     case Some(method) => {
+      // Gated-body probe: an enclosing method with zero calls and a ≤1-line span
+      // was almost certainly preprocessed out (#ifdef / feature macro), so the
+      // slice will be empty/misleading. Warn so the caller rebuilds with defines.
+      if (method.call.size == 0 && (method.lineNumberEnd.getOrElse(0) - method.lineNumber.getOrElse(0)) <= 1)
+        output.append(
+          s"WARNING: method '${method.name}' is present but has no body in this CPG — likely #ifdef/feature-gated. " +
+          "Rebuild with generate_cpg(defines=[...], include_paths=[...]) before trusting this slice.\n")
       findAnchor(method, lineNum) match {
         case Some((anchorCode, anchorName, anchorLine, argVars)) => {
           val targetFile = method.file.name.headOption.getOrElse("unknown")
 
           output.append(s"Program Slice for ${anchorName} at $targetFile:$anchorLine\n")
           output.append("=" * 60 + "\n")
-          output.append(s"Code: ${anchorCode}\n")
+          output.append(s"Code: ${clip(anchorCode)}\n")
           output.append(s"Method: ${method.fullName}\n")
           if (argVars.nonEmpty) output.append(s"Variables: ${argVars.mkString(", ")}\n")
 
@@ -209,14 +226,19 @@
 
             if (sortedDeps.nonEmpty) {
               output.append("\n  Data Dependencies:\n")
-              sortedDeps.groupBy(_._2).foreach { case (file, deps) =>
+              val displayDeps = sortedDeps.take(maxNodes)
+              displayDeps.groupBy(_._2).foreach { case (file, deps) =>
                 output.append(s"  File: $file\n")
                 deps.sortBy(_._1).foreach { case (line, _, vn, code, depVars) =>
                   val lineInfo = if (line != -1) s"[$file:$line]" else "[Local]"
-                  output.append(s"    $lineInfo $vn: $code\n")
+                  output.append(s"    $lineInfo $vn: ${clip(code)}\n")
                   if (depVars.nonEmpty) output.append(s"      <- depends on: ${depVars.mkString(", ")}\n")
                 }
               }
+              if (sortedDeps.size > maxNodes)
+                output.append(
+                  s"  ... TRUNCATED: ${sortedDeps.size - maxNodes} more data dependencies omitted " +
+                  s"(showing $maxNodes of ${sortedDeps.size}). Narrow with a smaller max_depth or a more specific line.\n")
             }
 
             if (includeControlFlow) {
@@ -228,7 +250,7 @@
               if (controlDeps.nonEmpty) {
                 output.append("\n  Control Dependencies (Target Method):\n")
                 controlDeps.foreach { case (line, file, ctrlType, cond) =>
-                  output.append(s"    [$file:$line] $ctrlType: $cond\n")
+                  output.append(s"    [$file:$line] $ctrlType: ${clip(cond)}\n")
                 }
               }
             }
@@ -303,12 +325,17 @@
 
             if (sortedProps.nonEmpty) {
               output.append("\n  Propagations:\n")
-              sortedProps.groupBy(_._2).foreach { case (file, props) =>
+              val displayProps = sortedProps.take(maxNodes)
+              displayProps.groupBy(_._2).foreach { case (file, props) =>
                 output.append(s"  File: $file\n")
                 props.sortBy(_._1).foreach { case (line, _, propType, vn, code) =>
-                  output.append(s"    [$file:$line] $propType ($vn): $code\n")
+                  output.append(s"    [$file:$line] $propType ($vn): ${clip(code)}\n")
                 }
               }
+              if (sortedProps.size > maxNodes)
+                output.append(
+                  s"  ... TRUNCATED: ${sortedProps.size - maxNodes} more propagations omitted " +
+                  s"(showing $maxNodes of ${sortedProps.size}). Narrow with a smaller max_depth.\n")
             }
 
             if (includeControlFlow) {

@@ -18,7 +18,19 @@
       output.append(s"Call Graph for $rootName ($direction)\n")
       output.append("=" * 60 + "\n")
       output.append(s"Root: $rootName at $rootFile:$rootLine\n")
-      
+
+      // Gated-body probe: a method that resolves but has zero calls and a ≤1-line
+      // span almost always has an empty body because it was preprocessed out
+      // (#ifdef / feature macro). Queries would silently return 0 edges; warn so
+      // the caller rebuilds with the right defines instead of trusting the empty.
+      val gatedMethods = cpg.method.name(methodName).l
+      val gatedBody = gatedMethods.nonEmpty && gatedMethods.forall(x =>
+        x.call.size == 0 && (x.lineNumberEnd.getOrElse(0) - x.lineNumber.getOrElse(0)) <= 1)
+      if (gatedBody) output.append(
+        s"WARNING: method '$methodName' is present but has no body in this CPG — likely #ifdef/feature-gated. " +
+        "Rebuild with generate_cpg(defines=[...], include_paths=[...]) and re-check " +
+        "cpg.method.name(\"" + methodName + "\").call.size > 0.\n")
+
       // BFS helper: returns (edgesByDepth, totalEdges)
       // Each edge is (fromName, toName, toFile, toLine, isCycle)
       def bfsEdges(
@@ -104,6 +116,29 @@
           (cur, nei) => (nei, cur)   // from=caller(neighbor), to=callee(current)
         )
         printEdges(edgesByDepth, totalEdges)
+
+        // Indirect-dispatch fallback: Joern synthesizes no caller edge when a
+        // function is invoked through a pointer / vtable / callback, so a real
+        // bug reached that way shows 0 direct callers. When that happens, surface
+        // every site where this method's ADDRESS is taken (assigned to a function
+        // pointer, registered as a callback, stored in a vtable) — those are the
+        // likely real callers. Clearly labelled heuristic, not a proven edge.
+        if (totalEdges == 0) {
+          val refs = cpg.methodRef
+            .where(_.referencedMethod.nameExact(methodName))
+            .map(mr => (mr.method.fullName, mr.file.name.headOption.getOrElse("?"), mr.lineNumber.getOrElse(-1)))
+            .dedup.take(50).l
+          if (refs.nonEmpty) {
+            output.append(
+              s"\nNo direct call edges (likely indirect/virtual/callback dispatch). " +
+              s"${refs.size} site(s) take the address of '$methodName' — these are the likely caller(s):\n")
+            refs.foreach { case (m, f, l) =>
+              val loc = if (l > 0) s"$f:$l" else f
+              output.append(s"  $m  ($loc)\n")
+            }
+            output.append("(heuristic: address-taken sites, not statically-resolved call edges)\n")
+          }
+        }
 
       } else {
         output.append(s"ERROR: Direction must be 'outgoing' or 'incoming', got: '$direction'\n")
