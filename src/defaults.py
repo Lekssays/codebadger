@@ -283,6 +283,10 @@ CPG_LARGE_PROJECT_MAX_LOC = 2_000_000
 # emitting the opaque "failed to reload into a Joern server". 2 GB.
 CPG_MAX_LOAD_MB = 2048
 
+# Auto-use a compile_commands.json discovered in a C/C++ source tree when the
+# caller didn't pass `compile_commands` explicitly (highest-fidelity parse).
+CPG_AUTODETECT_COMPILE_DB = True
+
 # Cold-CPG garbage collection. By default the sweep only releases allocations
 # (Joern server, port, memory) of CPGs gone cold and marks them SLEEPING; the
 # cpg.bin stays on disk and reloads on the next query. Disk deletion is opt-in.
@@ -293,6 +297,34 @@ CPG_GC_MAX_COUNT = 50
 CPG_GC_DELETE_COLD = False
 
 # Language-specific Joern frontend binaries (full paths inside the container)
+# Per-frontend flag support, read from `<frontend> --help` (Joern as bundled in
+# the container). The build path consults this so it only passes a flag to a
+# frontend that actually accepts it — handing a C-only flag (e.g. --define,
+# --compilation-database) to pysrc2cpg/jssrc2cpg/... makes the frontend error
+# out and the whole build fail. `--exclude`/`--exclude-regex` are universal
+# (every frontend supports them), so scoping via exclude-regex works for ALL
+# languages; the header/define/compdb capabilities are frontend-specific.
+# Capability keys: exclude_regex, include, define, auto_include_discovery,
+# preprocessed, compilation_database.
+FRONTEND_CAPABILITIES = {
+    "c2cpg.sh":        {"exclude_regex", "include", "define", "auto_include_discovery",
+                        "preprocessed", "compilation_database"},
+    "swiftsrc2cpg.sh": {"exclude_regex", "define"},
+    "javasrc2cpg":     {"exclude_regex"},
+    "jssrc2cpg.sh":    {"exclude_regex"},
+    "pysrc2cpg":       {"exclude_regex"},
+    "gosrc2cpg":       {"exclude_regex"},
+    "kotlin2cpg":      {"exclude_regex"},
+    "csharpsrc2cpg":   {"exclude_regex"},
+    "php2cpg":         {"exclude_regex"},
+    "rubysrc2cpg":     {"exclude_regex"},
+    "jimple2cpg":      {"exclude_regex"},
+    "ghidra2cpg":      {"exclude_regex"},
+}
+
+# Capability every frontend has, used as the safe fallback for unknown binaries.
+FRONTEND_UNIVERSAL_CAPABILITIES = {"exclude_regex"}
+
 LANGUAGE_COMMANDS = {
     "java":       "/opt/joern/joern-cli/javasrc2cpg",
     "c":          "/opt/joern/joern-cli/c2cpg.sh",
@@ -307,6 +339,39 @@ LANGUAGE_COMMANDS = {
     "php":        "/opt/joern/joern-cli/php2cpg",
     "ruby":       "/opt/joern/joern-cli/rubysrc2cpg",
     "swift":      "/opt/joern/joern-cli/swiftsrc2cpg.sh",
+}
+
+
+def frontend_capabilities(language: str) -> set:
+    """Capabilities of the Joern frontend for `language` (safe fallback for
+    unknown languages: the universal {exclude_regex})."""
+    binary = LANGUAGE_COMMANDS.get(language, "")
+    name = binary.rsplit("/", 1)[-1] if binary else ""
+    return FRONTEND_CAPABILITIES.get(name, FRONTEND_UNIVERSAL_CAPABILITIES)
+
+
+def frontend_supports(language: str, capability: str) -> bool:
+    """True if `language`'s frontend accepts the given build flag capability."""
+    return capability in frontend_capabilities(language)
+
+
+# Source-file extensions that count as compilable translation units per
+# language, used by include_globs scoping to decide which files to exclude when
+# out of scope. C/C++ HEADERS are deliberately omitted so they stay resolvable
+# for #include from in-scope sources (scoping restricts which TUs are compiled,
+# never which headers can be included). Fallback: the LANGUAGE_EXTENSIONS entry.
+SCOPE_SOURCE_EXTENSIONS = {
+    "c":          ["c", "cc", "cpp", "cxx", "c++", "i"],
+    "cpp":        ["c", "cc", "cpp", "cxx", "c++", "i"],
+    "java":       ["java"],
+    "javascript": ["js", "jsx", "mjs", "cjs", "ts", "tsx"],
+    "python":     ["py", "pyi"],
+    "go":         ["go"],
+    "kotlin":     ["kt", "kts"],
+    "csharp":     ["cs"],
+    "php":        ["php", "phtml", "php3", "php4", "php5"],
+    "ruby":       ["rb"],
+    "swift":      ["swift"],
 }
 
 # Default file extension per language, used to name a pasted code snippet

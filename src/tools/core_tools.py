@@ -20,8 +20,16 @@ import tarfile
 from typing import Any, Dict, Optional, Annotated, Set
 from pydantic import Field
 
-from ..defaults import LANGUAGE_COMMANDS, SUPPORTED_LANGUAGES
+from ..defaults import (
+    LANGUAGE_COMMANDS,
+    LANGUAGE_EXTENSIONS,
+    SCOPE_SOURCE_EXTENSIONS,
+    SUPPORTED_LANGUAGES,
+    frontend_supports,
+)
 from ..exceptions import ValidationError
+from ..utils.build_scoping import combine_exclude_regexes, scope_exclude_regex
+from ..utils.compile_db import find_compile_db, prepare_container_compile_db
 from ..models import CodebaseInfo, SessionStatus
 from ..utils.validators import (
     parse_snippet_blocks,
@@ -1050,6 +1058,10 @@ async def _generate_cpg_async(
     services: dict,
     include_paths: Optional[list] = None,
     defines: Optional[list] = None,
+    include_globs: Optional[list] = None,
+    auto_system_headers: bool = False,
+    compile_commands: Optional[str] = None,
+    source_root_host: Optional[str] = None,
 ):
     """Async task to generate CPG and start Joern server"""
     import logging
@@ -1117,6 +1129,12 @@ async def _generate_cpg_async(
 
         cmd = [cmd_binary, f"/playground/codebases/{codebase_hash}", "-o", container_cpg_path]
 
+        # Build a single --exclude-regex from: (1) the default junk patterns
+        # (tests/docs/build dirs) and (2) include_globs scoping (drop out-of-scope
+        # SOURCE TUs while keeping headers includable). A file is excluded if it
+        # matches EITHER, so they OR together. --exclude-regex is supported by
+        # every frontend, so scoping works for all languages.
+        exclude_parts = []
         if config and language in config.cpg.languages_with_exclusions and config.cpg.exclusion_patterns:
             escaped_patterns = []
             for pattern in config.cpg.exclusion_patterns:
@@ -1126,19 +1144,35 @@ async def _generate_cpg_async(
                 except re.error as e:
                     logger.warning(f"Invalid regex pattern '{pattern}': {e}. Using literal match.")
                     escaped_patterns.append(re.escape(pattern))
-
-            combined_regex = "|".join(f"({p})" for p in escaped_patterns)
-            cmd.extend(["--exclude-regex", combined_regex])
+            exclude_parts.append("|".join(f"({p})" for p in escaped_patterns))
             logger.info(f"Applied {len(config.cpg.exclusion_patterns)} exclusion patterns")
 
-        # Header include paths + preprocessor defines (C/C++ only — these are c2cpg
-        # flags). Without them, angle-includes of generated headers (e.g.
-        # <libxml/xmlversion.h>) don't resolve and feature macros stay undefined, so
-        # whole #ifdef-gated modules get preprocessed out of the CPG. We auto-detect
-        # likely include roots (source root, include/, dirs with config.h/*version*.h)
-        # and append any caller-supplied include_paths/defines. Relative paths are
-        # resolved against the in-container source root; absolute paths pass through.
-        if language in ("c", "cpp"):
+        if include_globs and frontend_supports(language, "exclude_regex"):
+            src_exts = SCOPE_SOURCE_EXTENSIONS.get(
+                language, [LANGUAGE_EXTENSIONS.get(language, language)]
+            )
+            scope_rx = scope_exclude_regex(list(include_globs), src_exts)
+            if scope_rx:
+                exclude_parts.append(scope_rx)
+                logger.info(
+                    f"Scoping build to {len(include_globs)} include_glob(s); "
+                    f"out-of-scope {language} sources will be skipped (headers kept)"
+                )
+            else:
+                logger.warning(f"include_globs={include_globs!r} produced no usable scope filter; ignoring")
+
+        combined_exclude = combine_exclude_regexes(exclude_parts)
+        if combined_exclude:
+            cmd.extend(["--exclude-regex", combined_exclude])
+
+        # Header include paths + preprocessor defines. Without them, angle-includes
+        # of generated headers (e.g. <libxml/xmlversion.h>) don't resolve and
+        # feature macros stay undefined, so whole #ifdef-gated modules get
+        # preprocessed out. --include is c2cpg-only; --define is c2cpg + swift, so
+        # gate on frontend capability rather than a hardcoded language check. We
+        # auto-detect likely include roots (source root, include/, dirs with
+        # config.h/*version*.h) and append any caller-supplied include_paths/defines.
+        if frontend_supports(language, "include"):
             container_root = f"/playground/codebases/{codebase_hash}"
 
             def _to_container(p: str) -> str:
@@ -1155,15 +1189,84 @@ async def _generate_cpg_async(
                     inc_dirs.append(p)
             for d in inc_dirs:
                 cmd += ["--include", d]
-            for macro in (defines or []):
+            if inc_dirs:
+                logger.info(
+                    f"c2cpg include dirs={len(inc_dirs)} "
+                    f"(auto={len(auto_rel)}, explicit={len(include_paths or [])})"
+                )
+            # System-header auto-discovery (opt-in): resolves libc/STL headers so
+            # standard includes don't fail and drop whole files / gated bodies.
+            if auto_system_headers and frontend_supports(language, "auto_include_discovery"):
+                cmd.append("--with-include-auto-discovery")
+                logger.info("Enabled c2cpg --with-include-auto-discovery (system headers)")
+        elif include_paths:
+            logger.warning(
+                f"include_paths ignored: the {language} frontend does not support --include"
+            )
+
+        # Preprocessor defines: c2cpg and swiftsrc2cpg accept --define.
+        if defines and frontend_supports(language, "define"):
+            added = 0
+            for macro in defines:
                 macro = str(macro).strip()
                 if macro:
                     cmd += ["--define", macro]
-            if inc_dirs or defines:
-                logger.info(
-                    f"c2cpg include dirs={len(inc_dirs)} (auto={len(auto_rel)}, "
-                    f"explicit={len(include_paths or [])}), defines={len(defines or [])}"
+                    added += 1
+            if added:
+                logger.info(f"Applied {added} --define macro(s) for {language}")
+        elif defines:
+            logger.warning(
+                f"defines ignored: the {language} frontend does not support --define"
+            )
+
+        # Compilation database (highest fidelity): give c2cpg the exact per-file
+        # flags. The DB's absolute paths reference the build machine, so rebase
+        # them onto the analyzed copy. Best-effort: if it can't be applied we log
+        # and build without it (still produces a CPG). c2cpg-only.
+        #
+        # Auto-detect: if the caller didn't pass one but the source ships a
+        # compile_commands.json (root/build/out/...), use it automatically — it's
+        # strictly higher fidelity than the fuzzy parse. Disable with
+        # CPG_AUTODETECT_COMPILE_DB=false. Caller-supplied always wins.
+        if (not compile_commands and frontend_supports(language, "compilation_database")
+                and (config is None or getattr(config.cpg, "autodetect_compile_db", True))):
+            auto_db = await asyncio.to_thread(find_compile_db, codebase_dir)
+            if auto_db:
+                compile_commands = auto_db
+                logger.info(f"Auto-detected compilation database at {auto_db} for {codebase_hash}")
+
+        if compile_commands and frontend_supports(language, "compilation_database"):
+            rel = str(compile_commands).strip().lstrip("/")
+            db_host = os.path.realpath(os.path.join(codebase_dir, rel))
+            cdir_real = os.path.realpath(codebase_dir)
+            container_root = f"/playground/codebases/{codebase_hash}"
+            if not (db_host == cdir_real or db_host.startswith(cdir_real + os.sep)):
+                logger.warning(
+                    f"compile_commands path {compile_commands!r} escapes the source root; ignoring"
                 )
+            else:
+                out_host = os.path.join(codebase_dir, "compile_commands.container.json")
+                prepared = await asyncio.to_thread(
+                    prepare_container_compile_db, db_host, source_root_host, container_root, out_host
+                )
+                if prepared:
+                    _out, n_entries, n_rebased = prepared
+                    container_db = f"{container_root}/compile_commands.container.json"
+                    cmd += ["--compilation-database", container_db]
+                    logger.info(
+                        f"Using compilation database ({n_entries} entries, "
+                        f"{n_rebased} paths rebased) for {codebase_hash}"
+                    )
+                else:
+                    logger.warning(
+                        f"compile_commands {compile_commands!r} could not be applied "
+                        f"(missing/unparseable); building without it"
+                    )
+        elif compile_commands:
+            logger.warning(
+                f"compile_commands ignored: the {language} frontend does not support "
+                f"--compilation-database"
+            )
 
         # CRITICAL: cap the frontend JVM heap. Without -Xmx the frontend defaults
         # to ~25% of the container limit (~25 GB on a 100 GB cap); N concurrent
@@ -1646,6 +1749,9 @@ Examples:
         force: Annotated[bool, Field(description="Skip the large-project size warning. Set to True only after the user has explicitly confirmed they want to analyze the full project.")] = False,
         include_paths: Annotated[Optional[list], Field(description="C/C++ only: extra header include directories for c2cpg (--include). Relative paths resolve against the source root (e.g. 'include', '_build/include'); absolute paths pass through. Use when a project's generated headers (e.g. a configure/cmake-produced xmlversion.h or config.h) gate code behind feature macros — the source root, any include/ dir, and dirs containing config.h/*version*.h are auto-detected, so this is only needed for non-standard layouts.")] = None,
         defines: Annotated[Optional[list], Field(description="C/C++ only: preprocessor macros to define for c2cpg (--define), e.g. ['LIBXML_CATALOG_ENABLED', 'FOO=1']. Use to force-enable #ifdef-gated modules when the defining header can't be found.")] = None,
+        include_globs: Annotated[Optional[list], Field(description="Scope a LARGE repo to a subset of it WITHOUT losing cross-directory header/macro resolution (all languages). Path globs relative to the repo root, e.g. ['libavcodec/**','libavutil/**'] or ['epan/dissectors/']. The repo root stays the parse base; only source translation units OUTSIDE these globs are skipped (headers stay includable). Prefer this over pointing source_path at a subdirectory, which silently drops cross-dir edges. Supports ** (any dirs), * (one path segment), ? (one char); a bare name or trailing-slob is a directory prefix. Caveat: a call into a function defined in an out-of-scope file resolves the name but not its body — scope widely enough to cover your call targets.")] = None,
+        auto_system_headers: Annotated[bool, Field(description="C/C++ only: enable c2cpg --with-include-auto-discovery so system header paths (libc/STL, e.g. <stdio.h>, <string>) are auto-found. Turn ON when coverage looks poor — unresolved standard headers cause parse errors that silently drop whole files / #ifdef-gated bodies. Off by default because it slows builds and isn't needed when a project only uses its own headers. For EXACT per-file compiler flags/defines, prefer compile_commands instead.")] = False,
+        compile_commands: Annotated[Optional[str], Field(description="C/C++ only, HIGHEST fidelity: path (relative to the source root, e.g. 'build/compile_commands.json') to a compilation database. Gives c2cpg the EXACT per-file -I/-D/-std flags, so headers and #ifdef-gated code resolve as in the real build — the best fix for gated-code coverage. Generate it with CMAKE_EXPORT_COMPILE_COMMANDS=ON or `bear -- make`, committed/copied inside the source. Absolute build-machine paths in the DB are auto-rebased onto the analyzed copy (works best for local sources). If it can't be applied, the build proceeds without it and logs why.")] = None,
     ) -> Dict[str, Any]:
         """Create a Code Property Graph from source code for analysis.
 
@@ -1923,6 +2029,12 @@ Examples:
                         "message": "CPG build already in progress for this codebase.",
                     }
 
+                # Original host source root (for rebasing a compile_commands.json
+                # whose absolute paths reference the build machine). Only known for
+                # local sources; None for github/snippet (DB paths then rely on
+                # being relative).
+                source_root_host = None
+
                 if source_type == "github":
                     validate_github_url(source_path)
 
@@ -1965,6 +2077,7 @@ Examples:
                     host_path = await asyncio.to_thread(
                         resolve_host_path, source_path, False
                     )
+                    source_root_host = os.path.realpath(host_path)
 
                     # Refuse a source that contains (or is) the CodeBadger playground.
                     # Copying it would recursively pull in every cached codebase/CPG, and
@@ -2048,6 +2161,10 @@ Examples:
                     services=services,
                     include_paths=include_paths or None,
                     defines=defines or None,
+                    include_globs=include_globs or None,
+                    auto_system_headers=bool(auto_system_headers),
+                    compile_commands=compile_commands or None,
+                    source_root_host=source_root_host,
                 )
                 cpg_queue = services.get("cpg_queue")
                 if cpg_queue:

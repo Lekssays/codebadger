@@ -79,6 +79,9 @@ def load_config(config_path: Optional[str] = None) -> Config:
                 taint_sinks={},
                 min_cpg_file_size=int(os.getenv("MIN_CPG_FILE_SIZE", str(defaults.MIN_CPG_FILE_SIZE))),
                 max_load_mb=int(os.getenv("CPG_MAX_LOAD_MB", str(defaults.CPG_MAX_LOAD_MB))),
+                autodetect_compile_db=os.getenv(
+                    "CPG_AUTODETECT_COMPILE_DB", str(defaults.CPG_AUTODETECT_COMPILE_DB)
+                ).lower() not in ("false", "0", "no", "off"),
                 output_truncation_length=int(os.getenv("OUTPUT_TRUNCATION_LENGTH", str(defaults.OUTPUT_TRUNCATION_LENGTH))),
                 build_workers=int(os.getenv("CPG_BUILD_WORKERS", str(defaults.CPG_BUILD_WORKERS))),
                 build_heap_gb=int(os.getenv("CPG_BUILD_HEAP_GB", str(defaults.CPG_BUILD_HEAP_GB))),

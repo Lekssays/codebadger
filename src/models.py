@@ -200,6 +200,9 @@ class CPGConfig:
     # server. Above this we fail fast with scoping guidance instead of an opaque
     # load failure. Default 2 GB.
     max_load_mb: int = 2048
+    # Auto-use a compile_commands.json found in a C/C++ source tree (highest
+    # fidelity parse) when the caller didn't pass one explicitly.
+    autodetect_compile_db: bool = True
     output_truncation_length: int = 2000  # Max characters for output logging
     build_workers: int = 2
     # Per-frontend build heap cap (GB) — bounds c2cpg/javasrc2cpg/... JVM memory

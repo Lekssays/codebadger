@@ -581,6 +581,135 @@ class TestMCPTools:
 
             assert result_dict["status"] == "generating"
 
+    async def _run_async_build_capture_cmd(self, mock_services, tmp_path, language, **kwargs):
+        """Drive _generate_cpg_async far enough to capture the frontend cmd, then
+        bail (exit_code != 0) so no real load happens. Returns the cmd list."""
+        from unittest.mock import patch
+        import src.tools.core_tools as core_tools
+
+        mock_services["config"].cpg.languages_with_exclusions = []
+        codebase_dir = tmp_path / "src"
+        codebase_dir.mkdir(exist_ok=True)
+        (codebase_dir / "a.txt").write_text("x")
+
+        container = MagicMock()
+        container.exec_run.return_value = MagicMock(exit_code=1, output=b"stop here")
+        docker_client = MagicMock()
+        docker_client.containers.get.return_value = container
+        mock_services["joern_server_manager"].container_name = "codebadger-joern-server"
+
+        with patch.object(core_tools.docker, "from_env", return_value=docker_client):
+            await core_tools._generate_cpg_async(
+                codebase_hash="553642871dd4251d",
+                codebase_dir=str(codebase_dir),
+                cpg_path=str(tmp_path / "cpg.bin"),
+                language=language,
+                container_cpg_path="/playground/cpgs/553642871dd4251d/cpg.bin",
+                services=mock_services,
+                **kwargs,
+            )
+        # exec_run is called as exec_run(cmd=cmd, ...)
+        assert container.exec_run.called
+        return container.exec_run.call_args.kwargs["cmd"]
+
+    @pytest.mark.asyncio
+    async def test_include_globs_adds_scope_exclude_regex_for_any_language(self, mock_services, tmp_path):
+        """include_globs scoping works for non-C languages via --exclude-regex."""
+        cmd = await self._run_async_build_capture_cmd(
+            mock_services, tmp_path, "python", include_globs=["pkg/**"]
+        )
+        assert "--exclude-regex" in cmd
+        rx = cmd[cmd.index("--exclude-regex") + 1]
+        import re
+        # out-of-scope python source excluded; in-scope kept; headers concept n/a
+        assert re.match(rx + r"\Z", "other/mod.py")
+        assert not re.match(rx + r"\Z", "pkg/mod.py")
+
+    @pytest.mark.asyncio
+    async def test_compile_commands_passed_and_rebased_for_c(self, mock_services, tmp_path):
+        """compile_commands is rebased and passed as --compilation-database for C."""
+        import json
+        codebase_dir = tmp_path / "src"
+        codebase_dir.mkdir(exist_ok=True)
+        (codebase_dir / "compile_commands.json").write_text(json.dumps([
+            {"directory": "/orig/root", "file": "/orig/root/a.c", "command": "cc -c a.c"},
+        ]))
+        cmd = await self._run_async_build_capture_cmd(
+            mock_services, tmp_path, "c",
+            compile_commands="compile_commands.json",
+            source_root_host="/orig/root",
+        )
+        assert "--compilation-database" in cmd
+        db_arg = cmd[cmd.index("--compilation-database") + 1]
+        assert db_arg == "/playground/codebases/553642871dd4251d/compile_commands.container.json"
+        # The rebased file was written under the codebase dir with container paths.
+        written = json.loads((codebase_dir / "compile_commands.container.json").read_text())
+        assert written[0]["file"] == "/playground/codebases/553642871dd4251d/a.c"
+
+    @pytest.mark.asyncio
+    async def test_compile_commands_autodetected_for_c(self, mock_services, tmp_path):
+        """A compile_commands.json shipped in the source is used automatically."""
+        import json
+        codebase_dir = tmp_path / "src"
+        codebase_dir.mkdir(exist_ok=True)
+        (codebase_dir / "compile_commands.json").write_text(json.dumps([
+            {"directory": "/orig", "file": "/orig/a.c", "command": "cc -c a.c"},
+        ]))
+        # No compile_commands argument passed -> should be auto-detected.
+        cmd = await self._run_async_build_capture_cmd(
+            mock_services, tmp_path, "c", source_root_host="/orig"
+        )
+        assert "--compilation-database" in cmd
+
+    @pytest.mark.asyncio
+    async def test_compile_commands_autodetect_disabled(self, mock_services, tmp_path):
+        """Auto-detect can be turned off via config."""
+        import json
+        mock_services["config"].cpg.autodetect_compile_db = False
+        codebase_dir = tmp_path / "src"
+        codebase_dir.mkdir(exist_ok=True)
+        (codebase_dir / "compile_commands.json").write_text(json.dumps([{"file": "/o/a.c"}]))
+        cmd = await self._run_async_build_capture_cmd(mock_services, tmp_path, "c")
+        assert "--compilation-database" not in cmd
+
+    @pytest.mark.asyncio
+    async def test_compile_commands_ignored_for_python(self, mock_services, tmp_path):
+        """Non-C frontends don't get --compilation-database (graceful)."""
+        import json
+        codebase_dir = tmp_path / "src"
+        codebase_dir.mkdir(exist_ok=True)
+        (codebase_dir / "compile_commands.json").write_text(json.dumps([{"file": "a.py"}]))
+        cmd = await self._run_async_build_capture_cmd(
+            mock_services, tmp_path, "python", compile_commands="compile_commands.json"
+        )
+        assert "--compilation-database" not in cmd
+
+    @pytest.mark.asyncio
+    async def test_auto_system_headers_flag_c_only(self, mock_services, tmp_path):
+        """--with-include-auto-discovery is added for C when requested, never for python."""
+        c_cmd = await self._run_async_build_capture_cmd(
+            mock_services, tmp_path, "c", auto_system_headers=True
+        )
+        assert "--with-include-auto-discovery" in c_cmd
+
+        py_cmd = await self._run_async_build_capture_cmd(
+            mock_services, tmp_path, "python", auto_system_headers=True
+        )
+        assert "--with-include-auto-discovery" not in py_cmd
+
+    @pytest.mark.asyncio
+    async def test_defines_gated_by_frontend_capability(self, mock_services, tmp_path):
+        """--define is passed for C, but NOT for python (frontend lacks it)."""
+        c_cmd = await self._run_async_build_capture_cmd(
+            mock_services, tmp_path, "c", defines=["FOO=1"]
+        )
+        assert "--define" in c_cmd and "FOO=1" in c_cmd
+
+        py_cmd = await self._run_async_build_capture_cmd(
+            mock_services, tmp_path, "python", defines=["FOO=1"]
+        )
+        assert "--define" not in py_cmd
+
     @pytest.mark.asyncio
     async def test_generate_cpg_async_fails_fast_when_cpg_exceeds_load_ceiling(self, mock_services, tmp_path):
         """A built CPG larger than max_load_mb is failed fast with CPG_TOO_LARGE guidance,
