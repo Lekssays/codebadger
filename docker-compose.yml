@@ -6,31 +6,36 @@ services:
     image: codebadger-joern-server:latest
     container_name: codebadger-joern-server
     ports:
-      # Bind to loopback only. Each Joern server runs the full Ammonite Scala
-      # REPL with no auth by default, so publishing this range on all interfaces
-      # would expose unauthenticated code execution that bypasses the MCP's CPGQL
-      # validation. The MCP reaches these via localhost (host networking). Pool
-      # worker containers already publish on 127.0.0.1 (see joern_server_manager).
+      # Bind to loopback only for external/debug access. In pool mode the MCP
+      # spawns per-CPG worker containers (same image) and reaches them via
+      # host.docker.internal. In shared mode the MCP connects via the Docker
+      # bridge network using the service name, so host-port publishing is only
+      # needed if you want to reach joern directly from the host for debugging.
       - "127.0.0.1:13371-13870:13371-13870"
     volumes:
       # Same host dir the MCP mounts; keep PLAYGROUND_HOST_PATH consistent across services.
       - ${PLAYGROUND_HOST_PATH:-./playground}:/playground
+    networks:
+      - codebadger
     restart: unless-stopped
     mem_limit: ${JOERN_MEM_LIMIT:-100g}
 
   # The MCP server. Drives the host Docker daemon (socket mount) to build CPGs in
-  # codebadger-joern-server and to spawn per-CPG pool worker containers; uses host
-  # networking so the existing localhost:<published-port> wiring (Joern servers,
-  # Postgres, Redis, and its own :4242) all works unchanged. Starts with the full
-  # stack by default. For deps-only / run-MCP-on-host dev, add
-  # `--scale codebadger-mcp=0`.
+  # codebadger-joern-server and to spawn per-CPG pool worker containers. Uses a
+  # named bridge network for Postgres and Redis (via service-name DNS) and
+  # host.docker.internal for pool workers (spawned outside this compose project).
+  # Starts with the full stack by default. For deps-only / run-MCP-on-host dev,
+  # add `--scale codebadger-mcp=0`.
   codebadger-mcp:
     build:
       context: .
       dockerfile: Dockerfile.mcp
     image: codebadger-mcp:latest
     container_name: codebadger-mcp
-    network_mode: host
+    ports:
+      - "127.0.0.1:4242:4242"
+    networks:
+      - codebadger
     volumes:
       # MUST be the SAME host dir joern-server mounts at /playground. PLAYGROUND_HOST_PATH
       # must be ABSOLUTE so pool worker containers (started via the host daemon) bind
@@ -47,8 +52,11 @@ services:
       MCP_HOST: ${MCP_HOST:-0.0.0.0}
       JOERN_WORKER_MODE: pool
       JOERN_PLAYGROUND_HOST_PATH: ${PLAYGROUND_HOST_PATH:-./playground}
-      DATABASE_URL: postgresql://codebadger:codebadger@localhost:${POSTGRES_PORT:-55432}/codebadger
-      REDIS_URL: redis://localhost:${REDIS_PORT:-56379}/0
+      DATABASE_URL: postgresql://codebadger:codebadger@codebadger-postgres:5432/codebadger
+      REDIS_URL: redis://codebadger-redis:6379/0
+      # Pool workers are attached to this network and reached by container name —
+      # no host port is published, so 127.0.0.1 binding is not needed anywhere.
+      JOERN_DOCKER_NETWORK: codebadger
       CPG_QUEUE_BACKEND: ${CPG_QUEUE_BACKEND:-durable}
       # Large-project guard: set CPG_LARGE_PROJECT_GUARD=false for unattended/batch
       # drivers that always intend to build (they can't pass force=True per call).
@@ -68,7 +76,7 @@ services:
       # Scale knobs: HTTP in-flight cap (503 past this) and the pre-build repo-size cap.
       MAX_MCP_CONNECTIONS: ${MAX_MCP_CONNECTIONS:-16}
       MAX_REPO_SIZE_MB: ${MAX_REPO_SIZE_MB:-1024}
-      # Port the MCP binds (host networking, so this is also the host port).
+      # Port the MCP binds (also the host port, matched by the ports: mapping above).
       MCP_PORT: ${MCP_PORT:-4242}
       # Pending CPG-build queue depth, independent of build concurrency. Too small
       # and a high-concurrency client gets ~30% of generations rejected (queue_full).
@@ -105,6 +113,8 @@ services:
       # Kept OUTSIDE ./playground so the Joern containers (which mount the whole
       # playground) can never read or corrupt the database files. See docs/security.md.
       - ${POSTGRES_DATA_PATH:-./pgdata}:/var/lib/postgresql/data
+    networks:
+      - codebadger
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U codebadger -d codebadger"]
@@ -118,10 +128,16 @@ services:
     ports:
       # Non-default host port (override REDIS_PORT) to avoid clashing with a system Redis.
       - "127.0.0.1:${REDIS_PORT:-56379}:6379"
+    networks:
+      - codebadger
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
+
+networks:
+  codebadger:
+    name: codebadger
 

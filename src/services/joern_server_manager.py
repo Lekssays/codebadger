@@ -48,6 +48,7 @@ class JoernServerManager:
         self.worker_mode = (config.joern.worker_mode if config else "shared")
         self.worker_image = (config.joern.worker_image if config else "codebadger-joern-server:latest")
         self.worker_internal_port = (config.joern.worker_internal_port if config else 8080)
+        self.docker_network = (config.joern.docker_network if config else "")
         if self.worker_mode == "pool" and config:
             self.port_manager = PortManager(
                 port_min=config.joern.worker_port_min, port_max=config.joern.worker_port_max
@@ -453,13 +454,24 @@ class JoernServerManager:
             opts = re.sub(r"-Xms\d+[gGmMkK]", f"-Xms{xms}G", opts)
         return opts
 
-    def _port_healthy(self, port: int) -> bool:
+    def _joern_endpoint(self, codebase_hash: str, port: int) -> tuple:
+        """Return (host, port) for connecting to a Joern server.
+
+        Pool mode with docker_network: container name on the fixed internal port
+        (no host port published). Otherwise: server_host and the allocated port.
+        """
+        if self.worker_mode == "pool" and self.docker_network:
+            return (self._worker_name(codebase_hash), self.worker_internal_port)
+        host = self.config.joern.server_host if self.config else "localhost"
+        return (host, port)
+
+    def _port_healthy(self, port: int, codebase_hash: str = "") -> bool:
         import socket
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(1)
-            host = self.config.joern.server_host if self.config else "localhost"
-            result = sock.connect_ex((host, port))
+            host, conn_port = self._joern_endpoint(codebase_hash, port)
+            result = sock.connect_ex((host, conn_port))
             sock.close()
             return result == 0
         except Exception:
@@ -476,7 +488,7 @@ class JoernServerManager:
         with rp.spawn_lock(codebase_hash):
             existing = rp.get_port(codebase_hash)
             if existing is not None:
-                if self._port_healthy(existing):
+                if self._port_healthy(existing, codebase_hash):
                     # Another process already runs this CPG — adopt it locally.
                     self._ports[codebase_hash] = existing
                     self._exec_ids[codebase_hash] = f"exec-{codebase_hash}"
@@ -533,7 +545,7 @@ class JoernServerManager:
                     raise
 
                 startup_timeout = self.config.joern.server_startup_timeout if self.config else 120
-                if self._wait_for_server(port, timeout=startup_timeout):
+                if self._wait_for_server(port, timeout=startup_timeout, codebase_hash=codebase_hash):
                     rp.touch(codebase_hash)
                     logger.info(f"Pooled Joern server for {codebase_hash} ready on port {port}")
                     return port
@@ -597,11 +609,11 @@ class JoernServerManager:
                     self._exec_ids[codebase_hash] = f"exec-{codebase_hash}"
                     self._ports[codebase_hash] = port
 
-                host = self.config.joern.server_host if self.config else "localhost"
-                logger.info(f"Joern server starting, waiting for readiness at {host}:{port}...")
+                conn_host, conn_port = self._joern_endpoint(codebase_hash, port)
+                logger.info(f"Joern server starting, waiting for readiness at {conn_host}:{conn_port}...")
 
                 startup_timeout = self.config.joern.server_startup_timeout if self.config else 120
-                if self._wait_for_server(port, timeout=startup_timeout):
+                if self._wait_for_server(port, timeout=startup_timeout, codebase_hash=codebase_hash):
                     self._touch(codebase_hash)
                     logger.info(f"Joern server for {codebase_hash} started successfully on port {port}")
                     return port
@@ -647,21 +659,42 @@ class JoernServerManager:
         """Pool mode: launch a dedicated cgroup-capped container for this CPG.
 
         Joern binds worker_internal_port inside the container's own network
-        namespace and we publish it to 127.0.0.1:<port> on the host. The
-        mem_limit is the tier reservation, so an OOM kills only this container.
+        namespace and we publish it to 0.0.0.0:<port> on the host so the MCP
+        can reach it via host.docker.internal:<port> when running in a bridge
+        network (macOS Docker Desktop). On Linux the port is still only reachable
+        from the local machine unless your firewall is open. The mem_limit is the
+        tier reservation, so an OOM kills only this container.
         """
         name = self._worker_name(codebase_hash)
         # Clear any stale container with the same name so the run() can't collide.
         self._remove_worker_container(name)
-        # Removing the previous container doesn't synchronously release the host
-        # port: docker-proxy/iptables teardown plus the kernel TIME_WAIT can leave
-        # 127.0.0.1:<port> briefly occupied. Rotating allocation makes back-to-back
-        # reuse rare, but wait it out so run()'s publish can't race a stale mapping.
-        self._wait_host_port_free(port)
-        logger.info(
-            f"Launching worker container {name} (image {self.worker_image}, "
-            f"mem_limit {mem_limit_mb}MB) on 127.0.0.1:{port} -> :{self.worker_internal_port}"
-        )
+
+        if self.docker_network:
+            # Bridge-network mode: attach to the named network so the MCP can
+            # reach this worker by container name — no host port published.
+            logger.info(
+                f"Launching worker container {name} (image {self.worker_image}, "
+                f"mem_limit {mem_limit_mb}MB) on network {self.docker_network}:{self.worker_internal_port}"
+            )
+            run_kwargs: dict = dict(
+                network=self.docker_network,
+            )
+        else:
+            # Host-port mode (legacy / running MCP on the host directly).
+            # Removing the previous container doesn't synchronously release the
+            # host port: docker-proxy/iptables teardown plus TIME_WAIT can leave
+            # 127.0.0.1:<port> briefly occupied. Rotating allocation makes
+            # back-to-back reuse rare, but wait it out so run()'s publish can't
+            # race a stale mapping.
+            self._wait_host_port_free(port)
+            logger.info(
+                f"Launching worker container {name} (image {self.worker_image}, "
+                f"mem_limit {mem_limit_mb}MB) on 127.0.0.1:{port} -> :{self.worker_internal_port}"
+            )
+            run_kwargs = dict(
+                ports={f"{self.worker_internal_port}/tcp": ("127.0.0.1", port)},
+            )
+
         try:
             self.docker_client.containers.run(
                 image=self.worker_image,
@@ -674,22 +707,16 @@ class JoernServerManager:
                 environment={"JAVA_OPTS": java_opts},
                 working_dir="/tmp",
                 mem_limit=f"{mem_limit_mb}m",
-                ports={f"{self.worker_internal_port}/tcp": ("127.0.0.1", port)},
                 # Read-only playground: a query worker only LOADS its cpg.bin and
                 # works in /tmp (Joern's workspace), never writing under
                 # /playground — verified end-to-end. Mounting ro means a query
                 # that escapes the CPGQL denylist can't tamper with or plant files
                 # in other tenants' CPGs/source. The build container (compose)
                 # keeps rw since it writes the CPGs.
-                # NOTE (defense-in-depth follow-ups, not done here): mounting only
-                # this hash's cpg dir would also block cross-tenant *reads*, and
-                # restricting egress would contain exfiltration — but the worker
-                # is an HTTP server reached via its published port, so a blanket
-                # network_mode="none" would make it unreachable; an egress-only
-                # firewall/dedicated network is the right tool there.
                 volumes={self.playground_host_path: {"bind": "/playground", "mode": "ro"}},
                 detach=True,
                 labels={"codebadger.role": "joern-worker", "codebadger.hash": codebase_hash},
+                **run_kwargs,
             )
         except ImageNotFound:
             raise RuntimeError(
@@ -823,18 +850,18 @@ class JoernServerManager:
         if port is None:
             raise RuntimeError(f"No Joern server running for codebase {codebase_hash}")
 
+        conn_host, conn_port = self._joern_endpoint(codebase_hash, port)
+
         cached = self._clients.get(codebase_hash)
         if cached is not None:
-            if cached.port == port:
+            if cached.host == conn_host and cached.port == conn_port:
                 self._touch(codebase_hash)
                 return cached
-            # The worker was re-spawned on a different port (e.g. evicted and
-            # reactivated by another process), so the cached client points at a
-            # dead port — every request would get "connection refused". Drop it
-            # and rebuild against the current registry port.
+            # The worker was re-spawned (e.g. evicted and reactivated by another
+            # process), so the cached client points at a dead endpoint. Drop it.
             logger.info(
-                f"Rebuilding stale client for {codebase_hash}: cached port "
-                f"{cached.port} != current port {port}"
+                f"Rebuilding stale client for {codebase_hash}: "
+                f"{cached.host}:{cached.port} -> {conn_host}:{conn_port}"
             )
             try:
                 cached.close()
@@ -856,8 +883,8 @@ class JoernServerManager:
             }
 
         client = JoernServerClient(
-            host=self.config.joern.server_host if self.config else "localhost",
-            port=port,
+            host=conn_host,
+            port=conn_port,
             username=self.config.joern.server_auth_username if self.config else None,
             password=self.config.joern.server_auth_password if self.config else None,
             config=http_config,
@@ -865,7 +892,7 @@ class JoernServerManager:
 
         self._clients[codebase_hash] = client
         self._touch(codebase_hash)
-        logger.debug(f"Created and cached JoernServerClient for {codebase_hash} on port {port}")
+        logger.debug(f"Created and cached JoernServerClient for {codebase_hash} at {conn_host}:{conn_port}")
         return client
 
     def load_cpg(self, codebase_hash: str, cpg_path: str, timeout: int = 0) -> bool:
@@ -1099,7 +1126,7 @@ class JoernServerManager:
                     # race that caused booting servers to be reaped under load.
                     if codebase_hash in self._spawning:
                         continue
-                    if not await self._is_server_healthy(port):
+                    if not await self._is_server_healthy(port, codebase_hash):
                         logger.warning(f"Joern server {codebase_hash}:{port} is dead, respawning")
                         self.terminate_server(codebase_hash)
                         if self._restart_callback and self.codebase_tracker:
@@ -1125,15 +1152,15 @@ class JoernServerManager:
             except Exception as e:
                 logger.error(f"Watchdog loop error: {e}", exc_info=True)
 
-    async def _is_server_healthy(self, port: int) -> bool:
-        host = self.config.joern.server_host if self.config else "localhost"
+    async def _is_server_healthy(self, port: int, codebase_hash: str = "") -> bool:
+        conn_host, conn_port = self._joern_endpoint(codebase_hash, port)
         import requests as _requests
         loop = asyncio.get_running_loop()
         try:
             response = await asyncio.wait_for(
                 loop.run_in_executor(
                     None,
-                    lambda: _requests.get(f"http://{host}:{port}", timeout=5),
+                    lambda: _requests.get(f"http://{conn_host}:{conn_port}", timeout=5),
                 ),
                 timeout=8,
             )
@@ -1155,10 +1182,10 @@ class JoernServerManager:
         except Exception as e:
             logger.error(f"Watchdog: failed to respawn {codebase_hash}: {e}", exc_info=True)
 
-    def _wait_for_server(self, port: int, timeout: int = 30) -> bool:
+    def _wait_for_server(self, port: int, timeout: int = 30, codebase_hash: str = "") -> bool:
         import requests
-        host = self.config.joern.server_host if self.config else "localhost"
-        url = f"http://{host}:{port}"
+        conn_host, conn_port = self._joern_endpoint(codebase_hash, port)
+        url = f"http://{conn_host}:{conn_port}"
         deadline = time.time() + timeout
 
         # Poll until the HTTP server responds. We don't do a prior TCP-only check
@@ -1172,7 +1199,7 @@ class JoernServerManager:
                     time.sleep(sleep_time)
                     return True
             except Exception as e:
-                logger.debug(f"HTTP check on :{port} failed: {e}")
+                logger.debug(f"HTTP check on {url} failed: {e}")
             time.sleep(1)
 
         return False
