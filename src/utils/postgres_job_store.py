@@ -206,6 +206,26 @@ class PostgresJobStore:
             logger.error(f"Postgres get_job {job_id} failed: {e}")
             return None
 
+    def has_active_job(self, codebase_hash: str, job_type: str = "generate_cpg") -> bool:
+        """True if a queued or running job exists for this codebase.
+
+        Used by get_cpg_status to tell a still-building/queued CPG apart from one
+        whose worker died — only the latter (no active job + past deadline) is
+        reconciled to FAILED. On error, return True (fail safe: don't condemn a
+        build just because the DB hiccuped).
+        """
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT 1 FROM jobs WHERE codebase_hash = %s AND job_type = %s "
+                    "AND status IN ('queued', 'running') LIMIT 1",
+                    (codebase_hash, job_type),
+                ).fetchone()
+                return row is not None
+        except Exception as e:
+            logger.error(f"Postgres has_active_job failed for {codebase_hash}: {e}")
+            return True
+
     def count_jobs(self, status: Optional[str] = None) -> int:
         try:
             with self._connect() as conn:

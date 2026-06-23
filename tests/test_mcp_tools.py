@@ -466,6 +466,78 @@ class TestMCPTools:
                 assert result_dict["container_cpg_path"] == "<redacted:container-path>"
 
     @pytest.mark.asyncio
+    async def test_get_cpg_status_generating_past_deadline_no_worker_reconciles_failed(self, mock_services):
+        """A 'generating' build past its deadline with no live worker is reconciled to FAILED."""
+        from datetime import datetime, timedelta, timezone
+        from src.tools.core_tools import register_core_tools
+
+        past = (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat()
+        mock_services["codebase_tracker"].get_codebase.return_value = CodebaseInfo(
+            codebase_hash="553642871dd4251d",
+            source_type="github",
+            source_path="https://github.com/test/repo",
+            language="c",
+            cpg_path=None,
+            joern_port=None,
+            metadata={
+                "status": "generating",
+                "generation_started_at": past,
+                "generation_deadline": past,  # already elapsed
+            },
+        )
+        # No live build job for this hash.
+        cpg_queue = MagicMock()
+        cpg_queue.is_in_flight.return_value = False
+        mock_services["cpg_queue"] = cpg_queue
+
+        mcp = FastMCP("TestServer")
+        register_core_tools(mcp, mock_services)
+
+        async with Client(mcp) as client:
+            result = await client.call_tool("get_cpg_status", {"codebase_hash": "553642871dd4251d"})
+            import json
+            result_dict = json.loads(result.content[0].text)
+
+            assert result_dict["status"] == "failed"
+            assert result_dict["error_code"] == "GENERATION_TIMEOUT"
+            mock_services["codebase_tracker"].update_codebase.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_get_cpg_status_generating_with_live_worker_stays_generating(self, mock_services):
+        """A 'generating' build past its deadline but with a live worker is NOT condemned."""
+        from datetime import datetime, timedelta, timezone
+        from src.tools.core_tools import register_core_tools
+
+        past = (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat()
+        mock_services["codebase_tracker"].get_codebase.return_value = CodebaseInfo(
+            codebase_hash="553642871dd4251d",
+            source_type="github",
+            source_path="https://github.com/test/repo",
+            language="c",
+            cpg_path=None,
+            joern_port=None,
+            metadata={
+                "status": "generating",
+                "generation_started_at": past,
+                "generation_deadline": past,
+            },
+        )
+        # A worker is still actively building/queued.
+        cpg_queue = MagicMock()
+        cpg_queue.is_in_flight.return_value = True
+        mock_services["cpg_queue"] = cpg_queue
+
+        mcp = FastMCP("TestServer")
+        register_core_tools(mcp, mock_services)
+
+        async with Client(mcp) as client:
+            result = await client.call_tool("get_cpg_status", {"codebase_hash": "553642871dd4251d"})
+            import json
+            result_dict = json.loads(result.content[0].text)
+
+            assert result_dict["status"] == "generating"
+
+    @pytest.mark.asyncio
     async def test_get_cpg_status_not_found(self, mock_services):
         """Test getting CPG status when CPG doesn't exist (valid-format but unknown hash)"""
         from src.tools.core_tools import register_core_tools

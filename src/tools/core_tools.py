@@ -7,6 +7,7 @@ Provides core CPG management functionality
 import asyncio
 import uuid
 from contextlib import nullcontext
+from datetime import datetime, timedelta, timezone
 import docker
 import hashlib
 import io
@@ -104,6 +105,40 @@ def _get_active_restart_task(services: dict, codebase_hash: str) -> Optional[asy
         registry.pop(codebase_hash, None)
         return None
     return task
+
+
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _parse_iso(value: Optional[str]) -> Optional[datetime]:
+    """Parse an ISO-8601 timestamp, tolerating a missing tz (assume UTC)."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+    except (ValueError, TypeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _build_job_alive(services: dict, codebase_hash: str) -> bool:
+    """True if a CPG build for this codebase is still queued or running.
+
+    Used to distinguish a genuinely in-progress/queued build from one whose
+    worker died. On any uncertainty (no queue, queue lacks the probe), return
+    True so we never condemn a live build.
+    """
+    queue = services.get("cpg_queue")
+    if queue is None or not hasattr(queue, "is_in_flight"):
+        return True
+    try:
+        return bool(queue.is_in_flight(codebase_hash))
+    except Exception as e:
+        logger.warning(f"_build_job_alive probe failed for {codebase_hash}: {e}")
+        return True
 
 
 def _schedule_restart_server_task(codebase_hash: str, container_cpg_path: str, services: dict) -> bool:
@@ -1078,6 +1113,10 @@ class CPGGenerationQueue:
         """Jobs currently queued or being generated (dedup set size)."""
         return len(self._in_flight)
 
+    def is_in_flight(self, codebase_hash: str) -> bool:
+        """True if a build for this codebase is queued or running."""
+        return codebase_hash in self._in_flight
+
     @property
     def maxsize(self) -> int:
         return self._maxsize
@@ -1196,6 +1235,10 @@ class DurableCPGQueue:
     @property
     def in_flight(self) -> int:
         return self.store.count_jobs("queued") + self.store.count_jobs("running")
+
+    def is_in_flight(self, codebase_hash: str) -> bool:
+        """True if a build for this codebase is queued or running in the DB."""
+        return self.store.has_active_job(codebase_hash, self.JOB_TYPE)
 
     @property
     def maxsize(self) -> int:
@@ -1664,6 +1707,15 @@ Examples:
                 logger.info(f"CPG directory ready: {cpg_dir}")
 
                 # Store initial metadata in DB before CPG generation begins.
+                # Stamp a generation deadline so get_cpg_status can reconcile a
+                # build whose worker died (status stuck on 'generating' forever).
+                # Budget = timeout + a generous grace for queue wait, server spawn
+                # and CPG load; only a past-deadline build with NO live worker is
+                # condemned, so an over-grace estimate just delays the safety net.
+                _gen_timeout = config.cpg.generation_timeout if config else 600
+                _gen_grace = config.cpg.generation_deadline_grace if config else 600
+                _started_at = _now_utc()
+                _deadline = _started_at + timedelta(seconds=_gen_timeout + _gen_grace)
                 codebase_tracker.save_codebase(
                     codebase_hash=codebase_hash,
                     source_type=source_type,
@@ -1675,7 +1727,9 @@ Examples:
                         "container_codebase_path": container_codebase_path,
                         "container_cpg_path": container_cpg_path,
                         "repository": repository_url,
-                        "status": SessionStatus.GENERATING
+                        "status": SessionStatus.GENERATING,
+                        "generation_started_at": _started_at.isoformat(),
+                        "generation_deadline": _deadline.isoformat(),
                     }
                 )
 
@@ -1795,6 +1849,40 @@ Examples:
 
             joern_port = codebase_info.joern_port
             joern_server_manager = services.get("joern_server_manager")
+
+            # Reconcile a stranded "generating": a build can sit in GENERATING
+            # forever if its worker died (process restart, OOM kill, in-memory
+            # queue lost the job) — there is otherwise no terminal transition, so
+            # pollers block indefinitely. Only condemn it once it is BOTH past its
+            # deadline AND has no live build job (a queued/running job, however
+            # long, is left alone). _build_job_alive fails safe (True on doubt).
+            if status in ("generating", SessionStatus.GENERATING):
+                deadline = _parse_iso(codebase_info.metadata.get("generation_deadline"))
+                past_deadline = deadline is not None and _now_utc() > deadline
+                if past_deadline and not _build_job_alive(services, codebase_hash):
+                    config = services.get("config")
+                    timeout = config.cpg.generation_timeout if config else 600
+                    status = "failed"
+                    new_meta = {
+                        **codebase_info.metadata,
+                        "status": SessionStatus.FAILED,
+                        "error_code": "GENERATION_TIMEOUT",
+                        "error": (
+                            f"CPG build exceeded its deadline ({timeout}s + grace) with "
+                            "no live worker — the build worker likely died or was lost. "
+                            "Regenerate with generate_cpg."
+                        ),
+                    }
+                    codebase_info.metadata.update(new_meta)
+                    codebase_tracker.update_codebase(
+                        codebase_hash=codebase_hash,
+                        joern_port=None,
+                        metadata=new_meta,
+                    )
+                    logger.warning(
+                        f"Reconciled stranded 'generating' CPG {codebase_hash} to FAILED "
+                        f"(past deadline, no live build job)"
+                    )
 
             # Reconcile a stranded "loading": a codebase left in LOADING with a
             # recorded error, or with no active restart task behind it, is a

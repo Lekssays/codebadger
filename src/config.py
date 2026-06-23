@@ -70,6 +70,7 @@ def load_config(config_path: Optional[str] = None) -> Config:
             ),
             cpg=CPGConfig(
                 generation_timeout=int(os.getenv("CPG_GENERATION_TIMEOUT", str(defaults.CPG_GENERATION_TIMEOUT))),
+                generation_deadline_grace=int(os.getenv("CPG_GENERATION_DEADLINE_GRACE", str(defaults.CPG_GENERATION_DEADLINE_GRACE))),
                 max_repo_size_mb=int(os.getenv("MAX_REPO_SIZE_MB", str(defaults.MAX_REPO_SIZE_MB))),
                 supported_languages=defaults.SUPPORTED_LANGUAGES,
                 exclusion_patterns=defaults.EXCLUSION_PATTERNS,

@@ -184,6 +184,11 @@ class CPGConfig:
     """CPG generation configuration"""
 
     generation_timeout: int = 600  # 10 minutes
+    # Extra budget on top of generation_timeout before get_cpg_status will
+    # reconcile a 'generating' build (whose worker is no longer alive) to FAILED.
+    # Covers queue wait + server spawn + CPG load. A build with a live worker is
+    # never condemned regardless of this value.
+    generation_deadline_grace: int = 600  # 10 minutes
     max_repo_size_mb: int = 500
     supported_languages: Optional[List[str]] = None
     exclusion_patterns: Optional[List[str]] = None

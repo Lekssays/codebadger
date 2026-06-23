@@ -92,6 +92,9 @@ HTTP_BACKOFF_FACTOR = 0.3
 # 30 min: c2cpg/frontends on large repos (v8, full wireshark) routinely exceed
 # 10 min. Scope the source path or lower this for small-only batches.
 CPG_GENERATION_TIMEOUT = 1800
+# Extra budget beyond the generation timeout before a 'generating' build with no
+# live worker is reconciled to FAILED (covers queue wait + spawn + load).
+CPG_GENERATION_DEADLINE_GRACE = 900
 MAX_REPO_SIZE_MB = 1024
 MIN_CPG_FILE_SIZE = 1024
 OUTPUT_TRUNCATION_LENGTH = 2000
