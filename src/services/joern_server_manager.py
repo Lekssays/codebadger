@@ -669,6 +669,26 @@ class JoernServerManager:
         # Clear any stale container with the same name so the run() can't collide.
         self._remove_worker_container(name)
 
+        # Diagnostic: which reachability mode are we about to use? When the MCP runs
+        # containerized (the default compose deployment), pool workers MUST be reached
+        # over the shared docker network by container name — host-port publishing binds
+        # 127.0.0.1 on the host, which the MCP container's own loopback cannot reach, so
+        # _wait_for_server times out and every worker "fails to become ready" despite a
+        # healthy JVM. If docker_network is empty here while running containerized, that
+        # is the misconfig.
+        logger.info(
+            f"_start_worker_container {codebase_hash}: worker_mode={self.worker_mode!r} "
+            f"docker_network={self.docker_network!r} -> "
+            f"{'network (by container name)' if self.docker_network else 'host-port (127.0.0.1 publish)'}"
+        )
+        if self.worker_mode == "pool" and not self.docker_network:
+            logger.warning(
+                f"Pool worker {codebase_hash} will publish on host 127.0.0.1:{port} (no docker_network). "
+                "If the MCP itself runs in a container, it cannot reach this loopback-published port and "
+                "the readiness probe will time out. Set JOERN_DOCKER_NETWORK to the shared compose network "
+                "(e.g. 'codebadger') so workers are reached by container name."
+            )
+
         if self.docker_network:
             # Bridge-network mode: attach to the named network so the MCP can
             # reach this worker by container name — no host port published.

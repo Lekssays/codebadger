@@ -33,7 +33,15 @@ services:
     image: codebadger-mcp:latest
     container_name: codebadger-mcp
     ports:
-      - "127.0.0.1:4242:4242"
+      # Host publish for the MCP. MCP_PORT (default 4242, from .env) sets BOTH the
+      # in-container listen port and the host port. MCP_PUBLISH_HOST is the HOST
+      # interface the port is published on — default 127.0.0.1 (loopback only =
+      # the safe default; the MCP can drive the Docker daemon and read local
+      # sources, so do not expose it casually). Set MCP_PUBLISH_HOST=0.0.0.0 (or a
+      # specific host IP) to reach it from other machines. NOTE: this is the HOST
+      # bind, distinct from MCP_HOST (the in-container bind, which stays 0.0.0.0 so
+      # the published mapping can reach the app).
+      - "${MCP_PUBLISH_HOST:-127.0.0.1}:${MCP_PORT:-4242}:${MCP_PORT:-4242}"
     networks:
       - codebadger
     volumes:

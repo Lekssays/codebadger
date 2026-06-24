@@ -449,6 +449,11 @@ async def app_lifespan(server: FastMCP):
                     redis_url=redis_url,
                 )
                 logger.info(f"Docker container '{container_name}' is running")
+                logger.info(
+                    "JoernServerManager built: worker_mode=%r docker_network=%r "
+                    "(pool mode needs a non-empty docker_network when the MCP is containerized)",
+                    joern_server_manager.worker_mode, joern_server_manager.docker_network,
+                )
             except Exception as e:
                 container_issue = f"Failed to initialize Joern server manager: {e}"
                 services['startup_issues'].append(container_issue)
