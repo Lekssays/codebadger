@@ -984,7 +984,7 @@ class JoernServerManager:
         port = self.get_server_port(codebase_hash)
         if not port:
             return False
-        return self._port_healthy(port)
+        return self._port_healthy(port, codebase_hash)
 
     def terminate_server(self, codebase_hash: str) -> bool:
         try:

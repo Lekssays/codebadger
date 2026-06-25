@@ -18,6 +18,7 @@ joern:
   # worker_mode: shared = query servers run as processes in the build container;
   #              pool = each CPG in its own cgroup-capped container (needs worker image + Docker).
   worker_mode: ${JOERN_WORKER_MODE:shared}
+  docker_network: ${JOERN_DOCKER_NETWORK:}
   worker_image: ${JOERN_WORKER_IMAGE:codebadger-joern-server:latest}
   worker_port_min: ${JOERN_WORKER_PORT_MIN:14000}
   worker_port_max: ${JOERN_WORKER_PORT_MAX:14999}
