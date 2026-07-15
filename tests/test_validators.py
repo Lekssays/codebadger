@@ -190,10 +190,10 @@ class TestValidateLanguage:
     def test_invalid_language(self):
         """Test invalid programming language"""
         with pytest.raises(ValidationError) as exc_info:
-            validate_language("rust")
+            validate_language("cobol")
 
         msg = str(exc_info.value)
-        assert "Unsupported language 'rust'" in msg
+        assert "Unsupported language 'cobol'" in msg
         # The message must list the accepted ids so the caller can self-correct.
         assert "java" in msg and "swift" in msg
 

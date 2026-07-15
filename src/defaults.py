@@ -101,9 +101,14 @@ OUTPUT_TRUNCATION_LENGTH = 2000
 
 SUPPORTED_LANGUAGES = [
     "java", "c", "cpp", "javascript", "python", "go",
-    "kotlin", "csharp", "ghidra", "jimple", "php", "ruby", "swift"
+    "kotlin", "csharp", "ghidra", "jimple", "php", "ruby", "swift",
+    "rust"
 ]
 
+# rust OMITTED (like go): rust2cpg loads the crate through cargo and matches
+# --exclude-regex against the resolved file paths, and the default
+# exclusion_patterns were observed to collapse a Rust CPG to 0 methods.
+# Rust stays in SUPPORTED_LANGUAGES; it is just built without exclusions.
 LANGUAGES_WITH_EXCLUSIONS = [
     "c", "cpp", "java", "javascript", "python", "go",
     "kotlin", "csharp", "php", "ruby"
@@ -334,6 +339,7 @@ FRONTEND_CAPABILITIES = {
     "rubysrc2cpg":     {"exclude_regex"},
     "jimple2cpg":      {"exclude_regex"},
     "ghidra2cpg":      {"exclude_regex"},
+    "rust2cpg":        {"exclude_regex"},
 }
 
 # Capability every frontend has, used as the safe fallback for unknown binaries.
@@ -353,6 +359,7 @@ LANGUAGE_COMMANDS = {
     "php":        "/opt/joern/joern-cli/php2cpg",
     "ruby":       "/opt/joern/joern-cli/rubysrc2cpg",
     "swift":      "/opt/joern/joern-cli/swiftsrc2cpg.sh",
+    "rust":       "/opt/joern/joern-cli/rust2cpg",
 }
 
 
@@ -386,6 +393,7 @@ SCOPE_SOURCE_EXTENSIONS = {
     "php":        ["php", "phtml", "php3", "php4", "php5"],
     "ruby":       ["rb"],
     "swift":      ["swift"],
+    "rust":       ["rs"],
 }
 
 # Default file extension per language, used to name a pasted code snippet
@@ -403,6 +411,7 @@ LANGUAGE_EXTENSIONS = {
     "php":        "php",
     "ruby":       "rb",
     "swift":      "swift",
+    "rust":       "rs",
 }
 
 # Upper bound on a pasted code snippet (source_type="snippet"). Snippets are meant

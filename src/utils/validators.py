@@ -38,6 +38,7 @@ SUPPORTED_LANGUAGES = [
     "php",
     "ruby",
     "swift",
+    "rust",
 ]
 
 
@@ -258,6 +259,11 @@ _LANG_SIGNALS = {
     "swift": [
         (r"\bguard\b", 2), (r"\bimport\s+Swift", 3), (r"\bfunc\s+\w+\s*\(", 1),
         (r"\blet\s+\w+", 1), (r"\bvar\s+\w+\s*:", 1),
+    ],
+    "rust": [
+        (r"\bfn\s+\w+\s*\(", 2), (r"\blet\s+mut\b", 3), (r"\w+!\s*\(", 2),
+        (r"\buse\s+std::", 3), (r"->\s*\w", 1), (r"\bimpl\b", 2),
+        (r"#\[\w+", 2), (r"::\w", 1),
     ],
 }
 _LANG_SIGNALS_COMPILED = {
