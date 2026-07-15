@@ -1,6 +1,6 @@
 """CodeBadger Server - A Model Context Protocol server for static code analysis using Joern."""
 
-__version__ = "0.6.1-beta"
+__version__ = "0.6.2-beta"
 __author__ = "Ahmed Lekssays"
 __email__ = "ahmed@lekssays.com"
 
