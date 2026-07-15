@@ -73,6 +73,7 @@ cpg:
     - php
     - ruby
     - swift
+    - rust
   # NOTE: every token below is anchored with a leading `(?:^|.*/)` boundary
   # (start-of-string OR a literal `/`). `--exclude-regex` matching semantics
   # differ by frontend: JVM frontends (c2cpg, javasrc2cpg, pysrc2cpg, ...)
@@ -222,6 +223,10 @@ cpg:
     - swift
     - jimple
     - ghidra
+    # rust OMITTED (like go): rust2cpg matches --exclude-regex against
+    # cargo-resolved paths, so the default exclusion_patterns collapse the CPG
+    # to 0 methods. Rust stays in supported_languages; it is built without
+    # exclusions.
 
   taint_sources:
     c:
